@@ -1,5 +1,5 @@
 // 개발용: 가짜 sim으로 몬스터 경주장 '함께 경주' 연출을 보는 미리보기 (게임에 쓰지 않는다).
-// sim이 경주 lifecycle(RaceState: gathering → running → done)을 이을 때의 모습을 미리 본다: 손님이 하나씩 앉으며 선수에 걸고,
+// sim이 경주 lifecycle(단체 놀이 GroupState: gathering → running → done)을 이을 때의 모습을 미리 본다: 손님이 하나씩 앉으며 선수에 걸고,
 // 카운트다운 뒤 경주 하나를 같이 보고, 끝나면 자리마다 roundFinished + monsterReact.
 //   ?n=1~6 (손님 수) &comeback=1 &photo=1 &seed= &at=초(그 시각에서 멈춤; 없으면 계속 돈다) &gather=초(모이는 시간, 기본 5)
 //   &w=&h= (패널 크기) &closed=1 (해설자 없음)
@@ -12,7 +12,7 @@ import { BOOTH_IDS, BOOTHS, HOST_PRESETS, ODDS, type OutcomeTier, type SpeciesId
 import type { SimApi } from '../../../sim/api.ts';
 import { generateRace, raceOutcome } from '../../../sim/race.ts';
 import type { BoothState, GameState, Monster, RacerIndex, Reaction, SimEvents } from '../../../sim/types.ts';
-import { idleRace } from '../../../sim/race.ts';
+import { idleGroup } from '../../../sim/group/core.ts';
 import { loadArt } from '../../art.ts';
 import { CloseupView } from '../closeupView.ts';
 
@@ -44,7 +44,7 @@ const bs: BoothState = {
   queue: [],
   rounds: Array.from({ length: 6 }, () => null),
   cheer: null,
-  race: idleRace(),
+  group: idleGroup(),
 };
 const state = {
   booths: Object.fromEntries(BOOTH_IDS.map((b) => [b, bs])),
@@ -66,13 +66,13 @@ let cleared = false;
 
 function tickSim(dt: number): void {
   clock += dt;
-  const race = bs.race!;
+  const race = bs.group!;
   // 모이기: 손님이 gather초 동안 하나씩 앉는다.
   for (let i = 0; i < n; i++) {
     const at = (i / Math.max(1, n)) * gather * 0.6;
     if (clock >= at && bs.seats[i] === null && race.phase !== 'done' && !cleared) {
       bs.seats[i] = i + 1;
-      race.participants.push({ monster: i + 1, seat: i, racer: bets[i] ?? 0, bet: 10, fee: 2 });
+      race.participants.push({ monster: i + 1, seat: i, pick: bets[i] ?? 0, role: 'bettor', bet: 10, fee: 2 });
       if (race.phase === 'idle') {
         race.phase = 'gathering';
         race.countdown = gather;
@@ -85,20 +85,20 @@ function tickSim(dt: number): void {
       race.phase = 'running';
       race.elapsed = 0;
       race.duration = D;
-      race.result = result;
-      bus.emit('raceStarted', { booth: 'race', race });
+      race.play = { kind: 'race', race: result, end: D, tracks: result.keys, events: [], outcomes: race.participants.map((p) => raceOutcome(result, p.pick as RacerIndex)) };
+      bus.emit('groupStarted', { booth: 'race', group: race });
     }
   } else if (race.phase === 'running') {
     race.elapsed += dt;
     if (race.elapsed >= race.duration) {
       race.phase = 'done';
       race.countdown = 3;
-      bus.emit('raceFinished', { booth: 'race', race });
+      bus.emit('groupFinished', { booth: 'race', group: race });
     }
   } else if (race.phase === 'done' && !finished) {
     finished = true;
     for (const p of race.participants) {
-      const outcome = raceOutcome(result, p.racer);
+      const outcome = raceOutcome(result, p.pick as RacerIndex);
       const row = ODDS.race as Partial<Record<OutcomeTier, readonly [number, number]>>;
       const payout = Math.min(bs.pot, Math.round(p.bet * (row[outcome.tier]?.[1] ?? 0)));
       bs.pot -= payout;
@@ -111,7 +111,7 @@ function tickSim(dt: number): void {
     if (race.countdown <= 0 && !cleared) {
       cleared = true;
       for (let i = 0; i < 6; i++) bs.seats[i] = null;
-      Object.assign(race, idleRace());
+      Object.assign(race, idleGroup());
     }
   }
 }

@@ -18,3 +18,6 @@ docs/screens/
 # 스프라이트 도구의 시험 출력과 Seedance 원본 영상
 tools/sprite/test-out/
 tools/anim-raw/
+
+# Git Bash 충돌 기록
+*.stackdump

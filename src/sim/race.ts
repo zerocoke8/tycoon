@@ -3,17 +3,13 @@
 // 중간 키에서는 순위가 몇 번 바뀐다 (흔들림). 역전 경주는 1등 선수가 RACE.comebackAt 지점에서 꼴찌다.
 // 화면은 raceProgress(result, 선수, 초)로 선수 자리를, raceStandings로 지금 순위를 읽는다.
 // 손님마다의 등급은 raceOutcome(result, 건 선수): 1등 win(역전이면 jackpot), 사진 판정 2등 nearMiss, 나머지 lose.
+// 경주장의 흐름(모이기·출발·응원)은 단체 놀이 엔진 (sim/group/race.ts 모듈, sim.ts). 오리배 경주도 같은 경주를 쓴다 (sim/group/boat.ts).
 
 import type { Rng } from '../core/rng.ts';
 import { ODDS, RACE, type OutcomeTier } from '../data/defs.ts';
-import type { RaceKey, RaceResult, RaceState, RacerIndex, RoundOutcome } from './types.ts';
+import type { RaceKey, RaceResult, RacerIndex, RoundOutcome } from './types.ts';
 
 export const RACERS: readonly RacerIndex[] = [0, 1, 2, 3];
-
-/** 쉬는 경주장 (BoothState.race의 처음 값). */
-export function idleRace(): RaceState {
-  return { phase: 'idle', countdown: 0, elapsed: 0, duration: 0, participants: [], result: null };
-}
 
 /** 중간 키 시각 (1등 결승 시각의 비율). 역전 지점(RACE.comebackAt)이 꼭 들어 있다. */
 const SAMPLES: readonly number[] = [0.12, 0.26, 0.41, 0.56, RACE.comebackAt, 0.86];
@@ -228,12 +224,13 @@ export function pickRacer(rng: Rng, species: string): RacerIndex {
   return rng.pick(RACERS);
 }
 
-export function raceOutcome(result: RaceResult, racer: RacerIndex): RoundOutcome {
+/** 선수 racer에 건 손님 한판 (booth = 'race' 경주장, 'boat' 오리배: 배당은 그 부스의 ODDS, 세부 kind도 그 부스). */
+export function raceOutcome(result: RaceResult, racer: RacerIndex, booth: 'race' | 'boat' = 'race'): RoundOutcome {
   const tier = raceTier(result, racer);
-  const row = ODDS.race as Partial<Record<OutcomeTier, readonly [number, number]>>;
+  const row = ODDS[booth] as Partial<Record<OutcomeTier, readonly [number, number]>>;
   return {
     tier,
     multiplier: row[tier]?.[1] ?? 0,
-    detail: { kind: 'race', racer, place: racePlace(result, racer), comeback: result.comeback, photoFinish: result.photoFinish },
+    detail: { kind: booth, racer, place: racePlace(result, racer), comeback: result.comeback, photoFinish: result.photoFinish },
   };
 }

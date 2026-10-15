@@ -2,7 +2,7 @@
 // sim은 SimApi로만 쓰고, 화면 쪽은 UiHooks로만 부른다. main.ts가 매 프레임 update(dt)를 부른다.
 
 import './ui.css';
-import type { BoothId, BuildingId } from '../data/defs.ts';
+import { isGroupBooth, type BoothId, type BuildingId } from '../data/defs.ts';
 import type { Result, SimApi } from '../sim/api.ts';
 import type { MonsterId } from '../sim/types.ts';
 import type { UiApi, UiHooks } from '../view/contracts.ts';
@@ -176,6 +176,7 @@ export class Ui implements UiApi, UiCtx {
     this.booth.show(b);
     if (role !== undefined) this.booth.focusRole(role);
     this.goal.mark('booth');
+    if (isGroupBooth(b)) this.goal.markWatched(b);
   }
 
   openHire(): void {

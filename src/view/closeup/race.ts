@@ -6,7 +6,7 @@
 // 사육사(가운데 오른쪽). 상금 항아리는 경주로 옆 풀밭. 사진 판정 경주는 1등이 결승선에 닿는 순간 화면이 멈추고 '찰칵' (보여 주는 시계만 멈췄다 따라잡는다).
 //
 // 경주를 어디서 읽나 (상태만으로 맞춘다: 경주 중에 열어도, 이벤트를 놓쳐도 그 시각의 모습):
-//   - 함께 경주: sim.state.booths.race.race (RaceState: gathering → running → done, result, participants). 모이는 중엔 카운트다운.
+//   - 함께 경주: sim.state.booths.race.group (단체 놀이 GroupState: gathering → running → done, play.race, participants). 모이는 중엔 카운트다운.
 //   - 혼자 경주 (경주 상태가 없을 때, 예: _dev/preview.html): 자리마다의 한판 (round.outcome.detail.kind = 'race'). 경주 결과가
 //     상태에 없으니 세부(건 선수·등수·역전·사진 판정)에 맞는 경주를 화면에서 만든다 (그 한판으로 정해지는 씨앗이라 다시 지어도 같은 경주).
 // 손님마다의 결과(roundFinished)는 sim이 경주가 끝난 뒤 한꺼번에 낸다: 머리 위 글자(꽝은 빼고)와 항아리 → 손님 코인.
@@ -18,6 +18,7 @@ import { Rng } from '../../core/rng.ts';
 import { ease } from '../../core/tween.ts';
 import type { SimApi } from '../../sim/api.ts';
 import { generateRace, raceProgress, raceStandings, raceTier, RACERS } from '../../sim/race.ts';
+import { raceOf } from '../../sim/group/core.ts';
 import type { ActiveRound, BoothState, MonsterId, Pose, RaceResult, RacerIndex, Reaction } from '../../sim/types.ts';
 import { type ArtAnchor, type ArtNode, artMeta, artSprite, hasArt } from '../art.ts';
 import { HostActor, MonsterActor, neutralPose } from './actor.ts';
@@ -501,15 +502,16 @@ export class RaceScene implements CloseupScene {
 
   /** 보여 줄 경주를 sim 상태에서 고른다 (함께 경주가 먼저, 없으면 혼자 경주 한판). */
   private syncShow(bs: BoothState, dt: number): void {
-    const race = bs.race;
+    const race = bs.group;
     const sh = this.show;
-    if (race !== null && race.result !== null && (race.phase === 'running' || race.phase === 'done')) {
-      const key = `shared:${race.result.finishAt.join(',')}`;
+    const result = raceOf(race?.play);
+    if (race !== null && result !== null && (race.phase === 'running' || race.phase === 'done')) {
+      const key = `shared:${result.finishAt.join(',')}`;
       const t = race.phase === 'done' ? Math.max(race.elapsed, race.duration) : race.elapsed;
-      if (sh === null || sh.key !== key) this.startShow(key, race.result, true, -1, t);
+      if (sh === null || sh.key !== key) this.startShow(key, result, true, -1, t);
       const cur = this.show;
       if (cur === null) return;
-      if (cur.bets.size !== race.participants.length) cur.bets = new Map(race.participants.map((p) => [p.seat, p.racer]));
+      if (cur.bets.size !== race.participants.length) cur.bets = new Map(race.participants.map((p) => [p.seat, p.pick as RacerIndex]));
       for (let i = 0; i < this.actors.length; i++) this.setBadge(i, this.actors[i] !== null ? (cur.bets.get(i) ?? -1) : -1);
       this.advance(cur, dt, t);
       if (race.phase === 'done' && !cur.done) this.endShow(cur);
@@ -519,7 +521,7 @@ export class RaceScene implements CloseupScene {
       // 모이는 중 (함께 경주): 지난 경주는 보여 줄 만큼 보여 주고 치운다.
       if (sh !== null && !sh.done) this.endShow(sh);
       if (sh !== null && this.time - sh.doneAt > AFTER_HOLD) this.clearShow();
-      const bets = new Map(race.participants.map((p) => [p.seat, p.racer]));
+      const bets = new Map(race.participants.map((p) => [p.seat, p.pick as RacerIndex]));
       for (let i = 0; i < this.actors.length; i++) this.setBadge(i, this.actors[i] !== null ? (bets.get(i) ?? -1) : -1);
       return;
     }
@@ -678,7 +680,7 @@ export class RaceScene implements CloseupScene {
 
   private drawRace(bs: BoothState, dt: number): void {
     const sh = this.show;
-    const race = bs.race;
+    const race = bs.group;
     const gathering = race !== null && race.phase === 'gathering';
     // 모이는 중: 출발까지 마지막 3초는 크게 센다.
     const cd = gathering ? Math.ceil(race.countdown) : 0;
@@ -957,7 +959,7 @@ export class RaceScene implements CloseupScene {
       this.queueText.position.set(-pad, 0);
       this.queueBg.clear().roundRect(-bw, -bh / 2, bw, bh, bh / 2).fill({ color: 0xfff6e6, alpha: 0.92 }).stroke({ color: INK, width: 2 });
     }
-    const r = bs.race;
+    const r = bs.group;
     const note = !bs.unlocked
       ? '아직 열지 않은 놀이부스'
       : !boothDef('race').roles.every((role, i) => role.optional === true || (bs.staff[i] ?? null) !== null)
@@ -975,7 +977,7 @@ export class RaceScene implements CloseupScene {
   // ── sim 이벤트 ─────────────────────────────────────────────────────────
 
   onRoundStarted(_seat: number, _round: ActiveRound): void {
-    // 경주는 상태(sim.state.booths.race)를 매 프레임 읽어 맞춘다.
+    // 경주는 상태(sim.state.booths.race.group)를 매 프레임 읽어 맞춘다.
   }
 
   onRoundFinished(seat: number, round: ActiveRound, payout: number): void {

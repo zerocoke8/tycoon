@@ -44,6 +44,17 @@ function detail(): RoundDetail {
       return { kind: 'pouch', pick: tier === 'jackpot' ? 2 : tier === 'nearMiss' ? 1 : 0, content: tier === 'jackpot' ? 'jackpot' : tier === 'win' ? 'coins' : tier === 'nearMiss' ? 'one' : 'empty' };
     case 'race':
       return { kind: 'race', racer: 0, place: tier === 'jackpot' || tier === 'win' ? 1 : tier === 'nearMiss' ? 2 : 3, comeback: tier === 'jackpot', photoFinish: tier === 'nearMiss' };
+    // 셋째 묶음 단체 놀이: 확대 화면은 sim.state.booths[b].group을 읽는다 (이 미리보기의 가짜 한판은 세부만).
+    case 'boat':
+      return { kind: 'boat', racer: 0, place: tier === 'jackpot' || tier === 'win' ? 1 : tier === 'nearMiss' ? 2 : 3, comeback: tier === 'jackpot', photoFinish: tier === 'nearMiss' };
+    case 'ssireum':
+      return { kind: 'ssireum', side: 0, role: 'player', won: tier === 'jackpot' || tier === 'win', flip: tier === 'jackpot', close: tier === 'nearMiss' };
+    case 'tug':
+      return { kind: 'tug', side: 0, won: tier === 'jackpot' || tier === 'win', comeback: tier === 'jackpot', close: tier === 'nearMiss' };
+    case 'kite':
+      return { kind: 'kite', kite: 0, role: 'player', place: tier === 'jackpot' || tier === 'win' ? 1 : tier === 'nearMiss' ? 2 : 4, cutAt: tier === 'jackpot' || tier === 'win' ? -1 : 9 };
+    case 'dig':
+      return { kind: 'dig', spot: 0, find: tier === 'jackpot' ? 'chest' : tier === 'win' ? 'coins' : 'boot', chestNear: tier === 'nearMiss' };
   }
 }
 
@@ -68,7 +79,7 @@ const bs: BoothState = {
   queue: [],
   rounds: Array.from({ length: Math.max(1, seats) }, () => null),
   cheer: null,
-  race: null,
+  group: null,
 };
 const state = {
   booths: Object.fromEntries(BOOTH_IDS.map((b) => [b, bs])),

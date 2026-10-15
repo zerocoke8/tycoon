@@ -1,6 +1,7 @@
 // 지도 위 손님 몬스터. 손님마다 MonsterView 하나: 몸 그림(monsters/<종>_<포즈>), 그림자(코드), 머리 위 이모트.
 // sim 좌표를 부드럽게 따라가고(lerp), 걸을 때 통통, 떠다니는 종은 둥실. Motion 연출은 시간으로 계산한다 (트윈 객체를 만들지 않는다).
 // 프레임마다 새 객체를 만들지 않는다: 포즈 그림 이름은 미리 만들어 두고, 계산 결과는 같은 객체에 쓴다.
+// 단체 놀이 화면(view/group)은 손님 몸을 한 프레임씩 맡을 수 있다 (MonstersView.puppet: 씨름 밀기, 줄다리기 끌려가기, 벌러덩).
 
 import { Container, Graphics, GraphicsContext, Sprite, Texture } from 'pixi.js';
 import { SPECIES, SPECIES_IDS, type GoodId, type SpeciesId } from '../data/defs.ts';
@@ -153,6 +154,30 @@ function backOut(t: number): number {
 
 const MO: MotionOut = { dx: 0, dy: 0, rot: 0, sx: 1, sy: 1, flip: 1 };
 
+/**
+ * 단체 놀이 화면이 이 프레임에 맡기는 손님 몸 (MonstersView.puppet). 매 프레임 다시 준다: 손님을 그린 뒤 풀린다.
+ * sim 좌표·상태는 그대로이고 그림만 바뀐다 (누르기 상자도 sim 좌표).
+ */
+export interface MonsterPuppet {
+  /** 발 자리를 옮긴다 (세계 px, 그림자·이모트도 같이). */
+  readonly dx?: number;
+  readonly dy?: number;
+  /** 몸을 그림자에서 띄운다 (세계 px, 위가 +). */
+  readonly lift?: number;
+  /** 몸 기울기 (rad, 발 기준, + = 시계 방향). 벌러덩 = ±π/2. */
+  readonly rot?: number;
+  readonly sx?: number;
+  readonly sy?: number;
+  /** 포즈 그림 (sim pose 대신). */
+  readonly pose?: Pose;
+  /** 바라보는 쪽 (sim facing 대신, 1 = 오른쪽). */
+  readonly facing?: -1 | 1;
+  /** 걷기·숨쉬기·반응 연출을 끄고 몸을 통째로 맡는다. */
+  readonly still?: boolean;
+  /** 투명도 배수. */
+  readonly alpha?: number;
+}
+
 /** 손님 하나의 화면. */
 export class MonsterView {
   readonly id: MonsterId;
@@ -198,6 +223,8 @@ export class MonsterView {
   seen = 0;
   leaving = false;
   dead = false;
+  /** 이 프레임에 단체 놀이 화면이 맡긴 몸 (없으면 null, 그린 뒤 풀린다). */
+  puppet: MonsterPuppet | null = null;
   private fadeT = 0;
   private appear = 1;
   private placed = false;
@@ -277,9 +304,9 @@ export class MonsterView {
       this.walkBlend += (walking - this.walkBlend) * follow(8, dt);
       this.walkPhase += (moved / STRIDE) * Math.PI;
     }
-    this.facing = m.facing;
+    this.facing = this.puppet?.facing ?? m.facing;
     this.mood = m.mood;
-    this.setPose(m.pose);
+    this.setPose(this.puppet?.pose ?? m.pose);
   }
 
   /** 결과 반응 (구경꾼은 작게). */
@@ -392,8 +419,29 @@ export class MonsterView {
       }
     }
 
+    // 단체 놀이 화면이 맡긴 몸.
+    const pp = this.puppet;
+    let px = 0;
+    let py = 0;
+    if (pp !== null) {
+      if (pp.still === true) {
+        dx = 0;
+        dy = this.floats ? -HOVER : 0;
+        rot = 0;
+        sx = 1;
+        sy = 1;
+        flipMul = 1;
+      }
+      px = pp.dx ?? 0;
+      py = pp.dy ?? 0;
+      dy -= pp.lift ?? 0;
+      rot += pp.rot ?? 0;
+      sx *= pp.sx ?? 1;
+      sy *= pp.sy ?? 1;
+    }
+
     // 나타날 때 톡, 떠날 때 작아지며 흐려짐.
-    let a = 1;
+    let a = pp?.alpha ?? 1;
     let pop = 1;
     if (this.appear < 1) {
       a = this.appear;
@@ -406,8 +454,10 @@ export class MonsterView {
     }
 
     this.bodyDy = dy;
-    this.node.position.set(this.x, this.y);
-    const z = Math.round(this.y);
+    const fx = this.x + px;
+    const fy = this.y + py;
+    this.node.position.set(fx, fy);
+    const z = Math.round(fy);
     if (this.node.zIndex !== z) this.node.zIndex = z;
     this.body.position.set(dx, dy);
     this.body.rotation = rot;
@@ -417,7 +467,7 @@ export class MonsterView {
     // 그림자: 몸이 높이 뜰수록 작고 옅게.
     const lift = this.floats ? -dy - HOVER : -dy;
     const ss = clamp(1 - lift / 200, 0.55, 1.05) * pop;
-    this.shadow.position.set(this.x, this.y);
+    this.shadow.position.set(fx, fy);
     this.shadow.scale.set(this.shadowRx * ss, this.shadowRx * 0.32 * ss);
     this.shadow.alpha = a * clamp(1 - lift / 260, 0.4, 1);
 
@@ -432,7 +482,7 @@ export class MonsterView {
         const p = e < 0.28 ? backOut(e / 0.28) : 1;
         const s = (EMOTE_SIZE / this.emoteTexSize) * p * emoteScale;
         this.emote.scale.set(s);
-        this.emote.position.set(this.x + 6, this.y + dy - this.headH - 10 + Math.sin(e * 3.2) * 3);
+        this.emote.position.set(fx + 6, fy + dy - this.headH - 10 + Math.sin(e * 3.2) * 3);
         this.emote.alpha = e > this.emoteDur - 0.35 ? (this.emoteDur - e) / 0.35 : 1;
       }
     }
@@ -487,6 +537,12 @@ export class MonstersView {
 
   get(id: MonsterId): MonsterView | undefined {
     return this.byId.get(id);
+  }
+
+  /** 이 프레임에 손님 id의 몸을 맡긴다 (단체 놀이 화면이 손님을 그리기 전에 부른다, null = 맡기지 않음). */
+  puppet(id: MonsterId, p: MonsterPuppet | null): void {
+    const v = this.byId.get(id);
+    if (v !== undefined) v.puppet = p;
   }
 
   private ensure(m: Monster, appear: boolean): MonsterView {
@@ -562,6 +618,7 @@ export class MonstersView {
       const v = this.views[i] as MonsterView;
       if (v.seen !== frame) v.startLeaving();
       v.update(dt, time, view, emoteScale);
+      v.puppet = null;
       if (v.dead) {
         this.byId.delete(v.id);
         const last = this.views.pop() as MonsterView;

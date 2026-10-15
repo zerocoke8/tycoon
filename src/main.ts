@@ -9,19 +9,21 @@
 //   ?seed=N         새 게임의 씨앗 (저장이 없거나 fresh일 때)
 //   ?speed=N        시뮬레이션·연출 배속 (0.25~20, 개발 서버 콘솔에서는 mpv.setSpeed(n))
 //   ?coins=N        시작 코인을 N으로
-//   ?open=<booth>   2초 뒤 그 부스 패널(확대 화면)을 연다 (slot·oddeven·cups·darts·wheel·duck·ring·race·claw·pouch)
+//   ?open=<booth>   2초 뒤 그 부스 패널(확대 화면)을 연다 (slot·oddeven·cups·darts·wheel·ssireum·duck·ring·boat·race·kite·claw·pouch·tug·dig)
 //   ?all=1          마을을 다 연다: 모든 구역·부스, 그림 있는 진행자 모두 고용 (새 부스 연출 확인용, 저장하지 않는다)
 //   ?unlockAll=1    ?all=1과 같고, 재료를 창고 가득·귀한 물건·간식과 응원 도구도 몇 개씩 준다 (저장하지 않는다)
+//   ?only=<booth>   (?all=1·?unlockAll=1과 같이) 그 부스만 열어 둔다: 손님이 다 그리로 간다 (새 부스 연출 확인용)
 //   ?monster=1      3초 뒤 첫 손님 카드를 연다
 //   ?debug=1        지도 디버그 층 (길 그래프·자리)
 //   ?zoom=Z         처음 카메라 확대 (지도 폭이 다 보이는 확대 ~ 1.6, 폰 기본 약 0.39)
+//   ?at=x,y|<booth> 처음 카메라 가운데 (세계 좌표 또는 부스 이름, 확대는 ?zoom 없으면 0.5)
 // 잡히지 않은 오류는 index.html의 빨간 오류 상자에 쌓인다 (헤드리스 --dump-dom에서도 보인다).
 
 import './style.css';
 import { Application, UPDATE_PRIORITY } from 'pixi.js';
 import { tweens } from './core/tween.ts';
 import { BOOTH_IDS, SIM, type BoothId } from './data/defs.ts';
-import { PLAZAS } from './data/map.ts';
+import { BOOTH_SPOTS, PLAZAS, type Pt } from './data/map.ts';
 import { devGiveGoods, devOpenAll } from './sim/dev.ts';
 import { Sim, loadGame, newGame } from './sim/sim.ts';
 import type { GameState } from './sim/types.ts';
@@ -60,6 +62,17 @@ const DEV = {
   all: params.get('all') === '1' || params.get('unlockAll') === '1',
   unlockAll: params.get('unlockAll') === '1',
 };
+/** ?at= 값 → 세계 좌표 ('x,y' 또는 부스 이름이면 그 부스 그림 자리 위쪽). */
+function atPoint(v: string | null): Pt | null {
+  if (v === null || v === '') return null;
+  if ((BOOTH_IDS as readonly string[]).includes(v)) {
+    const b = BOOTH_SPOTS[v as BoothId].base;
+    return { x: b.x, y: b.y - 120 };
+  }
+  const [x, y] = v.split(',').map(Number);
+  return x !== undefined && y !== undefined && Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+}
+
 /** fresh 게임은 저장하지 않는다 (진짜 저장을 덮지 않게). */
 const SAVING = !DEV.fresh && !DEV.all;
 
@@ -80,7 +93,13 @@ const FONT_WAIT_MS = 4000;
 const FONT_SAMPLE =
   '대박! 맞았다 아깝다 꽝… 홀? 짝? 줄 항아리 축제 아직 열지 않은 놀이부스 진행자가 없어요 사과 버섯 별 보석 도토리 종 +-0123456789' +
   // 둘째 묶음 부스·경주장 (복주머니 말풍선, 경주 해설·결과, 선수 이름)
-  ' 빨강! 파랑! 노랑! 출발까지 초 출발 신호와 해설자가 있어야 열려요 앞으로! 대역전이다! 마지막 직선! 사진 판정! 찰칵! 골인! 1등! 다음엔… 달팽이 거북 개구리 무당벌레';
+  ' 빨강! 파랑! 노랑! 출발까지 초 출발 신호와 해설자가 있어야 열려요 앞으로! 대역전이다! 마지막 직선! 사진 판정! 찰칵! 골인! 1등! 다음엔… 달팽이 거북 개구리 무당벌레' +
+  // 셋째 묶음 단체 놀이 (씨름·오리배·연날리기·줄다리기·보물찾기)
+  ' 시작까지 곧 시작! 홍 청 선수 응원 편 빨강 연 파랑 연 노랑 연 초록 연 번 오리배 백조배 개구리배 고래배 이겼다! 자리가 비어 쉬는 중 보물상자! 동전 주머니 보석 헌 장화 조약돌 심판 해설자 연 장인 바람지기 응원단장 보물 지도 할아버지 삽 대여 구조 요원' +
+  // 셋째 묶음 확대 화면 해설 (장면이 불릴 때도 preloadGlyphs로 받지만, 처음 여는 순간 빈 글자가 없게)
+  ' 밀어붙여요! 되밀어요, 버텨요 버텨! 아슬아슬! 뒤집기다! 뒤집기 성공! 승! 막상막하! 도전자를 기다려요 선수를 기다려요 편이 차기를' +
+  ' 삐익! 당겨! 준비~ 힘내! 끝까지! 뒤집는다! 영차! 승리! 역전승! 최고! 보물이 묻혀 있단다! 파 보거라! 삽 받아요! 여기였지! 바로 옆이었는데! 땅' +
+  ' 마지막 물길! 바람 분다! 버텨 냈다! 아이고, 연싸움이다! 툭! 하늘의 주인공! 끊어졌다! 우승! 손님을 보물 안내 곧 출발!';
 
 // ── 로딩 화면 ──
 
@@ -188,6 +207,9 @@ async function boot(): Promise<void> {
   });
   if (DEV.all) devOpenAll(sim);
   if (DEV.unlockAll) devGiveGoods(sim);
+  // ?only=<부스>: 그 부스만 열어 둔다 (손님이 다 그리로 간다: 새 부스 연출 확인용, ?all=1과 같이).
+  const only = params.get('only');
+  if (DEV.all && only !== null && (BOOTH_IDS as readonly string[]).includes(only)) for (const b of BOOTH_IDS) if (b !== only) sim.state.booths[b].unlocked = false;
   const world = new VillageView(app, sim);
   const closeup = new CloseupView(app, sim);
   const ui = createUi(uiEl, sim, { world, closeup });
@@ -270,7 +292,10 @@ async function boot(): Promise<void> {
 
   // ── 개발용 옵션 ──
   if (DEV.debug) world.setDebug(true);
-  if (DEV.zoom !== null) world.focusOn(PLAZAS[0]?.c ?? { x: 0, y: 0 }, DEV.zoom);
+  // ?at=x,y (세계 좌표) 또는 ?at=<부스>: 카메라를 그곳에 (확대는 ?zoom, 없으면 0.5).
+  const at = atPoint(params.get('at'));
+  if (at !== null) world.focusOn(at, DEV.zoom ?? 0.5);
+  else if (DEV.zoom !== null) world.focusOn(PLAZAS[0]?.c ?? { x: 0, y: 0 }, DEV.zoom);
   const openBooth = DEV.open;
   if (openBooth !== null) {
     if ((BOOTH_IDS as readonly string[]).includes(openBooth)) window.setTimeout(() => ui.showBooth(openBooth as BoothId), 2000);

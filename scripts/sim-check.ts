@@ -3,23 +3,25 @@
 //   node scripts/sim-check.ts --auto          욕심쟁이 촌장(살 수 있으면 산다)으로 회관 2·3·4와 부스 해금 시각
 //   node scripts/sim-check.ts --selftest      저장·불러오기 왕복, 결과 세부, 행동, catchUp 시험
 //   node scripts/sim-check.ts --auto --seeds 8   여러 시드의 이정표(처음 산 때) 표
-//   --minutes N, --seed N, --verbose (토스트 찍기), --detail (--seeds와 같이: 다음 회관 비용 항목마다 처음 모인 때)
+//   --minutes N, --seed N, --verbose (토스트 찍기), --detail (--seeds와 같이: 다음 회관 비용 항목마다 처음 모인 때),
+//   --first N (--seeds와 같이: 시드 N부터, 여러 프로세스로 나눠 돌릴 때)
 // 모든 모드에서 매 틱 불변식을 검사한다 (NaN, 음수 코인, 멈춘 손님, 자리·줄 어긋남). 어긋나면 바로 멈춘다.
 
 import { Rng } from '../src/core/rng.ts';
-import { BOOTHS, BOOTH_IDS, boothDef, BUILDINGS, GOODS, HOST_PRESETS, MOOD, ODDS, RACE, RECIPES, SIM, SPECIES_IDS, WHEEL, type BoothId, type BuildingId, type GoodId, type MaterialId, type OutcomeTier } from '../src/data/defs.ts';
+import { BOOTHS, BOOTH_IDS, boothDef, BUILDINGS, DIG, GOODS, GROUP_BOOTHS, GROUP_RULES, HOST_PRESETS, isGroupBooth, KITE, MOOD, ODDS, RACE, RECIPES, SIM, SPECIES_IDS, SSIREUM, TUG, WHEEL, type BoothId, type BuildingId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type SpeciesId, type TraitId } from '../src/data/defs.ts';
 import { devOpenAll } from '../src/sim/dev.ts';
 import { decideOutcome } from '../src/sim/games.ts';
 import { boothStat, minPlayCost } from '../src/sim/booths.ts';
+import { digNear, groupGame, raceOf, sideSign, trackAt, tugLineup } from '../src/sim/group/index.ts';
 import { COMEBACK_KEY_INDEX, generateRace, raceGatherSec, raceOutcome, racePlace, raceProgress, RACERS, raceStandings, raceTier } from '../src/sim/race.ts';
-import { moodDelta, reactionLabels } from '../src/sim/reactions.ts';
+import { cheerKey, detailKeys, groupReactionLabels, moodDelta, pickReaction, reactionKeys, reactionLabels } from '../src/sim/reactions.ts';
 import { normalizeState } from '../src/sim/save.ts';
 import { presetPost } from '../src/sim/staff.ts';
-import { DISTRICTS, NODES, type DistrictId, type NodeId } from '../src/data/map.ts';
+import { BOOTH_SPOTS, DISTRICTS, NODES, type DistrictId, type NodeId } from '../src/data/map.ts';
 import { crossesBooth, distancesFrom } from '../src/sim/path.ts';
 import { clearSave, loadGame, newGame, saveGame, Sim } from '../src/sim/sim.ts';
 import { TUNE } from '../src/sim/tuning.ts';
-import type { GameState, MonsterPhase, SimEvents } from '../src/sim/types.ts';
+import type { GameState, GroupEntry, GroupEvent, GroupKey, GroupPlay, GroupState, Monster, MonsterPhase, RacerIndex, RoundOutcome, SimEvents } from '../src/sim/types.ts';
 
 declare const process: { argv: string[]; exitCode?: number };
 
@@ -79,21 +81,25 @@ function checkInvariants(sim: Sim): void {
     if (m.wallet < 0) fail(`손님 ${m.id} 지갑이 음수 (${m.wallet})`, st);
     if (m.mood < 0 || m.mood > 100) fail(`손님 ${m.id} 기분 범위 밖 (${m.mood})`, st);
     const pt = m.phaseTime ?? 0;
-    if (!LONG_OK.has(m.phase) && pt > STUCK_SEC) fail(`손님 ${m.id}가 ${m.phase}에 ${pt.toFixed(0)}초 멈춤 (path ${m.path.length}, booth ${m.booth}, seat ${m.seat})`, st);
+    if (!LONG_OK.has(m.phase) && pt > STUCK_SEC) {
+      const g = m.booth !== null ? st.booths[m.booth].group : null;
+      const gs = g === null ? '' : `, 판 ${g.phase} ${g.elapsed.toFixed(1)}초 남은 ${g.countdown.toFixed(1)} 참가 [${g.participants.map((e) => `${e.monster}@${e.seat}:${e.pick}`).join(' ')}] 자리 [${st.booths[m.booth!].seats.join(' ')}]`;
+      fail(`손님 ${m.id}가 ${m.phase}에 ${pt.toFixed(0)}초 멈춤 (path ${m.path.length}, booth ${m.booth}, seat ${m.seat}${gs})`, st);
+    }
     const age = st.time - (m.born ?? st.time);
     if (age > MAX_AGE) fail(`손님 ${m.id}가 ${age.toFixed(0)}초째 떠나지 않음 (phase ${m.phase})`, st);
-    const race = m.booth !== null ? st.booths[m.booth].race : null;
-    if (m.phase === 'playing' && race !== null) {
-      // 경주장: 모이는 중이면 참가자, 달리는 중이면 참가자(한판 있음)나 다음 경주를 기다리는 손님, 결과 중이면 기다리는 손님.
-      const entry = race.participants.find((e) => e.monster === m.id);
-      if (race.phase === 'idle') fail(`손님 ${m.id}가 쉬는 경주장에서 playing`, st);
-      if (race.phase === 'gathering' && entry === undefined) fail(`손님 ${m.id}가 모이는 경주에 참가하지 않고 앉아 있음`, st);
-      if (race.phase === 'running' && entry !== undefined) {
+    const group = m.booth !== null ? st.booths[m.booth].group : null;
+    if (m.phase === 'playing' && group !== null) {
+      // 단체 놀이: 모이는 중이면 참가자, 진행 중이면 참가자(한판 있음)나 다음 판을 기다리는 손님, 결과 중이면 기다리는 손님.
+      const entry = group.participants.find((e) => e.monster === m.id);
+      if (group.phase === 'idle') fail(`손님 ${m.id}가 쉬는 ${m.booth}에서 playing`, st);
+      if (group.phase === 'gathering' && entry === undefined) fail(`손님 ${m.id}가 모이는 ${m.booth}에 참가하지 않고 앉아 있음`, st);
+      if (group.phase === 'running' && entry !== undefined) {
         const r = st.booths[m.booth!].rounds[entry.seat];
-        if (!r || r.monster !== m.id) fail(`손님 ${m.id}가 경주 참가자인데 한판이 없음`, st);
+        if (!r || r.monster !== m.id) fail(`손님 ${m.id}가 ${m.booth} 참가자인데 한판이 없음`, st);
       }
-      // 결과 중: 이번 경주 참가자의 한판은 끝나 있어야 한다 (반응을 마치고 다시 앉아 다음 경주를 기다리는 것은 괜찮다).
-      if (race.phase === 'done' && entry !== undefined && st.booths[m.booth!].rounds[entry.seat]?.monster === m.id) fail(`손님 ${m.id}가 경주가 끝났는데 한판이 남음`, st);
+      // 결과 중: 이번 판 참가자의 한판은 끝나 있어야 한다 (반응을 마치고 다시 앉아 다음 판을 기다리는 것은 괜찮다).
+      if (group.phase === 'done' && entry !== undefined && st.booths[m.booth!].rounds[entry.seat]?.monster === m.id) fail(`손님 ${m.id}가 ${m.booth} 판이 끝났는데 한판이 남음`, st);
     } else if (m.phase === 'playing') {
       const r = m.booth !== null && m.seat !== null ? st.booths[m.booth].rounds[m.seat] : null;
       if (!r || r.monster !== m.id) fail(`손님 ${m.id}가 playing인데 한판이 없음`, st);
@@ -124,23 +130,25 @@ function checkInvariants(sim: Sim): void {
       const s = st.staff.find((x) => x.id === id);
       if (!s || s.post === null || s.post.booth !== b || s.post.role !== role) fail(`${b} 자리 ${role}의 진행자 ${id}가 어긋남`, st);
     });
-    if ((b === 'race') !== (bs.race !== null)) fail(`${b} race 칸이 어긋남`, st);
-    const race = bs.race;
-    if (race !== null) {
-      finite(race.countdown, `${b} 경주 countdown`, st);
-      finite(race.elapsed, `${b} 경주 elapsed`, st);
-      if (race.phase === 'idle' && (race.participants.length > 0 || race.result !== null)) fail(`${b} 쉬는 경주에 참가자·결과가 남음`, st);
-      if (race.phase === 'gathering' && (race.participants.length === 0 || race.result !== null || race.countdown > RACE.gatherSec * (1 + 2 * RACE.gatherPacePerPoint) + 1e-6)) fail(`${b} 모이는 경주가 어긋남`, st);
-      if ((race.phase === 'running' || race.phase === 'done') && race.result === null) fail(`${b} 달리는 경주에 결과가 없음`, st);
-      if (race.phase === 'running' && race.elapsed > race.duration + 1e-6) fail(`${b} 경주가 끝나지 않음`, st);
-      if (new Set(race.participants.map((e) => e.seat)).size !== race.participants.length) fail(`${b} 경주 참가자 자리가 겹침`, st);
-      if (new Set(race.participants.map((e) => e.monster)).size !== race.participants.length) fail(`${b} 경주에 같은 손님이 둘`, st);
-      if (race.participants.length > bs.seats.length) fail(`${b} 경주 참가자가 자리보다 많음`, st);
-      if (race.phase === 'gathering' || race.phase === 'running') {
-        for (const e of race.participants) {
+    if (isGroupBooth(b) !== (bs.group !== null)) fail(`${b} group 칸이 어긋남`, st);
+    const group = bs.group;
+    if (group !== null && isGroupBooth(b)) {
+      const rules = GROUP_RULES[b];
+      finite(group.countdown, `${b} 단체 놀이 countdown`, st);
+      finite(group.elapsed, `${b} 단체 놀이 elapsed`, st);
+      if (group.phase === 'idle' && (group.participants.length > 0 || group.play !== null)) fail(`${b} 쉬는 판에 참가자·결과가 남음`, st);
+      if (group.phase === 'gathering' && (group.participants.length === 0 || group.play !== null || group.countdown > rules.gatherSec * (1 + 2 * rules.gatherPacePerPoint) + 1e-6)) fail(`${b} 모이는 판이 어긋남`, st);
+      if (group.phase === 'gathering' && group.elapsed > rules.maxWaitSec + rules.gatherSec + 1) fail(`${b} 모이는 판이 너무 오래 (${group.elapsed.toFixed(0)}초)`, st);
+      if ((group.phase === 'running' || group.phase === 'done') && (group.play === null || group.play.outcomes.length !== group.participants.length || group.play.kind !== b)) fail(`${b} 진행 중인 판에 결과가 없거나 참가자와 어긋남`, st);
+      if (group.phase === 'running' && group.elapsed > group.duration + 1e-6) fail(`${b} 판이 끝나지 않음`, st);
+      if (new Set(group.participants.map((e) => e.seat)).size !== group.participants.length) fail(`${b} 참가자 자리가 겹침`, st);
+      if (new Set(group.participants.map((e) => e.monster)).size !== group.participants.length) fail(`${b} 같은 손님이 둘`, st);
+      if (group.participants.length > bs.seats.length) fail(`${b} 참가자가 자리보다 많음`, st);
+      if (group.phase === 'gathering' || group.phase === 'running') {
+        for (const e of group.participants) {
           const m = sim.monster(e.monster);
-          if (race.phase === 'gathering' && (!m || m.booth !== b || m.seat !== e.seat || m.phase !== 'playing')) fail(`${b} 모이는 경주 참가자 ${e.monster}가 자리에 없음`, st);
-          if (e.racer < 0 || e.racer > 3 || !(e.bet >= 1)) fail(`${b} 경주 참가 ${e.monster} 선수·건 코인 (${e.racer}, ${e.bet})`, st);
+          if (group.phase === 'gathering' && (!m || m.booth !== b || m.seat !== e.seat || m.phase !== 'playing')) fail(`${b} 모이는 판 참가자 ${e.monster}가 자리에 없음`, st);
+          if (!Number.isInteger(e.pick) || e.pick < 0 || e.pick >= groupGame(b).picks || !(e.bet >= 1)) fail(`${b} 참가 ${e.monster} 고른 것·건 코인 (${e.pick}, ${e.bet})`, st);
         }
       }
     }
@@ -301,12 +309,14 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
       return true;
     };
     if (buy(`hall${st.buildings.hall.level + 1}`, `회관 → ${st.buildings.hall.level + 1}`, () => sim.upgradeBuilding('hall'))) return;
-    // 회관 3부터: 막 열린 구역의 부스(회관 3 경주장, 회관 4 인형 뽑기·복주머니)는 다음 회관보다 먼저 연다 (귀한 물건이 있으면 코인을 모은다).
+    // 이미 열 수 있는 단체 놀이(회관 1 밀어내기, 회관 2 오리배 …)와, 회관 2부터 막 열린 구역의 부스(회관 2 오리 낚시·고리 던지기,
+    // 회관 3 경주장·연날리기, 회관 4 인형 뽑기·복주머니, 회관 5 줄다리기·보물찾기)는 다음 회관보다 먼저 연다 (귀한 물건이 있으면 코인을 모은다).
     let saving = false;
     const lv = st.buildings.hall.level;
-    if (lv >= 3) {
+    {
       for (const b of BOOTH_IDS) {
-        if (st.booths[b].unlocked || boothDef(b).unlock.hall !== lv) continue;
+        const h = boothDef(b).unlock.hall;
+        if (st.booths[b].unlocked || !((lv >= 2 && h === lv) || (isGroupBooth(b) && h <= lv))) continue;
         if (buy(`unlock-${b}`, `부스 해금 ${b}`, () => sim.unlockBooth(b))) return;
         const c = sim.boothUnlockCost(b);
         if (c !== null && sim.canAfford({ ...c, coins: 0 })) saving = true;
@@ -386,29 +396,46 @@ function quantile(xs: readonly number[], q: number): number {
   return s[Math.min(s.length - 1, Math.floor(q * s.length))] as number;
 }
 
-/** 부스마다 연 뒤의 한판 수와 경주 묶음 (sim 이벤트로 센다). */
+/** 부스마다 연 뒤의 한판 수와 단체 놀이 묶음 (sim 이벤트로 센다). races·runners·maxRunners = 경주장. */
 interface BoothTally {
   rounds: Record<BoothId, number>;
   races: number;
   runners: number;
   maxRunners: number;
+  /** 단체 놀이마다 판 수·참가자 합·가장 많이·접힌 판. */
+  groups: Record<GroupBoothId, { n: number; runners: number; max: number; cancelled: number }>;
 }
 
 function tallyBooths(sim: Sim): BoothTally {
-  const t: BoothTally = { rounds: Object.fromEntries(BOOTH_IDS.map((b) => [b, 0])) as Record<BoothId, number>, races: 0, runners: 0, maxRunners: 0 };
+  const t: BoothTally = {
+    rounds: Object.fromEntries(BOOTH_IDS.map((b) => [b, 0])) as Record<BoothId, number>,
+    races: 0,
+    runners: 0,
+    maxRunners: 0,
+    groups: Object.fromEntries(GROUP_BOOTHS.map((b) => [b, { n: 0, runners: 0, max: 0, cancelled: 0 }])) as BoothTally['groups'],
+  };
   sim.bus.on('roundStarted', (e) => {
     t.rounds[e.booth] += 1;
   });
-  sim.bus.on('raceStarted', (e) => {
+  sim.bus.on('groupStarted', (e) => {
+    const n = e.group.participants.length;
+    const g = t.groups[e.booth];
+    g.n += 1;
+    g.runners += n;
+    g.max = Math.max(g.max, n);
+    if (e.booth !== 'race') return;
     t.races += 1;
-    t.runners += e.race.participants.length;
-    t.maxRunners = Math.max(t.maxRunners, e.race.participants.length);
+    t.runners += n;
+    t.maxRunners = Math.max(t.maxRunners, n);
+  });
+  sim.bus.on('groupCancelled', (e) => {
+    t.groups[e.booth].cancelled += 1;
   });
   return t;
 }
 
-function runSeeds(count: number, minutes: number, detail = false): void {
-  const keys = ['first', 'hall2', 'unlock-cups', 'unlock-darts', 'unlock-wheel', 'unlock-duck', 'unlock-ring', 'ready-hall3', 'hall3', 'unlock-race', 'ready-hall4', 'hall4', 'unlock-claw', 'unlock-pouch'];
+function runSeeds(count: number, minutes: number, detail = false, first = 1): void {
+  const keys = ['first', 'hall2', 'unlock-cups', 'unlock-darts', 'unlock-wheel', 'unlock-ssireum', 'unlock-duck', 'unlock-ring', 'unlock-boat', 'ready-hall3', 'hall3', 'unlock-race', 'unlock-kite', 'ready-hall4', 'hall4', 'unlock-claw', 'unlock-pouch', 'ready-hall5', 'hall5', 'unlock-tug', 'unlock-dig'];
   const short = (k: string) => k.replace('unlock-', '').replace('ready-hall', 'rdy');
   console.log(`--auto --seeds ${count}: 욕심쟁이 촌장이 처음 산 때 (분), ${minutes}분까지
 `);
@@ -417,8 +444,10 @@ function runSeeds(count: number, minutes: number, detail = false): void {
   /** 부스마다 연 뒤 1분에 시작한 한판 수 (시드마다). */
   const rates = new Map<BoothId, number[]>();
   const runnerAvg: number[] = [];
+  /** 단체 놀이마다 시드의 판 평균 참가자·접힌 판 비율 (판이 5번 넘은 시드만). */
+  const groupAvg = new Map<GroupBoothId, { avg: number[]; fold: number[] }>();
   const needAll = new Map<string, number[]>();
-  for (let seed = 1; seed <= count; seed++) {
+  for (let seed = first; seed < first + count; seed++) {
     const sim = new Sim(newGame(seed));
     const ms = new Map<string, number>();
     const chief = makeGreedyChief(seed, ms);
@@ -458,6 +487,14 @@ function runSeeds(count: number, minutes: number, detail = false): void {
       rates.set(b, list);
     }
     if (tb.races > 0) runnerAvg.push(tb.runners / tb.races);
+    for (const b of GROUP_BOOTHS) {
+      const g = tb.groups[b];
+      if (g.n <= 5) continue;
+      const row = groupAvg.get(b) ?? { avg: [], fold: [] };
+      row.avg.push(g.runners / g.n);
+      row.fold.push(g.cancelled / (g.n + g.cancelled));
+      groupAvg.set(b, row);
+    }
     for (const [k, v] of need) needAll.set(k, [...(needAll.get(k) ?? []), v]);
     const st = sim.state;
     const cells = keys.map((k) => {
@@ -485,6 +522,7 @@ function runSeeds(count: number, minutes: number, detail = false): void {
     for (const [k, list] of [...needAll.entries()].sort()) console.log(`  ${k.padEnd(22)} ${fmt(quantile(list, 0.5))} / ${fmt(quantile(list, 0.75))} (${list.length})`);
   }
   if (runnerAvg.length > 0) console.log(`경주 한 번 평균 참가자 (시드 중간): ${fmt(quantile(runnerAvg, 0.5))}`);
+  console.log(`단체 놀이 한 판 평균 참가자 / 접힌 판 비율 (시드 중간, 판이 5번 넘은 시드 수): ${GROUP_BOOTHS.map((b) => { const r = groupAvg.get(b); return r === undefined ? `${b} -` : `${b} ${fmt(quantile(r.avg, 0.5))}/${(quantile(r.fold, 0.5) * 100).toFixed(0)}% (${r.avg.length})`; }).join('  ')}`);
 }
 
 // ── --selftest ─────────────────────────────────────────────────────────
@@ -513,7 +551,7 @@ function selftest(): void {
   const rng = new Rng(42);
   const pool = SPECIES_IDS.slice(0, 9);
   for (const b of BOOTH_IDS) {
-    if (b === 'race') continue;
+    if (isGroupBooth(b)) continue;
     const counts: Record<OutcomeTier, number> = { jackpot: 0, win: 0, nearMiss: 0, lose: 0 };
     const N = 40000;
     for (let i = 0; i < N; i++) {
@@ -717,14 +755,14 @@ function selftest(): void {
   const c = new Sim(newGame(3));
   runFor(c, 60);
   const seen: string[] = [];
-  const quietTypes: (keyof SimEvents)[] = ['monsterReact', 'monsterSpectate', 'roundStarted', 'roundFinished', 'potFestival', 'raceStarted', 'raceFinished', 'raceJoined', 'raceProgress', 'coinsChanged', 'toast', 'itemsChanged', 'monsterSpawned', 'monsterLeft'];
+  const quietTypes: (keyof SimEvents)[] = ['monsterReact', 'monsterSpectate', 'roundStarted', 'roundFinished', 'potFestival', 'groupJoined', 'groupStarted', 'groupEvent', 'groupFinished', 'groupCancelled', 'coinsChanged', 'toast', 'itemsChanged', 'monsterSpawned', 'monsterLeft'];
   for (const t of quietTypes) c.bus.on(t, () => seen.push(t as string));
   const coins0 = c.state.coins;
   const t0 = c.state.time;
   c.catchUp(10_000);
   checkInvariants(c);
   assert(Math.abs(c.state.time - t0 - SIM.catchUpMaxSec) < 1e-6, `catchUp은 ${SIM.catchUpMaxSec}초까지`);
-  const loud = ['monsterReact', 'monsterSpectate', 'roundStarted', 'roundFinished', 'potFestival', 'raceStarted', 'raceFinished', 'raceJoined', 'raceProgress'];
+  const loud = ['monsterReact', 'monsterSpectate', 'roundStarted', 'roundFinished', 'potFestival', 'groupJoined', 'groupStarted', 'groupEvent', 'groupFinished', 'groupCancelled'];
   for (const t of loud) assert(!seen.includes(t), `catchUp 중 ${t} 없음`);
   assert(seen.filter((t) => t === 'toast').length === 1, 'catchUp 요약 토스트 하나');
   assert(seen.filter((t) => t === 'coinsChanged').length <= 1, 'catchUp coinsChanged 한 번');
@@ -754,6 +792,8 @@ function selftest(): void {
   st.precious.golden_acorn = 1;
   st.precious.gem = 1;
   st.precious.star_piece = 1;
+  // 다트 해금은 무 꼬마의 무청 (회관 1 손님 재료).
+  st.materials.mat_radishgreen = 1;
   assert(d.unlockBooth('cups').ok && st.booths.cups.unlocked && st.booths.cups.staff[0] === null, '컵 해금 (진행자 없음)');
   assert(!d.boothOpen('cups'), '진행자 없으면 닫힘');
   const ci = st.candidates.findIndex((x) => x.art === 'host_cups');
@@ -893,16 +933,18 @@ function selftest(): void {
     devOpenAll(r);
     const rs = r.state;
     let started = 0;
-    r.bus.on('raceStarted', () => started++);
+    r.bus.on('groupStarted', (e) => {
+      if (e.booth === 'race') started++;
+    });
     let wallets = 0;
     let gathered = false;
     for (let i = 0; i < 20_000 && !gathered; i++) {
       r.tick(SIM.dt);
-      const race = rs.booths.race.race;
+      const race = rs.booths.race.group;
       if (race !== null && race.phase === 'gathering' && race.participants.length > 0) gathered = true;
     }
     assert(gathered, '경주장에 손님이 모인다');
-    const race = rs.booths.race.race!;
+    const race = rs.booths.race.group!;
     const who = race.participants.map((e) => ({ m: r.monster(e.monster)!, bet: e.bet }));
     wallets = who.reduce((a, x) => a + x.m.wallet + x.bet, 0);
     const before = started;
@@ -991,7 +1033,7 @@ function selftest(): void {
     // 손님이 경주장으로만 가게 다른 부스를 닫아 둔다.
     for (const b of BOOTH_IDS) if (b !== 'race') rs.booths[b].unlocked = false;
     const bs = rs.booths.race;
-    const race = bs.race!;
+    const race = bs.group!;
     const pace = boothStat(rs, 'race', 'pace');
     const wallets = new Map<number, number>();
     let gatherAt = 0;
@@ -1008,10 +1050,11 @@ function selftest(): void {
     const payouts: { monster: number; payout: number; want: number }[] = [];
     const festivalOf = new Set<number>();
     let expected = new Set<number>();
-    r.bus.on('raceJoined', (e) => {
+    r.bus.on('groupJoined', (e) => {
+      if (e.booth !== 'race') return;
       assert(race.phase === 'gathering', '참가하면 모이는 중');
       const p = race.participants.find((x) => x.monster === e.monster);
-      assert(p !== undefined && p.racer === e.racer && p.seat === e.seat && p.bet === e.bet && e.bet >= 1, '참가 목록에 선수·자리·건 코인');
+      assert(p !== undefined && p.pick === e.pick && p.seat === e.seat && p.bet === e.bet && e.bet >= 1 && p.role === 'bettor', '참가 목록에 선수·자리·건 코인');
       wallets.set(e.monster, r.monster(e.monster)!.wallet);
       if (race.participants.length === 1) {
         gatherAt = rs.time;
@@ -1019,45 +1062,50 @@ function selftest(): void {
       }
       joinedMax = Math.max(joinedMax, race.participants.length);
     });
-    r.bus.on('raceStarted', (e) => {
+    r.bus.on('groupStarted', (e) => {
+      if (e.booth !== 'race') return;
       started++;
-      const res = e.race.result!;
+      const res = raceOf(e.group.play)!;
       const waited = rs.time - gatherAt;
-      assert(waited <= raceGatherSec(pace) + SIM.dt * 1.5, `첫 손님이 앉고 ${raceGatherSec(pace).toFixed(1)}초 안에 출발 (${waited.toFixed(1)})`);
+      // 자리로 걸어오는 손님이 곧 닿으면 (TUNE.groupWaitWalkSec 안) groupWaitExtraSec까지 더 기다려 준다.
+      assert(waited <= raceGatherSec(pace) + TUNE.groupWaitExtraSec + SIM.dt * 1.5, `첫 손님이 앉고 ${(raceGatherSec(pace) + TUNE.groupWaitExtraSec).toFixed(1)}초 안에 출발 (${waited.toFixed(1)})`);
       if (joinedMax === 1) assert(waited >= raceGatherSec(pace) - SIM.dt * 1.5, `혼자면 끝까지 기다린다 (${waited.toFixed(1)})`);
-      if (e.race.participants.length >= 2) multi++;
-      biggest = Math.max(biggest, e.race.participants.length);
+      if (e.group.participants.length >= 2) multi++;
+      biggest = Math.max(biggest, e.group.participants.length);
       for (let k = 1; k < 4; k++) assert(res.finishAt[res.finishOrder[k]!]! > res.finishAt[res.finishOrder[k - 1]!]!, '들어온 순서 = 결승 시각 순서');
       for (const x of RACERS) {
         const keys = res.keys[x]!;
         for (let k = 1; k < keys.length; k++) assert(keys[k]!.t > keys[k - 1]!.t && keys[k]!.p > keys[k - 1]!.p, '경주 키프레임은 앞으로만');
       }
-      expected = new Set(e.race.participants.map((p) => p.monster));
-      for (const p of e.race.participants) {
+      expected = new Set(e.group.participants.map((p) => p.monster));
+      for (const p of e.group.participants) {
         const round = bs.rounds[p.seat];
-        assert(round !== null && round !== undefined && round.monster === p.monster && round.outcome.tier === raceTier(res, p.racer), '참가자마다 한판 (등급 = 그 선수의 결과)');
+        assert(round !== null && round !== undefined && round.monster === p.monster && round.outcome.tier === raceTier(res, p.pick as RacerIndex), '참가자마다 한판 (등급 = 그 선수의 결과)');
       }
     });
-    r.bus.on('raceProgress', (e) => {
+    r.bus.on('groupEvent', (e) => {
+      if (e.booth !== 'race') return;
       progress++;
-      assert(e.race.phase === 'running' && e.leader === raceStandings(e.race.result!, e.elapsed)[0], 'raceProgress 1등 = 그때 순위');
+      const res = raceOf(e.group.play)!;
+      assert(e.group.phase === 'running' && e.event.type === 'lead' && e.event.actor === raceStandings(res, e.event.t)[0] && e.event.t === e.group.elapsed, 'groupEvent 1등 = 그때 순위');
       for (const ch of e.cheers) {
-        const p = e.race.participants.find((x) => x.monster === ch.id);
-        assert(p !== undefined && p.racer === ch.racer, '응원은 참가자만');
-        assert((ch.kind === 'lead') === (ch.racer === e.leader), '자기 선수가 1등이면 들썩, 아니면 땀');
+        const p = e.group.participants.find((x) => x.monster === ch.id);
+        assert(p !== undefined && p.pick === ch.pick, '응원은 참가자만');
+        assert((ch.kind === 'lead') === (ch.pick === e.event.actor), '자기 선수가 1등이면 들썩, 아니면 땀');
         cheers++;
       }
     });
-    r.bus.on('raceFinished', (e) => {
+    r.bus.on('groupFinished', (e) => {
+      if (e.booth !== 'race') return;
       finishedRaces++;
-      assert(e.race.phase === 'done' && e.race.result !== null, '끝나면 done');
+      assert(e.group.phase === 'done' && raceOf(e.group.play) !== null, '끝나면 done');
     });
     r.bus.on('roundFinished', (e) => {
       if (e.booth !== 'race') return;
       const d = e.round.outcome.detail;
-      assert(d.kind === 'race' && race.phase === 'done' && race.result !== null, '경주 한판은 경주가 끝날 때');
+      assert(d.kind === 'race' && race.phase === 'done' && raceOf(race.play) !== null, '경주 한판은 경주가 끝날 때');
       assert(expected.has(e.round.monster), '이번 경주 참가자만 결과');
-      const res = race.result!;
+      const res = raceOf(race.play)!;
       const place = racePlace(res, d.racer);
       const t = e.round.outcome.tier;
       assert(d.place === place, '세부 등수 = 들어온 순서');
@@ -1096,11 +1144,21 @@ function selftest(): void {
     const starter = bs.staff[0]!;
     assert(r.assign(starter, null).ok && !r.boothOpen('race'), '출발 신호가 쉬면 경주장이 닫힌다');
     runFor(r, 60);
-    assert(bs.seats.every((x) => x === null) && bs.rounds.every((x) => x === null) && bs.queue.length === 0 && rs.booths.race.race?.phase === 'idle' && race.participants.length === 0, '닫힌 경주장: 자리·한판·줄이 비고 경주는 쉰다');
+    assert(bs.seats.every((x) => x === null) && bs.rounds.every((x) => x === null) && bs.queue.length === 0 && rs.booths.race.group?.phase === 'idle' && race.participants.length === 0, '닫힌 경주장: 자리·한판·줄이 비고 경주는 쉰다');
     for (const b of BOOTH_IDS) rs.booths[b].unlocked = true;
     checkInvariants(r);
     console.log(`  경주장 OK: 경주 ${started}번 (둘 이상 ${multi}, 가장 많이 ${biggest}명), 결과 ${settled}, 1등 바뀜 ${progress} (응원 ${cheers}), 구경 ${crowd}, 항아리 축제 ${festivals}`);
   }
+
+  // 6e) 단체 놀이 생성기 (셋째 묶음): 타임라인·사건·등급이 규칙과 맞고, 등급 비율이 ODDS와 비슷한가.
+  groupGenerators(rng);
+
+  // 6e') 단체 놀이 고르기 (셋째 묶음): 자리 고르기·구경 손님 고르기·나서기·진행 중 구경꾼 들썩임.
+  groupChoices(rng);
+  ssireumStepIn();
+
+  // 6f) 단체 놀이 엔진 (셋째 묶음): 부스 하나만 연 마을에서 판이 돌고, 출발 조건·편 맞추기·결과·지급·응원·반응이 맞는가.
+  groupLifecycles();
 
   // 7) 오래 돌려도 멈추지 않는다 (여러 시드, 120분).
   for (const seed of [1, 2, 3]) {
@@ -1124,7 +1182,9 @@ function selftest(): void {
     devOpenAll(e);
     const tb = tallyBooths(e);
     let progress = 0;
-    e.bus.on('raceProgress', () => progress++);
+    e.bus.on('groupEvent', (x) => {
+      if (x.booth === 'race') progress++;
+    });
     // 항아리 축제는 이긴 손님만, 이기지 못하고 코인이 모자라면 (돌려받았어도) 빈털터리.
     const lastTier = new Map<number, OutcomeTier>();
     let badFestival = 0;
@@ -1139,6 +1199,12 @@ function selftest(): void {
       const t = lastTier.get(x.monster);
       if (t !== 'win' && t !== 'jackpot') badFestival++;
     });
+    // 판이 끝날 때 놀이 근처에서 구경하는 손님 (판이 시작할 때 걷다가 발을 멈춘 손님 포함).
+    let watching = 0;
+    e.bus.on('groupFinished', (x) => {
+      const c = groupGame(x.booth).center;
+      watching += e.state.monsters.filter((m) => m.phase === 'spectating' && Math.hypot(m.pos.x - c.x, m.pos.y - c.y) < TUNE.groupDrawRadius + 400).length;
+    });
     const chief = makeGreedyChief(seed);
     const n = Math.round((60 * 60) / SIM.dt);
     for (let i = 0; i < n; i++) {
@@ -1146,14 +1212,678 @@ function selftest(): void {
       checkInvariants(e);
       if (i % 10 === 0) chief(e, () => {});
     }
-    for (const b of BOOTH_IDS) assert(tb.rounds[b] >= 30, `다 열린 마을 60분: ${b} 한판 ${tb.rounds[b]} (30 이상)`);
+    // 부스가 15개라 손님 한 명이 들르는 부스가 흩어진다: 부스마다 20판 이상.
+    for (const b of BOOTH_IDS) assert(tb.rounds[b] >= 20, `다 열린 마을 60분: ${b} 한판 ${tb.rounds[b]} (20 이상)`);
+    for (const b of GROUP_BOOTHS) assert(tb.groups[b].n >= 10, `다 열린 마을 60분: ${b} ${tb.groups[b].n}판 (10 이상)`);
     assert(badFestival === 0, `이기지 않은 한판의 항아리 축제 ${badFestival}`);
     assert(missedBroke === 0, `코인이 모자란데 빈털터리가 아닌 손님 ${missedBroke}`);
-    assert(tb.races >= 40 && tb.runners / tb.races >= 1.8 && progress > 0, `경주 ${tb.races}번, 평균 참가 ${(tb.runners / Math.max(1, tb.races)).toFixed(2)}`);
+    // 부스 15개에 손님이 흩어져 경주 한 번 참가자가 예전(10개, 약 2.4명)보다 적다: 1.3명 이상. 줄다리기는 편마다 둘이라 2.5명 이상.
+    assert(tb.races >= 30 && tb.runners / tb.races >= 1.3 && progress > 0, `경주 ${tb.races}번, 평균 참가 ${(tb.runners / Math.max(1, tb.races)).toFixed(2)}`);
+    assert(tb.groups.tug.runners / Math.max(1, tb.groups.tug.n) >= 2.5, `줄다리기 평균 참가 ${(tb.groups.tug.runners / Math.max(1, tb.groups.tug.n)).toFixed(2)}`);
+    // 밀어내기는 상대가 오지 않으면 접히지만 (구경 손님이 나서기도 한다) 셋 가운데 하나를 넘지 않는다. 판이 끝날 때 구경하는 손님이 있다.
+    const sg = tb.groups.ssireum;
+    assert(sg.cancelled <= (sg.n + sg.cancelled) / 3, `밀어내기 접힌 판 ${sg.cancelled} / ${sg.n + sg.cancelled}`);
+    assert(watching > 0, '단체 놀이를 구경하는 손님');
     console.log(`  60분 (시드 ${seed}, 처음부터 다 열린 마을) OK: 손님 ${e.state.totals.visitors}, 한판 ${e.state.totals.rounds}, 경주 ${tb.races}번 (평균 ${(tb.runners / tb.races).toFixed(1)}명, 가장 많이 ${tb.maxRunners}명)`);
     console.log(`     ${BOOTH_IDS.map((b) => `${b} ${tb.rounds[b]}`).join(', ')}`);
+    console.log(`     단체 놀이: ${GROUP_BOOTHS.map((b) => { const g = tb.groups[b]; return `${b} ${g.n}판 평균 ${(g.runners / Math.max(1, g.n)).toFixed(1)}명 (접힘 ${g.cancelled})`; }).join(', ')}, 판 끝 구경 ${watching}`);
   }
   console.log('\nselftest 통과');
+}
+
+// ── 단체 놀이 (셋째 묶음) 시험 ─────────────────────────────────────────
+
+/** 참가자 n명 (자리 0부터, 고른 것은 그 놀이의 join 규칙으로). */
+function groupEntries(rng: Rng, b: GroupBoothId, n: number, seats: readonly number[] = Array.from({ length: n }, (_, i) => i)): GroupEntry[] {
+  const game = groupGame(b);
+  const probe = new Sim(newGame(1)).state.monsters[0]!;
+  const out: GroupEntry[] = [];
+  for (const seat of seats.slice(0, n)) {
+    const j = game.join(rng, seat, { ...probe, species: 'dragon' }, out);
+    out.push({ monster: 1000 + seat, seat, pick: j.pick, role: j.role, bet: 10, fee: 2 });
+  }
+  return out;
+}
+
+/** 판 하나의 사건을 엔진처럼 시계대로 하나씩 꺼낸다 (0.1초 틱, poll이 받아들인 사건 순서). */
+function pollAll(b: GroupBoothId, play: GroupPlay): GroupEvent[] {
+  const game = groupGame(b);
+  const g: GroupState = { phase: 'running', countdown: 0, elapsed: 0, duration: play.end, participants: [], play, mark: null, markAt: 0, cursor: 0 };
+  const got: GroupEvent[] = [];
+  while (g.elapsed < g.duration) {
+    g.elapsed += SIM.dt;
+    const ev = game.poll(play, g, g.elapsed);
+    if (ev === null) continue;
+    if (play.events[g.cursor ?? 0] === ev) g.cursor = (g.cursor ?? 0) + 1;
+    g.mark = ev.actor;
+    g.markAt = g.elapsed;
+    got.push(ev);
+  }
+  return got;
+}
+
+type TierCount = Record<OutcomeTier, number>;
+const zeroTiers = (): TierCount => ({ jackpot: 0, win: 0, nearMiss: 0, lose: 0 });
+
+function checkOdds(b: GroupBoothId, counts: TierCount, tol = 0.012): string {
+  const row = ODDS[b] as Partial<Record<OutcomeTier, readonly [number, number]>>;
+  const n = counts.jackpot + counts.win + counts.nearMiss + counts.lose;
+  let rtp = 0;
+  for (const t of Object.keys(counts) as OutcomeTier[]) {
+    const p = counts[t] / n;
+    assert(Math.abs(p - (row[t]?.[0] ?? 0)) < tol, `${b} ${t} 비율 ${p.toFixed(3)} ≈ ODDS ${row[t]?.[0]}`);
+    rtp += p * (row[t]?.[1] ?? 0);
+  }
+  return `환급률 ${rtp.toFixed(3)}`;
+}
+
+/** 키프레임이 시각 순서이고 값이 범위 안인가. */
+function checkKeys(keys: readonly GroupKey[], lo: number, hi: number, what: string): void {
+  for (let k = 0; k < keys.length; k++) {
+    const x = keys[k]!;
+    assert(Number.isFinite(x.t) && Number.isFinite(x.p) && x.p >= lo - 1e-9 && x.p <= hi + 1e-9, `${what} 키 값 범위 (${x.t}, ${x.p})`);
+    if (k > 0) assert(x.t > keys[k - 1]!.t, `${what} 키 시각 순서`);
+  }
+}
+
+function groupGenerators(rng: Rng): void {
+  const ctxOf = (b: GroupBoothId, lucky = -1): { duration: number; level: number; pace: number; lucky: number; seats: number } => ({ duration: BOOTHS[b].roundSec[0], level: 1, pace: 3, lucky, seats: BOOTHS[b].seats[0] });
+  const N = 6000;
+  // 씨름·줄다리기: p(t)·c(t) 모양 (끝에 ±1, 그 전엔 닿지 않음), 막판 모양과 등급, 사건.
+  for (const b of ['ssireum', 'tug'] as const) {
+    const tiers = zeroTiers();
+    let flips = 0;
+    let wins = 0;
+    const rules = b === 'ssireum' ? SSIREUM : TUG;
+    for (let i = 0; i < N; i++) {
+      const n = b === 'ssireum' ? 2 + rng.int(0, 4) : 2 * rng.int(2, 4);
+      const es = groupEntries(rng, b, n);
+      if (b === 'ssireum') assert(es[0]!.role === 'player' && es[0]!.pick === 0 && es[1]!.role === 'player' && es[1]!.pick === 1 && es.slice(2).every((e) => e.role === 'bettor'), '씨름 자리 0·1 = 홍·청 선수, 나머지 구경');
+      const play = groupGame(b).generate(rng, es, ctxOf(b));
+      assert(play.kind === b && play.outcomes.length === es.length && play.end === ctxOf(b).duration, `${b} 판 모양`);
+      if (play.kind !== 'ssireum' && play.kind !== 'tug') continue;
+      const end = play.kind === 'ssireum' ? play.throwAt : play.crossAt;
+      const flip = play.kind === 'ssireum' ? play.flip : play.comeback;
+      const s = sideSign(play.winner);
+      const keys = play.tracks[0]!;
+      checkKeys(keys, -1, 1, b);
+      assert(Math.abs(keys[keys.length - 1]!.t - end) < 1e-9 && keys[keys.length - 1]!.p === s, `${b} 끝에 이긴 편 쪽 ±1`);
+      const tail = rules.closeFrom * end;
+      let ledLate = false;
+      let minS = 1;
+      for (let t = 0.05; t < end - 1e-6; t += 0.05) {
+        const v = trackAt(keys, t);
+        assert(Math.abs(v) < 1, `${b} 끝나기 전에는 ±1에 닿지 않는다 (${t.toFixed(2)}: ${v})`);
+        minS = Math.min(minS, s * v);
+        if (t >= tail && s * v < 0) ledLate = true;
+        if (t >= tail && !play.close) assert(s * v >= -1e-9, `${b} 보통 판: 막판엔 이긴 편이 앞선다`);
+      }
+      assert(ledLate === play.close, `${b} close = 막판에 진 편이 앞섰다 (${ledLate}/${play.close})`);
+      if (flip) assert(play.close && minS <= -rules.brink, `${b} 뒤집기: 이긴 편이 ${-rules.brink}보다 밀렸다 (${minS.toFixed(2)})`);
+      else assert(minS > -rules.brink, `${b} 뒤집기가 아니면 이긴 편이 그만큼 밀리지 않는다 (${minS.toFixed(2)})`);
+      // 사건: 시각 순서, 끝(finish)이 승부 시각에 이긴 편, 뒤집기 판에만 flip, 엔진처럼 꺼내면 다 나온다.
+      for (let k = 1; k < play.events.length; k++) assert(play.events[k]!.t >= play.events[k - 1]!.t, `${b} 사건 시각 순서`);
+      const fin = play.events.filter((e) => e.type === 'finish');
+      assert(fin.length === 1 && Math.abs(fin[0]!.t - end) < 1e-9 && fin[0]!.actor === play.winner, `${b} 끝 사건`);
+      assert(play.events.some((e) => e.type === 'flip') === flip, `${b} 뒤집기 사건 = 뒤집기 판`);
+      assert(pollAll(b, play).length === play.events.length, `${b} 사건이 판 안에 다 나온다`);
+      es.forEach((e, k) => {
+        const o = play.outcomes[k]!;
+        const won = e.pick === play.winner;
+        assert(o.tier === (won ? (flip ? 'jackpot' : 'win') : play.close ? 'nearMiss' : 'lose') && o.multiplier === (ODDS[b] as Partial<Record<OutcomeTier, readonly [number, number]>>)[o.tier]?.[1], `${b} 등급·배당`);
+        tiers[o.tier]++;
+      });
+      wins++;
+      if (flip) flips++;
+    }
+    console.log(`  ${b} 생성기 OK: 뒤집기 ${(flips / wins).toFixed(3)}, ${checkOdds(b, tiers)}`);
+  }
+  // 행운: 그 손님 편이 이긴다.
+  for (const b of ['ssireum', 'tug', 'kite', 'boat'] as const) {
+    for (let i = 0; i < 300; i++) {
+      const es = groupEntries(rng, b, b === 'tug' ? 4 : 3);
+      const lucky = rng.int(0, es.length - 1);
+      const play = groupGame(b).generate(rng, es, ctxOf(b, lucky));
+      assert(play.outcomes[lucky]!.tier === 'win' || play.outcomes[lucky]!.tier === 'jackpot', `${b} 행운이 붙은 손님 쪽이 이긴다`);
+    }
+  }
+  // 줄다리기 편 맞추기·출발 조건.
+  {
+    const mk = (sides: number[]): GroupEntry[] => sides.map((p, i) => ({ monster: i, seat: i, pick: p, role: 'player', bet: 1, fee: 0 }));
+    for (let i = 0; i < 500; i++) {
+      const es = mk(Array.from({ length: rng.int(1, 10) }, () => rng.int(0, 1)));
+      const keep = tugLineup(es);
+      const r = keep.filter((e) => e.pick === 0).length;
+      const bl = keep.filter((e) => e.pick === 1).length;
+      const want = Math.min(es.filter((e) => e.pick === 0).length, es.filter((e) => e.pick === 1).length, TUG.maxSide);
+      assert(r === bl && r === want, `줄다리기 편 인원을 맞춘다 (${r}:${bl}, ${want})`);
+      assert(keep.every((e, k) => k === 0 || e.seat > keep[k - 1]!.seat), '먼저 온 손님부터, 순서 그대로');
+    }
+    const game = groupGame('tug');
+    assert(game.readiness(mk([0, 1, 0, 1]), 0) === 'soon' && game.readiness(mk([0, 1]), 0) === 'none' && game.readiness(mk([0, 1]), TUG.soloAfterSec) === 'ok' && game.readiness(mk([0, 0, 0]), 99) === 'none', '줄다리기 출발 조건 (편마다 둘, 오래 기다리면 하나씩)');
+    const sg = groupGame('ssireum');
+    assert(sg.readiness(groupEntries(rng, 'ssireum', 1), 99) === 'none' && sg.readiness(groupEntries(rng, 'ssireum', 2), 0) === 'soon', '씨름 출발 조건 (선수 둘)');
+  }
+  // 연날리기: 끊긴 순서·사건·키·등급.
+  {
+    const tiers = zeroTiers();
+    let lates = 0;
+    let closes = 0;
+    for (let i = 0; i < N; i++) {
+      const es = groupEntries(rng, 'kite', rng.int(1, 6));
+      const play = groupGame('kite').generate(rng, es, { ...ctxOf('kite'), duration: BOOTHS.kite.roundSec[i % 3]! });
+      if (play.kind !== 'kite') throw new Error('kite');
+      const K = KITE.kites.length;
+      const D = play.end;
+      const winner = play.order[K - 1]!;
+      assert(new Set(play.order).size === K && play.cutAt[winner] === -1, '연: 끊긴 순서는 연 넷, 이긴 연은 안 끊긴다');
+      for (let k = 0; k < K - 1; k++) {
+        const a: number = play.order[k]!;
+        assert(play.cutAt[a]! > 0 && play.cutAt[a]! < D - 0.3 && (k === 0 || play.cutAt[a]! > play.cutAt[play.order[k - 1]!]!), '연: 끊긴 때는 순서대로, 판 안');
+        const cut: GroupEvent | undefined = play.events.find((e) => e.type === 'cut' && e.actor === a);
+        assert(cut !== undefined && Math.abs(cut.t - play.cutAt[a]!) < 1e-9, '연: 끊김 사건 = 끊긴 때');
+        const other: number = cut.other ?? -1;
+        assert(other !== a && (play.cutAt[other] === -1 || play.cutAt[other]! > cut.t), '연: 끊은 연은 그때 살아 있다');
+        assert(play.events.some((e) => e.type === 'tangle' && e.actor === a && e.other === other && e.t < cut.t && e.t > cut.t - 1.6), '연: 끊기기 전에 그 둘이 연싸움');
+        if (k === K - 2) assert(other === winner, '연: 마지막 연싸움은 이긴 연과');
+        // 끊긴 연의 키는 끊긴 때에서 끝난다.
+        const hk = play.tracks[a * 2]!;
+        assert(Math.abs(hk[hk.length - 1]!.t - play.cutAt[a]!) < 1e-9, '연: 끊긴 연의 키는 끊긴 때까지');
+      }
+      for (let k = 0; k < K; k++) {
+        checkKeys(play.tracks[k * 2]!, 0, 1.05, '연 높이');
+        checkKeys(play.tracks[k * 2 + 1]!, -4, 4, '연 좌우');
+        assert(play.tracks[k * 2]!.length === play.tracks[k * 2 + 1]!.length, '연 높이·좌우 키 수');
+      }
+      const last = play.cutAt[play.order[K - 2]!]!;
+      assert(play.late === last >= KITE.lateFrom * D - 1e-9, `연: late = 마지막에서 두 번째 연이 끝 무렵 끊김 (${(last / D).toFixed(2)})`);
+      assert(play.close === play.events.some((e) => e.type === 'brink' && e.actor === winner), '연: close = 이긴 연이 끊길 뻔한 사건');
+      assert(play.events.filter((e) => e.type === 'cut').length === K - 1, '연: 끊김 셋');
+      for (let k = 1; k < play.events.length; k++) assert(play.events[k]!.t >= play.events[k - 1]!.t, '연 사건 시각 순서');
+      assert(pollAll('kite', play).length === play.events.length, '연 사건이 판 안에 다 나온다');
+      es.forEach((e, k) => {
+        const o = play.outcomes[k]!;
+        const place = K - play.order.indexOf(e.pick);
+        assert(o.detail.kind === 'kite' && o.detail.place === place && o.tier === (place === 1 ? (play.close ? 'jackpot' : 'win') : place === 2 && play.late ? 'nearMiss' : 'lose'), '연 등급');
+        tiers[o.tier]++;
+      });
+      if (play.late) lates++;
+      if (play.close) closes++;
+    }
+    console.log(`  kite 생성기 OK: 끝 무렵 끊김 ${(lates / N).toFixed(3)}, 끊길 뻔 ${(closes / N).toFixed(3)}, ${checkOdds('kite', tiers)}`);
+  }
+  // 보물찾기: 상자는 많아야 하나, 판의 chestChance, 바로 옆 = nearMiss, 할아버지가 판다.
+  {
+    const tiers = zeroTiers();
+    let chests = 0;
+    let found = 0;
+    for (let i = 0; i < N * 2; i++) {
+      const es = groupEntries(rng, 'dig', rng.int(1, 6));
+      const play = groupGame('dig').generate(rng, es, ctxOf('dig'));
+      if (play.kind !== 'dig') throw new Error('dig');
+      assert(play.finds.filter((f) => f === 'chest').length <= 1, '보물찾기: 상자는 판마다 많아야 하나');
+      assert(play.found === (play.chest >= 0 && es.some((e) => e.pick === play.chest)), '보물찾기: found = 상자 자리를 판 손님이 있다');
+      assert(play.events.some((e) => e.type === 'reveal') === (play.chest >= 0 && !play.found), '보물찾기: 못 찾은 상자만 할아버지가');
+      play.finds.forEach((f, spot) => assert((f === 'none') === !es.some((e) => e.pick === spot) && ((play.findAt[spot] ?? -1) >= 0) === (f !== 'none'), '보물찾기: 판 자리만 나온다'));
+      es.forEach((e, k) => {
+        const o = play.outcomes[k]!;
+        const f = play.finds[e.pick]!;
+        const near = digNear(play.chest, e.pick);
+        const want: OutcomeTier = f === 'chest' ? 'jackpot' : f === 'coins' || f === 'gem' ? 'win' : near ? 'nearMiss' : 'lose';
+        assert(o.tier === want && o.detail.kind === 'dig' && o.detail.chestNear === near, `보물찾기 등급 (${f}, ${near})`);
+        tiers[o.tier]++;
+      });
+      for (let k = 1; k < play.events.length; k++) assert(play.events[k]!.t >= play.events[k - 1]!.t, '보물찾기 사건 시각 순서');
+      assert(pollAll('dig', play).length === play.events.length, '보물찾기 사건이 판 안에 다 나온다');
+      if (play.chest >= 0) chests++;
+      if (play.found) found++;
+    }
+    assert(Math.abs(chests / (N * 2) - DIG.chestChance) < 0.015, `보물찾기: 상자가 묻힌 판 ${(chests / (N * 2)).toFixed(3)} ≈ ${DIG.chestChance}`);
+    console.log(`  dig 생성기 OK: 상자 ${(chests / (N * 2)).toFixed(3)} (찾음 ${(found / (N * 2)).toFixed(3)}), ${checkOdds('dig', tiers)}`);
+  }
+  // 오리배: 경주와 같은 생성기, 세부는 boat.
+  {
+    const tiers = zeroTiers();
+    for (let i = 0; i < N; i++) {
+      const es = groupEntries(rng, 'boat', rng.int(1, 6));
+      const play = groupGame('boat').generate(rng, es, ctxOf('boat'));
+      assert(play.kind === 'boat' && play.tracks === play.race.keys, '오리배 판 = 경주');
+      es.forEach((e, k) => {
+        const o = play.outcomes[k]!;
+        assert(o.detail.kind === 'boat' && o.detail.racer === e.pick && o.tier === raceTier(raceOf(play)!, e.pick as RacerIndex), '오리배 등급 = 경주 등급');
+        tiers[o.tier]++;
+      });
+    }
+    console.log(`  boat 생성기 OK: ${checkOdds('boat', tiers)}`);
+  }
+  // 반응 표: 셋째 묶음 부스마다 등급마다 (결과 세부 열쇠마다: 선수·구경 손님, 나온 것) 3~5개, 공통 표와 다르고 부스 안에서 겹치지 않는다.
+  for (const b of ['ssireum', 'boat', 'kite', 'tug', 'dig'] as const) {
+    const names: string[] = [];
+    for (const t of ['jackpot', 'win', 'nearMiss', 'lose'] as OutcomeTier[]) {
+      const keys = reactionKeys(b, t);
+      for (const k of keys.length > 0 ? keys : [undefined]) {
+        const ls = reactionLabels(t, b, k);
+        assert(ls.length >= 3 && ls.length <= 5 && ls.every((x) => !reactionLabels(t, null).includes(x)), `${b} ${t}${k === undefined ? '' : ` (${k})`} 반응 후보 3~5개 (${ls.length}), 공통 표와 다름`);
+      }
+      names.push(...reactionLabels(t, b));
+    }
+    assert(new Set(names).size === names.length, `${b} 반응 이름이 겹치지 않는다`);
+    const gl = groupReactionLabels(b);
+    assert(gl.cheer.length >= 6 && gl.spectate.length >= 10 && gl.buzz.length >= 9, `${b} 응원·구경·들썩임 반응 표`);
+    for (const x of [...names, ...gl.cheer, ...gl.spectate, ...gl.buzz]) assert(!/씨름|샅바|방패연|도박|겜블|베팅|판돈/.test(x), `${b} 반응 낱말 (${x})`);
+  }
+  // 놀이마다 꼭 있는 말, 세부가 후보를 좁힌다 (벌러덩은 모래판의 선수만, 헌 장화는 장화가 나온 손님만), 사건마다 다른 응원.
+  const has = (ls: readonly string[], x: string): boolean => ls.includes(x);
+  assert(has(reactionLabels('jackpot', 'ssireum', 'player'), '뒤집기!') && has(reactionLabels('lose', 'ssireum', 'player'), '벌러덩') && !has(reactionLabels('lose', 'ssireum', 'bettor'), '벌러덩'), '밀어내기: 뒤집기!·벌러덩 (선수만)');
+  assert(has(reactionLabels('lose', 'tug'), '우르르') && has(groupReactionLabels('tug', { kind: 'lead', key: 'lead' }).cheer, '영차영차'), '줄다리기: 우르르·영차영차');
+  assert(has(reactionLabels('nearMiss', 'dig'), '바로 옆이었는데!') && has(reactionLabels('lose', 'dig', 'boot'), '헌 장화…') && !has(reactionLabels('lose', 'dig', 'pebble'), '헌 장화…'), '보물찾기: 바로 옆이었는데!·헌 장화… (장화만)');
+  assert(has(reactionLabels('lose', 'kite', 'player'), '줄이 끊겼다') && has(reactionLabels('jackpot', 'boat'), '물보라 역전'), '연: 줄이 끊겼다, 오리배: 물보라 역전');
+  assert(has(groupReactionLabels('ssireum', { kind: 'lead', key: 'flip' }).cheer, '뒤집어라!') && has(groupReactionLabels('ssireum', { kind: 'behind', key: 'flip:other' }).cheer, '어어 뒤집힌다?!'), '밀어내기 뒤집기 응원');
+  assert(has(groupReactionLabels('kite', { kind: 'behind', key: 'cut' }).cheer, '앗, 끊어졌다!') && has(groupReactionLabels('kite', { kind: 'lead', key: 'cut:other' }).cheer, '끊었다!'), '연줄 끊김 응원');
+  assert(has(groupReactionLabels('dig', { kind: 'behind', key: 'find:other' }).cheer, '옆을 팔걸') && !has(groupReactionLabels('dig', { kind: 'behind', key: 'find' }).cheer, '옆을 팔걸'), '보물찾기: 옆에서 상자가 나오면');
+  // 자기 땅에서 나온 것에 맞는 말 (조약돌에 '장화네…'가 나오지 않게).
+  const digFind = (f: string): string[] => groupReactionLabels('dig', { kind: 'behind', key: cheerKey('find', 2, 2, f) }).cheer;
+  assert(has(digFind('boot'), '장화네…') && !has(digFind('boot'), '에이 돌멩이') && has(digFind('pebble'), '에이 돌멩이') && !has(digFind('pebble'), '장화네…'), '보물찾기: 장화·조약돌마다 다른 응원');
+  {
+    const probe = { ...new Sim(newGame(2)).state.monsters[0]!, traits: [] };
+    for (let i = 0; i < 400; i++) {
+      const pl = pickReaction(rng, 'lose', probe, 1, 'ssireum', { kind: 'ssireum', side: 0, role: 'bettor', won: false, flip: false, close: false });
+      assert(pl.label !== '벌러덩' && reactionLabels('lose', 'ssireum', 'bettor').includes(pl.label), '구경 손님은 벌러덩하지 않는다');
+      const dg = pickReaction(rng, 'lose', probe, 1, 'dig', { kind: 'dig', spot: 0, find: 'pebble', chestNear: false });
+      assert(reactionLabels('lose', 'dig', 'pebble').includes(dg.label), '조약돌이 나온 손님의 반응');
+    }
+  }
+  console.log('  셋째 묶음 반응 표 OK');
+}
+
+/**
+ * 단체 놀이의 고르기 (셋째 묶음 모듈의 순수 규칙): 자리 고르기(seatFor), 구경 손님의 고르기(join), 나서기(stepIn), 진행 중 구경꾼 들썩임(buzz).
+ */
+function groupChoices(rng: Rng): void {
+  const base = new Sim(newGame(1)).state.monsters[0]!;
+  const mk = (species: SpeciesId, traits: TraitId[] = [], id = 1): Monster => ({ ...base, id, species, traits });
+  const all = (n: number): number[] => Array.from({ length: n }, (_, i) => i);
+  const rate = (n: number, f: () => boolean): number => {
+    let k = 0;
+    for (let i = 0; i < n; i++) if (f()) k++;
+    return k / n;
+  };
+  // 줄다리기: 적은 편으로, 같으면 같은 종 친구 편, 편 안에서는 가운데(작은 자리 번호)부터. 무작위로 앉혀도 편 차이는 1 이하.
+  {
+    const g = groupGame('tug');
+    const seated = (xs: (SpeciesId | null)[]): (Monster | null)[] => xs.map((s, i) => (s === null ? null : mk(s, [], 10 + i)));
+    assert(g.seatFor!(rng, mk('pudding'), [3, 4, 5], seated(['dragon', 'crab', 'goblin', null, null, null])) === 3, '줄다리기: 적은 편(청)의 가운데 자리로');
+    assert(g.seatFor!(rng, mk('pudding'), [2, 3, 4, 5], seated(['pudding', 'crab', null, null, null, null])) === 2, '줄다리기: 같으면 같은 종 친구 편');
+    assert(g.seatFor!(rng, mk('pudding'), [1, 3, 5], seated(['dragon', null, 'goblin', null, 'kabocha', null])) === 1, '줄다리기: 적은 편의 가운데부터');
+    for (let i = 0; i < 300; i++) {
+      const seats: (Monster | null)[] = Array.from({ length: 8 }, () => null);
+      for (let k = 0; k < 8; k++) {
+        const free = all(8).filter((j) => seats[j] === null);
+        const at = g.seatFor!(rng, mk(rng.pick(SPECIES_IDS)), free, seats);
+        assert(free.includes(at), '줄다리기: 빈 자리에');
+        seats[at] = mk('dragon', [], 100 + k);
+        const red = seats.filter((x, j) => x !== null && j % 2 === 0).length;
+        const blue = seats.filter((x, j) => x !== null && j % 2 === 1).length;
+        assert(Math.abs(red - blue) <= 1, `줄다리기: 편 차이 1 이하 (${red}:${blue})`);
+      }
+    }
+  }
+  // 밀어내기: 대담이는 선수로 잘 나서고 겁쟁이는 구경 자리로, 상대가 기다리면 더 잘 나선다. 구경 손님은 같은 종 선수 쪽, 구경꾼은 많은 쪽, 대담이는 적은 쪽.
+  {
+    const g = groupGame('ssireum');
+    const empty: (Monster | null)[] = Array.from({ length: 6 }, () => null);
+    const waiting: (Monster | null)[] = [mk('dragon', [], 50), null, null, null, null, null];
+    const ring = (m: Monster, seated: (Monster | null)[], free: number[]): number => rate(3000, () => g.seatFor!(rng, m, free, seated) <= 1);
+    const bold = ring(mk('dragon', ['bold']), empty, all(6));
+    const coward = ring(mk('crab', ['coward']), empty, all(6));
+    const cowardWait = ring(mk('crab', ['coward']), waiting, [1, 2, 3, 4, 5]);
+    assert(bold > 0.7 && coward < 0.35 && cowardWait > coward + 0.3, `밀어내기 자리: 대담이 ${bold.toFixed(2)}, 겁쟁이 ${coward.toFixed(2)}, 상대가 기다리면 ${cowardWait.toFixed(2)}`);
+    assert(g.seatFor!(rng, mk('dragon', ['bold']), [2, 3], [mk('crab'), mk('goblin'), null, null, null, null]) >= 2, '모래판이 차면 구경 자리');
+    assert(g.seatFor!(rng, mk('crab', ['coward']), [1], [mk('dragon'), null, mk('goblin'), mk('pudding'), mk('radish'), mk('kabocha')]) === 1, '구경 자리가 차면 모래판');
+    const players: GroupEntry[] = [
+      { monster: 1, seat: 0, pick: 0, role: 'player', bet: 5, fee: 2 },
+      { monster: 2, seat: 1, pick: 1, role: 'player', bet: 5, fee: 2 },
+    ];
+    const who = (id: number): Monster | undefined => (id === 1 ? mk('dragon', [], 1) : id === 2 ? mk('crab', [], 2) : id === 5 ? mk('crab', ['coward'], 5) : id === 6 ? mk('kabocha', [], 6) : undefined);
+    const kin = rate(2000, () => g.join(rng, 3, mk('crab', [], 9), players, who).pick === 1);
+    assert(kin > 0.8, `구경 손님은 같은 종 선수 쪽 (${kin.toFixed(2)})`);
+    const crowded: GroupEntry[] = [...players, { monster: 3, seat: 2, pick: 0, role: 'bettor', bet: 5, fee: 2 }, { monster: 4, seat: 3, pick: 0, role: 'bettor', bet: 5, fee: 2 }];
+    const follow = rate(2000, () => g.join(rng, 4, mk('turtle', ['watcher'], 9), crowded, who).pick === 0);
+    const under = rate(2000, () => g.join(rng, 4, mk('otter', ['bold'], 9), crowded, who).pick === 1);
+    assert(follow > 0.7 && under > 0.65, `구경꾼은 많은 편 (${follow.toFixed(2)}), 대담이는 적은 편 (${under.toFixed(2)})`);
+    // 나서기: stepInSec 전에는 없고, 뒤에는 겁쟁이가 아닌 구경 손님이 빈 모래판 자리로 (그 편 선수가 된다).
+    const lone: GroupEntry[] = [
+      { monster: 1, seat: 0, pick: 0, role: 'player', bet: 5, fee: 2 },
+      { monster: 5, seat: 3, pick: 0, role: 'bettor', bet: 5, fee: 2 },
+      { monster: 6, seat: 4, pick: 0, role: 'bettor', bet: 5, fee: 2 },
+    ];
+    assert(g.stepIn!(lone, SSIREUM.stepInSec - 0.5, [1, 2, 5], who) === null, '밀어내기: 조금 기다린 뒤에 나선다');
+    const s = g.stepIn!(lone, SSIREUM.stepInSec, [1, 2, 5], who);
+    assert(s !== null && s.index === 2 && s.seat === 1 && s.pick === 1 && s.role === 'player', `밀어내기: 겁쟁이가 아닌 구경 손님이 빈 모래판 자리로 (${JSON.stringify(s)})`);
+    assert(g.stepIn!(lone, 99, [2, 5], who) === null, '밀어내기: 모래판 자리가 없으면 나서지 않는다');
+  }
+  // 연날리기: 대담이는 연을 날리러, 겁쟁이·구경꾼은 구경 자리로. 구경 손님은 같은 종이 날리는 연.
+  {
+    const g = groupGame('kite');
+    const empty: (Monster | null)[] = Array.from({ length: 6 }, () => null);
+    const fly = (m: Monster): number => rate(3000, () => g.seatFor!(rng, m, all(6), empty) < KITE.flyers);
+    const bold = fly(mk('dragon', ['bold']));
+    const shy = fly(mk('crab', ['coward', 'watcher']));
+    assert(bold > 0.75 && shy < bold - 0.4, `연: 대담이 ${bold.toFixed(2)} 날리기, 겁쟁이 구경꾼 ${shy.toFixed(2)}`);
+    const flyers: GroupEntry[] = [0, 1, 2, 3].map((k) => ({ monster: 20 + k, seat: k, pick: k, role: 'player', bet: 5, fee: 2 }));
+    const who = (id: number): Monster | undefined => (id >= 20 && id < 24 ? mk(id === 22 ? 'owl' : 'dragon', [], id) : undefined);
+    const kin = rate(2000, () => g.join(rng, 4, mk('owl', [], 9), flyers, who).pick === 2);
+    assert(kin > 0.8, `연: 구경 손님은 같은 종이 날리는 연 (${kin.toFixed(2)})`);
+  }
+  // 보물찾기: 빈 흙더미 가운데 무작위.
+  {
+    const g = groupGame('dig');
+    const seen = new Set<number>();
+    for (let i = 0; i < 400; i++) {
+      const at = g.seatFor!(rng, mk('mole'), [1, 3, 4], Array.from({ length: 6 }, (_, k) => (k === 1 || k === 3 || k === 4 ? null : mk('dragon', [], 30 + k))));
+      assert([1, 3, 4].includes(at), '보물찾기: 빈 흙더미에');
+      seen.add(at);
+    }
+    assert(seen.size === 3, '보물찾기: 빈 흙더미 어디나');
+  }
+  // 오리배: 좋아하는 배가 있는 종은 그 배를 자주.
+  {
+    const g = groupGame('boat');
+    const fan = rate(2000, () => g.join(rng, 0, mk('otter', [], 9), [], () => undefined).pick === 0);
+    assert(fan > 0.55, `오리배: 수달은 오리배를 자주 (${fan.toFixed(2)})`);
+  }
+  // 진행 중 구경꾼 들썩임: 사건마다 맞는 모양.
+  {
+    const ctxOf = (b: GroupBoothId) => ({ duration: BOOTHS[b].roundSec[0], level: 1, pace: 3, lucky: -1, seats: BOOTHS[b].seats[0] });
+    const kinds = new Map<string, number>();
+    const count = (k: string): void => {
+      kinds.set(k, (kinds.get(k) ?? 0) + 1);
+    };
+    for (let i = 0; i < 400; i++) {
+      for (const b of ['ssireum', 'tug', 'kite', 'dig', 'boat', 'race'] as const) {
+        const game = groupGame(b);
+        const es = groupEntries(rng, b, b === 'tug' ? 4 : b === 'dig' ? 6 : 4);
+        const play = game.generate(rng, es, ctxOf(b));
+        for (const ev of pollAll(b, play)) {
+          const z = game.buzz?.(play, ev, es) ?? null;
+          if (z !== null) {
+            assert(z.star >= -1 && z.star < es.length, `${b} 들썩임 주인공`);
+            count(`${b}:${ev.type}:${z.kind}`);
+          }
+          if (b === 'ssireum' || b === 'tug') {
+            if (ev.type === 'flip') assert(z?.kind === 'wow', `${b} 뒤집기 = 환호`);
+            if (ev.type === 'brink') assert(z?.kind === 'gasp', `${b} 질 뻔함 = 어머나`);
+            if (ev.type === 'lead') assert((ev.prev ?? -1) < 0 ? z === null : z?.kind === 'cheer', `${b} 앞선 편이 바뀜 = 박수 (처음은 없음)`);
+          }
+          if (b === 'kite' && (ev.type === 'tangle' || ev.type === 'brink')) assert(z?.kind === 'gasp', '연싸움·끊길 뻔 = 어머나');
+          if (b === 'dig' && play.kind === 'dig' && ev.type === 'find') {
+            const f = play.finds[ev.actor];
+            assert(z?.kind === (f === 'chest' ? 'wow' : f === 'coins' || f === 'gem' ? 'cheer' : f === 'boot' ? 'laugh' : undefined), `보물찾기 들썩임 (${f})`);
+          }
+          if ((b === 'race' || b === 'boat') && z !== null) {
+            const r = raceOf(play)!;
+            assert(ev.type === 'lead' && ev.t >= r.finishAt[r.finishOrder[0]!]! * TUNE.raceBuzzFrom, `${b} 들썩임은 막판 1등 바뀜만`);
+          }
+        }
+      }
+    }
+    for (const k of ['ssireum:flip:wow', 'ssireum:brink:gasp', 'tug:flip:wow', 'kite:tangle:gasp', 'kite:cut:wow', 'dig:find:wow', 'dig:find:laugh', 'dig:reveal:gasp', 'race:lead:cheer', 'boat:lead:cheer']) assert((kinds.get(k) ?? 0) > 0, `들썩임 ${k}이 나온다`);
+  }
+  console.log('  셋째 묶음 고르기 OK: 줄다리기 편 맞추기, 밀어내기 선수·구경·나서기, 연 날리기·구경, 보물찾기 자리, 오리배 팬, 구경꾼 들썩임');
+}
+
+/** 밀어내기: 선수 하나와 구경 손님 하나만 앉아 상대가 오지 않으면, 구경 손님이 모래판으로 나서 판이 열린다 (손님은 더 오지 않는다). */
+function ssireumStepIn(): void {
+  const r = new Sim(newGame(77));
+  devOpenAll(r);
+  const rs = r.state;
+  for (const x of BOOTH_IDS) if (x !== 'ssireum') rs.booths[x].unlocked = false;
+  rs.monsters = rs.monsters.slice(0, 2);
+  rs.spawnTimer = 1e9;
+  const bs = rs.booths.ssireum;
+  const [a, c] = rs.monsters as [Monster, Monster];
+  const sit = (m: Monster, seat: number): void => {
+    m.traits = ['cheerful'];
+    m.wallet = 200;
+    m.booth = 'ssireum';
+    m.seat = seat;
+    m.phase = 'toSeat';
+    m.phaseTime = 0;
+    m.path = [{ ...BOOTH_SPOTS.ssireum.seats[seat]! }];
+    bs.seats[seat] = m.id;
+  };
+  sit(a, 0);
+  sit(c, 3);
+  let stepped = false;
+  let started: GroupState | null = null;
+  r.bus.on('groupJoined', (e) => {
+    if (e.monster === c.id && e.role === 'player') stepped = true;
+  });
+  r.bus.on('groupStarted', (e) => {
+    started ??= JSON.parse(JSON.stringify(e.group)) as GroupState;
+  });
+  for (let i = 0; i < 600 && started === null; i++) runFor(r, SIM.dt);
+  const g = started as GroupState | null;
+  assert(stepped && g !== null, '밀어내기: 구경 손님이 나서 판이 열린다');
+  const ps = g.participants;
+  assert(ps.length === 2 && ps.some((e) => e.monster === a.id && e.pick === 0 && e.role === 'player') && ps.some((e) => e.monster === c.id && e.pick === 1 && e.role === 'player' && e.seat === 1), '밀어내기: 나선 손님은 청 선수');
+  assert(g.elapsed === 0 && rs.booths.ssireum.group?.phase === 'running', '밀어내기: 나선 뒤 곧 출발');
+  console.log(`  밀어내기 나서기 OK (출발 ${(rs.time).toFixed(1)}초)`);
+}
+
+/** 부스 b 하나만 연 마을 (모든 진행자 고용, 그 밖의 부스는 닫는다)을 sec초. */
+function groupLifecycles(): void {
+  for (const b of ['ssireum', 'boat', 'kite', 'tug', 'dig'] as const) {
+    const r = new Sim(newGame(40 + GROUP_BOOTHS.indexOf(b)));
+    devOpenAll(r);
+    const rs = r.state;
+    for (const x of BOOTH_IDS) if (x !== b) rs.booths[x].unlocked = false;
+    const bs = rs.booths[b];
+    const g = bs.group!;
+    let started = 0;
+    let done = 0;
+    let settled = 0;
+    let events = 0;
+    let cheers = 0;
+    let runners = 0;
+    let crowd = 0;
+    let buzz = 0;
+    let badCheer = 0;
+    let badReact = 0;
+    /** 결과를 받은 손님 → 그 한판 (monsterReact가 바로 뒤에 온다). */
+    const finished = new Map<number, RoundOutcome>();
+    const festivalOf = new Set<number>();
+    const wallets = new Map<number, number>();
+    let expected = new Map<number, RoundOutcome>();
+    const payouts: { monster: number; payout: number; cap: number }[] = [];
+    /** 판마다 지급 (한꺼번에 나누나: 먼저 온 승자가 항아리를 비우지 않게). */
+    const roundPays: { monster: number; payout: number; cap: number }[][] = [];
+    /** 줄다리기 편 맞추기로 빠진 손님 → 빠질 때의 쓴 코인 (다시 참가할 때 참가비를 다시 내지 않나). */
+    const joinedNow = new Set<number>();
+    const benchSpent = new Map<number, number>();
+    let rejoined = 0;
+    r.bus.on('groupJoined', (e) => {
+      if (e.booth !== b) return;
+      assert(g.phase === 'gathering' && g.participants.some((p) => p.monster === e.monster && p.pick === e.pick && p.seat === e.seat), `${b} 참가하면 모이는 중, 목록에`);
+      const m = r.monster(e.monster)!;
+      wallets.set(e.monster, m.wallet);
+      const was = benchSpent.get(e.monster);
+      if (was !== undefined) {
+        assert(m.stats.spent - was === e.bet, `${b} 편 맞추기로 빠졌던 손님은 참가비를 다시 내지 않는다 (${m.stats.spent - was} ≠ ${e.bet})`);
+        benchSpent.delete(e.monster);
+        rejoined++;
+      }
+      joinedNow.add(e.monster);
+    });
+    r.bus.on('groupCancelled', (e) => {
+      if (e.booth === b) joinedNow.clear();
+    });
+    r.bus.on('groupStarted', (e) => {
+      if (e.booth !== b) return;
+      started++;
+      const ps = e.group.participants;
+      for (const id of joinedNow) {
+        const m = r.monster(id);
+        if (m !== undefined && m.booth === b && bs.seats.includes(id) && !ps.some((p) => p.monster === id)) benchSpent.set(id, m.stats.spent);
+      }
+      joinedNow.clear();
+      runners += ps.length;
+      const play = e.group.play!;
+      assert(play.kind === b && play.outcomes.length === ps.length, `${b} 판 = 참가자 수`);
+      if (b === 'ssireum') assert(ps.some((p) => p.role === 'player' && p.pick === 0) && ps.some((p) => p.role === 'player' && p.pick === 1), '씨름은 선수 둘이 있어야 시작');
+      if (b === 'tug') {
+        const red = ps.filter((p) => p.pick === 0).length;
+        assert(red === ps.length - red && red >= 1 && red <= TUG.maxSide, `줄다리기 편 인원 (${red}:${ps.length - red})`);
+      }
+      // 판 길이: 경주장·오리배 밖은 진행이 높을수록 조금 짧게.
+      const pace = boothStat(rs, b, 'pace');
+      const want = BOOTHS[b].roundSec[bs.level - 1]! / (b === 'boat' ? 1 : 1 + (pace - 3) * TUNE.groupPacePerPoint);
+      assert(Math.abs(play.end - want) < 1e-9, `${b} 판 길이 ${play.end.toFixed(2)} = roundSec / 진행 (${want.toFixed(2)})`);
+      // 자리마다 역할: 밀어내기 0·1 선수, 연 0~3 날리는 손님, 그 밖은 구경 손님.
+      for (const p of ps) {
+        if (b === 'ssireum') assert((p.seat <= 1) === (p.role === 'player') && (p.role === 'bettor' || p.pick === p.seat), '밀어내기 자리와 역할');
+        if (b === 'kite') assert((p.seat < KITE.flyers) === (p.role === 'player') && (p.role === 'bettor' || p.pick === p.seat), '연 자리와 역할');
+        if (b === 'dig') assert(p.pick === p.seat, '보물찾기 판 자리 = 자리');
+      }
+      expected = new Map(ps.map((p, i) => [p.monster, play.outcomes[i]!]));
+      ps.forEach((p) => {
+        const round = bs.rounds[p.seat];
+        assert(round !== null && round !== undefined && round.monster === p.monster && round.outcome === expected.get(p.monster), `${b} 참가자마다 한판 (결과 = 판의 결과)`);
+      });
+    });
+    r.bus.on('groupEvent', (e) => {
+      if (e.booth !== b) return;
+      events++;
+      assert(e.group.phase === 'running' && e.event.t <= e.group.elapsed + 1e-9, `${b} 사건은 진행 중, 시각이 된 뒤`);
+      for (const ch of e.cheers) {
+        assert(e.group.participants.some((p) => p.monster === ch.id && p.pick === ch.pick), `${b} 응원은 참가자만`);
+        const detail = e.group.play === null ? null : (groupGame(b).cheerDetail?.(e.group.play, e.event) ?? null);
+        if (!groupReactionLabels(b, { kind: ch.kind, key: cheerKey(e.event.type, e.event.actor, ch.pick, detail) }).cheer.includes(ch.reaction.label)) badCheer++;
+        cheers++;
+      }
+    });
+    r.bus.on('groupFinished', (e) => {
+      if (e.booth !== b) return;
+      done++;
+      roundPays.push([]);
+    });
+    r.bus.on('roundFinished', (e) => {
+      if (e.booth !== b) return;
+      const want = expected.get(e.round.monster);
+      assert(want !== undefined && e.round.outcome === want && g.phase === 'done', `${b} 결과는 판이 끝날 때, 판이 정한 그대로`);
+      const m = r.monster(e.round.monster)!;
+      assert(m.wallet === (wallets.get(m.id) ?? NaN) + e.payout, `${b} 지갑 = 참가 뒤 지갑 + 지급`);
+      payouts.push({ monster: m.id, payout: e.payout, cap: Math.round(e.round.bet * e.round.outcome.multiplier) });
+      roundPays[roundPays.length - 1]?.push(payouts[payouts.length - 1]!);
+      finished.set(m.id, e.round.outcome);
+      settled++;
+    });
+    r.bus.on('potFestival', (x) => {
+      if (x.booth === b) festivalOf.add(x.monster);
+    });
+    r.bus.on('monsterSpectate', (x) => {
+      if (g.phase === 'done') crowd++;
+      if (g.phase === 'running') {
+        assert(!g.participants.some((p) => p.monster === x.id) && g.participants.some((p) => p.monster === x.target), `${b} 진행 중 구경꾼은 참가자가 아니고, 주인공은 참가자`);
+        buzz++;
+      }
+    });
+    r.bus.on('monsterReact', (x) => {
+      const o = finished.get(x.id);
+      if (o === undefined) return;
+      finished.delete(x.id);
+      const keys = detailKeys(o.detail);
+      // 항아리 축제·빈털터리는 공통 표.
+      const ok = reactionLabels(o.tier, b, keys[0]).includes(x.reaction.label) || reactionLabels('broke').includes(x.reaction.label) || reactionLabels('jackpot').includes(x.reaction.label);
+      if (!ok) badReact++;
+    });
+    runFor(r, 900);
+    for (const p of payouts) {
+      if (p.cap === 0) assert(p.payout === 0, `${b} 진 손님은 받지 않는다`);
+      else assert(p.payout <= p.cap || festivalOf.has(p.monster), `${b} 지급 ≤ 배당 × 건 코인 (항아리 축제 말고) ${p.payout}/${p.cap}`);
+    }
+    // 항아리가 모자라면 판의 승자 모두 같은 비율로 (참가 차례로 주면 늦게 온 승자가 0코인).
+    let short = 0;
+    for (const rp of roundPays) {
+      const paid = rp.filter((p) => p.cap > 0 && !festivalOf.has(p.monster));
+      const top = Math.max(0, ...paid.map((p) => p.payout / p.cap));
+      for (const p of paid) assert(p.payout / p.cap > top - 1 / p.cap - 1e-9, `${b} 한 판의 승자는 같은 비율로 받는다 (${p.payout}/${p.cap}, 가장 많이 ${top.toFixed(2)})`);
+      if (top < 1) short++;
+    }
+    if (b === 'tug') assert(rejoined > 0, `줄다리기 편 맞추기로 빠졌다 다시 든 손님 (${rejoined})`);
+    // 판 중 저장·불러오기: 같은 상태에서 같은 미래.
+    for (let i = 0; i < 1200 && g.phase !== 'running'; i++) runFor(r, SIM.dt);
+    if (g.phase === 'running') {
+      const twin = new Sim(normalizeState(JSON.parse(JSON.stringify(rs)))!);
+      runFor(r, 30);
+      runFor(twin, 30);
+      assert(stripTime(r.state) === stripTime(twin.state), `${b} 판 중 저장·불러오기 뒤 30초가 똑같이 흐른다`);
+    }
+    // 진행자가 빠지면 모이던 판을 접고, 달리던 판은 끝까지.
+    const host = bs.staff[0]!;
+    assert(r.assign(host, null).ok && !r.boothOpen(b), `${b} 진행자가 쉬면 닫힌다`);
+    runFor(r, 60);
+    assert(bs.seats.every((x) => x === null) && g.phase === 'idle', `${b} 닫히면 자리가 비고 쉰다`);
+    for (const x of BOOTH_IDS) rs.booths[x].unlocked = true;
+    checkInvariants(r);
+    assert(started >= 8 && done >= started - 1 && settled >= started && events > 0, `${b} 판 ${started} (끝 ${done}, 결과 ${settled}, 사건 ${events})`);
+    assert(badCheer === 0 && badReact === 0, `${b} 응원은 사건마다, 결과 반응은 세부마다 맞는 말 (어긋남 ${badCheer}·${badReact})`);
+    assert(buzz > 0, `${b} 진행 중 구경꾼이 들썩인다 (${buzz})`);
+    console.log(`  ${b} 엔진 OK: ${started}판 (평균 ${(runners / started).toFixed(1)}명), 결과 ${settled}, 사건 ${events} (응원 ${cheers}), 진행 중 구경 ${buzz}, 결과 구경 ${crowd}, 항아리가 모자란 판 ${short}${b === 'tug' ? `, 빠졌다 다시 든 손님 ${rejoined}` : ''}`);
+  }
+  // 옛 저장(2) → 3: 경주장 race 칸이 group으로 옮겨지고 마을이 그대로 이어진다.
+  // 셋째 묶음 전의 마을처럼: 회관 3까지, 경주장만 연다 (새 부스는 닫힌 채, 새 진행자는 후보로만).
+  {
+    const a = new Sim(newGame(31));
+    const as = a.state;
+    as.coins = 50_000;
+    as.precious = { gem: 20, golden_acorn: 20, star_piece: 20 };
+    const fill = (): void => {
+      for (const k of Object.keys(as.materials) as MaterialId[]) as.materials[k] = a.materialCap();
+    };
+    while (a.upgradeBuilding('warehouse').ok) fill();
+    fill();
+    assert(a.upgradeBuilding('hall').ok && a.upgradeBuilding('hall').ok && a.unlockBooth('race').ok, '회관 3, 경주장');
+    for (const art of ['race_starter', 'race_caster']) {
+      const i = as.candidates.findIndex((c) => c.art === art);
+      assert(i >= 0 && a.hire(i).ok, `${art} 고용`);
+    }
+    for (const k of Object.keys(as.materials) as MaterialId[]) as.materials[k] = 5;
+    for (let i = 0; i < 3000 && a.state.booths.race.group?.phase !== 'running'; i++) runFor(a, SIM.dt);
+    assert(a.state.booths.race.group?.phase === 'running', '경주가 달리는 중');
+    const old = JSON.parse(JSON.stringify(a.state)) as Record<string, unknown> & { booths: Record<string, Record<string, unknown>> };
+    old.version = 2;
+    for (const [k, bsv] of Object.entries(old.booths)) {
+      const gv = bsv.group as (GroupState & Record<string, unknown>) | null;
+      delete bsv.group;
+      if (!['slot', 'oddeven', 'cups', 'darts', 'wheel', 'duck', 'ring', 'race', 'claw', 'pouch'].includes(k)) {
+        delete old.booths[k];
+        continue;
+      }
+      if (gv === null || gv === undefined) {
+        bsv.race = null;
+        continue;
+      }
+      const race: Record<string, unknown> = { phase: gv.phase, countdown: gv.countdown, elapsed: gv.elapsed, duration: gv.duration, participants: gv.participants.map((e) => ({ monster: e.monster, seat: e.seat, racer: e.pick, bet: e.bet, fee: e.fee })), result: raceOf(gv.play) };
+      if ('mark' in gv) race.leader = gv.mark;
+      if ('markAt' in gv) race.cheerAt = gv.markAt;
+      bsv.race = race;
+    }
+    const back = normalizeState(old);
+    assert(back !== null && back.version === 3, '옛 저장(2)을 읽는다');
+    const twin = new Sim(back);
+    runFor(a, 40);
+    runFor(twin, 40);
+    // 새로 채운 부스 칸은 뒤에 붙으니 열쇠 순서를 맞춰 비교한다.
+    const canon = (v: unknown): unknown => (Array.isArray(v) ? v.map(canon) : v !== null && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon((v as Record<string, unknown>)[k])])) : v);
+    const strip = (st: GameState): string => {
+      const o = JSON.parse(stripTime(st)) as { booths: Record<string, { group: Record<string, unknown> | null }> };
+      for (const bsv of Object.values(o.booths)) if (bsv.group !== null) delete bsv.group.cursor;
+      return JSON.stringify(canon(o));
+    };
+    assert(strip(a.state) === strip(twin.state), '옛 저장(2)에서 이어도 경주가 똑같이 흐른다');
+    console.log('  옛 저장(2 → 3) OK');
+  }
 }
 
 // ── 실행 ───────────────────────────────────────────────────────────────
@@ -1163,7 +1893,7 @@ const minutes = num('minutes', 30);
 if (flag('selftest')) {
   selftest();
 } else if (flag('auto') && flag('seeds')) {
-  runSeeds(num('seeds', 8), minutes, flag('detail'));
+  runSeeds(num('seeds', 8), minutes, flag('detail'), num('first', 1));
 } else if (flag('auto')) {
   console.log(`--auto: 욕심쟁이 촌장, 시드 ${seed}, ${minutes}분 (MOOD.leaveBelow ${MOOD.leaveBelow})\n`);
   runReport(seed, minutes, makeGreedyChief(seed));

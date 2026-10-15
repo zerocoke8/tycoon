@@ -47,6 +47,7 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
 ## 시뮬레이션 (src/sim)
 
 - `Sim implements SimApi` (`api.ts`). 생성자 `new Sim(state: GameState)`; `newGame(seed?)`, `loadGame(): GameState | null`(localStorage 키 `mpv-save-v1`, 버전 확인).
+  저장 버전 3 (단체 놀이 엔진). 버전 2 저장은 `save.ts migrate2`가 경주장 `BoothState.race`를 `group`으로 옮겨 그대로 잇는다 (새 부스 칸·새 진행자 후보는 채운다).
 - 손님 상태 기계 (`MonsterPhase`): arriving → wandering → toBooth → queued → toSeat → playing → reacting → (다시 한판 | wandering | resting | leaving).
   - 걷기: `path.ts`가 `data/map.ts`의 NODES/EDGES로 최단 경로 → `Monster.path`(세계 좌표 점들). 속도 SIM.walkSpeed (떠다니는 종은 floatSpeed).
     길의 첫 직선(지금 자리 → 첫 노드)·마지막 직선(노드 → 목적지)·곧장 걷기는 부스 그림이 서 있는 땅(BOOTH_SPOTS.base 위 사각형, `crossesBooth`)을 가로지르지 않게 고른다 (그림 뒤로 숨지 않게).
@@ -75,35 +76,54 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
 - 둘째 묶음 부스: 결과 세부는 `games.ts` (wheel·duck·ring·claw·pouch). 오리 낚시는 잃어도 ×0.5, 한판마다 기분 +2(`moodPerRound`), 지면 기분 하락 반(`moodLossScale`),
   복주머니는 참가비가 손님의 특산 재료 1개(`matFee`, 손님은 `Monster.mats` 1~2개를 들고 온다, 없으면 고르지 않는다, 창고가 가득이어도 놀고 토스트)이고 건 코인 ×0.4(`betScale`), 대박이면 떠날 때 귀한 물건 확정(`Monster.surePrecious`).
   인형 뽑기에서 뽑은 인형은 도감 `dex[종].plush`에 모인다 (그 종 인형이 처음이면 토스트). 반응은 둘째 묶음 부스마다 자기 표(`reactions.ts BOOTH_TABLE`, 등급마다 3~5개).
-- 몬스터 경주장 (손님 여럿이 경주 하나): 경주 만들기는 `sim/race.ts` (`generateRace` → `RaceResult`: 키프레임·들어온 순서·역전·사진 판정, `raceProgress`, `raceOutcome`),
-  흐름은 `sim.ts`의 경주장 묶음. 상태 `BoothState.race: RaceState`:
-  - idle → gathering: 관중석 자리에 앉은 손님이 선수를 고르고(`pickRacer`, 좋아하는 선수 `RACE.fans`) 참가비·건 코인을 낸다 (`raceJoined`). 첫 손님부터 `raceGatherSec(진행)`,
-    둘 이상이면 `raceStartSoonSec(진행)` 안에 출발 (출발 신호의 진행이 높을수록 짧게), 자리가 다 차면 `RACE.fullStartSec`. 관중석으로 걸어오는 손님이 있으면 첫 손님부터 raceGatherSec까지는 기다린다.
-    모이는 중에 자리를 뜨면 건 코인을 돌려받는다.
-  - running: 결과를 정하고 (행운아·행운 부적이면 그 손님 선수가 1등일 수 있다) 참가자마다 `BoothState.rounds[자리]`에 한판 → `raceStarted` → 자리마다 `roundStarted`.
-    1등이 바뀌면 `raceProgress` (참가자 응원 `cheers`: 자기 선수가 1등이면 들썩, 1등을 뺏기거나 꼴찌면 땀, 손님 pose도 잠깐, 해설자 입담만큼 기분 +).
-  - done: 모든 선수가 들어오면 `raceFinished` → 참가자마다 `roundFinished`·`monsterReact`가 한꺼번에 (1등 ×3.5, 꼴찌에서 1등 역전 ×6, 사진 판정 2등 nearMiss),
-    경주로 근처 손님(관중석에서 기다리는 손님 포함)은 `monsterSpectate` (해설자 입담만큼 기분 +). `RACE.resultSec` 뒤 idle.
-  - running·done 동안 앉은 손님은 다음 경주를 기다린다 (phase 'playing', 참가자 아님). 사육사(손님맞이)는 손님을 더 부르고(비어 있으면 손님맞이 2로 친다), 모이는 중인 경주도 손님을 끈다.
-  - 경주장이 닫혀도(출발 신호·해설자가 쉼) 달리는 경주는 끝까지 간다. 모이는 중이던 경주는 접고 건 코인을 돌려준다 (`cancelRace`). 그 뒤 손님은 자리를 뜬다.
+- 단체 놀이 엔진 (손님 여럿이 한 판, DESIGN 3.6): 경주장·씨름장·오리배·연날리기·줄다리기·보물찾기 (`defs.ts GROUP_BOOTHS`, `isGroupBooth(b)`).
+  흐름은 `sim.ts`의 '단체 놀이' 묶음 하나가 모두 똑같이 돌리고, 놀이마다 다른 것은 놀이 모듈 `sim/group/<booth>.ts`의 `GroupGame` (`sim/group/core.ts` 약속, `sim/group/index.ts GROUP_GAMES`).
+  상태 `BoothState.group: GroupState | null` (단체 놀이 부스만):
+  - idle → gathering: 자리에 앉은 손님이 참가비·건 코인을 내고 `GroupGame.join(rng, 자리, 손님, 참가자)`로 고른다 (`GroupEntry { monster, seat, pick, role, bet, fee }`, `groupJoined`).
+    첫 손님부터 `groupGatherSec(b, 진행)`, `readiness(참가자, 기다린 초)`가 'soon'이면 `groupStartSoonSec`, 자리가 다 차면 `GROUP_RULES[b].fullStartSec` 안에 출발.
+    'none'(씨름 선수 둘이 안 옴, 줄다리기 편이 안 참)이면 기다리다 `maxWaitSec` 뒤 접는다 (`groupCancelled` 'timeout', 건 코인을 돌려주고 손님은 다른 걸 하러 간다).
+    자리로 걸어오는 손님이 있으면 gatherSec까지는 기다린다. 모이는 중에 자리를 뜨면 건 코인을 돌려받는다. 모이는 중인 판은 손님을 끈다 (`TUNE.groupGatherPull`, 'none'이면 × `groupNeedPull`).
+  - running: `lineup`(줄다리기 편 맞추기: 오래 기다린 손님부터, 빠진 손님은 건 코인을 돌려받고 다음 판, 낸 참가비는 다음 판 몫 `GroupState.prepaid`)과 행운(행운아·행운 부적: 그 손님 쪽이 이긴다) 뒤
+    `GroupGame.generate(rng, 참가자, ctx)` → `GroupPlay` (판 전체: `end`, 움직이는 것마다 키프레임 `tracks: {t, p}[][]`, 사건 `events`, 참가자마다 결과 `outcomes`, 놀이마다의 칸).
+    참가자마다 `BoothState.rounds[자리]`에 한판 (outcome = play.outcomes[i]) → `groupStarted` → 자리마다 `roundStarted`.
+    매 틱 `GroupGame.poll`이 낸 사건(타임라인 사건을 시각대로, 경주·오리배는 1등이 바뀔 때)마다 `groupEvent` (참가자 응원 `cheers`: `cheer()`가 lead면 들썩, behind면 조마조마, 손님 pose도 잠깐, 입담만큼 기분 +).
+    응원 말은 응원 열쇠(`reactions.ts cheerKey`: 사건 종류, 남의 일이면 ':other', 자기 일이면 `GroupGame.cheerDetail`의 세부 — 보물찾기 'find:boot'·'find:pebble')로 고른다.
+  - done: `play.end`가 되면 `groupFinished` → 참가자마다 `roundFinished`·`monsterReact`가 한꺼번에, `GroupGame.center` 근처 손님(자리에서 기다리는 손님 포함)은 `monsterSpectate` (`crowd()`의 등급). `resultSec` 뒤 idle.
+    지급은 한꺼번에 나눈다 (`sim.ts settleGroup`): 항아리가 모자라면 모든 승자를 같은 비율로 줄인다 (참가 차례로 주면 늦게 온 승자가 0코인). 항아리 축제면 받을 몫이 가장 큰 승자가 다른 손님 몫을 뺀 나머지를 통째로.
+  - running·done 동안 앉은 손님은 다음 판을 기다린다 (phase 'playing', 참가자 아님). 판에 끼지 못하고 `TUNE.groupBenchGiveUpSec` 넘게 기다리면 다른 걸 하러 간다.
+  - 부스가 닫혀도(꼭 있어야 하는 진행자가 쉼) 진행 중인 판은 끝까지 간다. 모이는 중이던 판은 접고 건 코인을 돌려준다 (`groupCancelled` 'closed'). 그 뒤 손님은 자리를 뜬다.
+  - 놀이마다: 경주장 `group/race.ts` (경주 `sim/race.ts generateRace`, 1등 ×3.5·꼴찌 역전 ×6·사진 판정 2등 nearMiss), 오리배 `group/boat.ts` (같은 경주, 물길 `BOAT_COURSE`),
+    씨름 `group/ssireum.ts` (자리 0·1 = 홍·청 선수, 2~5 구경, 미는 힘 p(t) `group/duel.ts`), 줄다리기 `group/tug.ts` (자리 짝수 홍·홀수 청, 밧줄 c(t)),
+    연날리기 `group/kite.ts` (연 넷, 연싸움 tangle → cut, 마지막 연), 보물찾기 `group/dig.ts` (판 자리 = 자리, 판의 15%에 상자 하나). 등급 규칙은 각 파일 머리말과 `types.ts GroupPlay`.
+  - 키프레임 읽기 `trackAt(keys, t)` (넘치지 않는 3차 보간), 경주 `raceProgress(play.race, 선수, t)`, `raceOf(play)`, `livePlay(group)`, `entryOf/outcomeOf(group, 손님)`.
+  - 놀이 모듈이 더 줄 수 있는 것 (`GroupGame`, 없으면 기본): `seatFor(rng, 손님, 빈 자리, 앉은 손님)` = 줄 맨 앞 손님이 앉을 자리 (씨름 선수·구경, 연 날리기·구경, 줄다리기 적은 편, 보물찾기 아무 흙더미),
+    `stepIn(참가자, 기다린 초, 빈 자리, who)` = 출발 조건이 안 맞을 때 참가자 하나가 다른 자리로 나서기 (씨름: 12초 뒤 구경 손님이 모래판으로, `groupJoined`를 다시 낸다),
+    `buzz(play, 사건, 참가자)` = 진행 중 큰 사건에 근처 구경꾼이 들썩 (`GroupBuzz` wow·gasp·cheer·laugh → `monsterSpectate`, 참가자는 빼고), `join(..., who)` = 다른 참가자를 보고 고르기.
+    공용 고르기 `crowdPick` (같은 종 선수 → 구경꾼은 많은 쪽·대담이는 적은 쪽), 나설 확률 `eagerness`, 고른 수 `backers`.
+  - 판이 시작되면 근처를 걷던 손님이 멈춰 구경한다 (`TUNE.groupDraw*`, 진행자 손님맞이만큼 더). 반응 표: `reactions.ts groupCheerReaction`·`groupBuzzReaction`·`groupReactionLabels(booth)` (응원·구경·들썩 이름표).
+    진행자 능력치: 진행 = 모이는 시간·판 길이 (`TUNE.groupPacePerPoint`), 입담 = 사건마다 기분·구경 반응 확률, 손님맞이 = 끌어오기·멈춰 구경.
 - 개발용: `sim/dev.ts devOpenAll(sim)` = 모든 구역·부스를 열고 그림 있는 진행자를 다 고용, 재료는 창고 반 (주소 `?all=1`, sim-check). `devGiveGoods(sim)` = 간식·응원 도구 몇 개씩.
   주소 `?unlockAll=1` = `?all=1` + `devGiveGoods` (저장하지 않는다). 개발 서버 콘솔 `mpv.setSpeed(n)`으로 배속을 바꾼다 (스크린숏: 빠르게 손님을 모았다가 천천히 찍기).
 - 촌장의 행동은 `SimApi`의 메서드 (응원 톡, 간식, 응원 도구, 짓기·업그레이드, 고용·배치, 가공).
 - 처음 상태: 코인 SIM.startCoins, 슬롯·홀짝 부스 열림, 진행자 둘(HOST_PRESETS의 slot·oddeven)이 각 부스에, 후보에 cups·darts·wheel 진행자 (그림 있는 진행자는 그 부스를 열 수 있는 회관 레벨이 되면 후보로 온다), 건물 레벨 1, 중앙 구역만 열림.
 - 회관 레벨이 오르면 `DISTRICTS`의 hall 조건에 맞는 구역이 열린다 (districtOpened). 종은 SPECIES.hall 조건으로 손님에 나온다.
 - `scripts/sim-check.ts`: 새 게임을 화면 없이 30분(게임 시간) 돌리며 1분마다 코인·손님 수·한판 수·대박·떠난 손님의 평균 기분·팁을 찍는다. 밸런스 확인용.
-  `--auto --seeds 24 --minutes 75`: 욕심쟁이 촌장(회관 먼저, 회관 3부터는 새 구역 부스 먼저)의 이정표 표 (분위수), 부스마다 연 뒤 1분 한판 수, 경주 평균 참가자 (`--detail`: 다음 회관 비용 항목마다 모인 때).
-  `--selftest`: 결과 세부·확률, 경주 생성, 저장(경주 중 포함), catchUp, 행동, 진행자 자리, 새 부스 반응 표, 경주장 lifecycle, 60분 오래 돌리기(처음부터 다 열린 마을 포함).
+  `--auto --seeds 24 --minutes 120`: 욕심쟁이 촌장(회관 먼저, 단체 놀이는 회관 1부터·지금 구역 부스는 회관 2부터 다음 회관보다 먼저)의 이정표 표 (분위수), 부스마다 연 뒤 1분 한판 수,
+  경주 평균 참가자, 단체 놀이마다 한 판 평균 참가자·접힌 판 비율 (`--detail`: 다음 회관 비용 항목마다 모인 때, `--first N`: N번 시드부터).
+  `--selftest`: 결과 세부·확률, 경주 생성, 저장(경주 중 포함), catchUp, 행동, 진행자 자리, 새 부스 반응 표, 경주장 lifecycle,
+  단체 놀이 생성기(씨름·줄다리기 p/c 모양과 등급, 연 끊김 순서, 보물 상자 하나, 오리배 = 경주, ODDS 비율)·엔진(부스마다 판, 편 맞추기, 판 중 저장, 옛 저장 2 → 3),
+  자리 고르기·구경 고르기·나서기, 진행 중 구경 반응, 60분 오래 돌리기(처음부터 다 열린 마을 포함: 접힌 씨름 판 3분의 1 이하, 판 끝에 구경하는 손님).
 
 ## 화면 (src/view)
 
-- 좌표: 세계 6400×7800 (`data/map.ts WORLD`, 가운데 중앙 구역 + 둘레 세 구역). 화면 논리 폭 720 기준이 아니라, 카메라가 세계를 화면에 맞춘다:
+- 좌표: 세계 8000×7800 (`data/map.ts WORLD`, 가운데 중앙 구역 + 둘레 세 구역 + 맨 오른쪽 축제 들판). 화면 논리 폭 720 기준이 아니라, 카메라가 세계를 화면에 맞춘다:
   확대 0.06~0.35(좁은 화면은 지도 폭 6400이 다 들어올 때까지, 390px 폰 약 0.06) ~ 1.6. 처음에는 열린 놀이부스(건물·자리·진행자·항아리)가 HUD와 아래 탭 사이에 다 들어오게 맞춘다 (폰 약 0.26, 넓은 화면 최대 0.8).
   UI가 위·아래를 덮은 높이를 `setViewInset`으로 알리면 카메라는 그 사이 띠의 가운데를 맞춘다 (손님 카드가 열리면 따라가는 손님이 카드 위에).
 - 지도가 커져도 걷는 시간에 묶인 규칙은 지도를 따른다: 손님이 머무는 시간(TUNE.maxVisitSec)은 첫 한판부터, 손님 수 한도에는 걸어 들어오는 손님을 세지 않고,
   첫 손님 자리·입구에서 걸어 들어오는 거리는 노드 수·비율로 (픽셀 상수가 아니다). sim-check의 '멈춤' 한도도 길 그래프의 가장 먼 거리에서 정한다.
 - 조작: 한 손가락 끌기 = 이동(관성), 두 손가락 = 확대·축소, 휠 = 확대·축소. 짧게 누르기(움직임 < 8px) = 누르기: 손님 → 손님 카드, 부스·건물 → 패널.
-- 층: ground(코드로 그린 바닥) → 물체층(건물·소품·주민·손님, **y로 정렬**) → 효과층(이모트·파티클·숫자) → 구름층(닫힌 구역) → 디버그층(D 키: 노드·간선·자리).
+- 층: ground(코드로 그린 바닥) → floor(바닥에 깔리는 그림: 씨름 모래판·흙더미, 단체 놀이의 바닥 표시) → 그림자 → 물체층(건물·소품·주민·손님, **y로 정렬**, 닫힌 구역 구름도 여기)
+  → 효과층(이모트·파티클·숫자) → sky(연과 연줄, 모든 것 위) → 디버그층(D 키: 노드·간선·자리·물길·놀이 마당).
 - 바닥(`ground.ts`): `GROUND_STYLE` 색. 모든 길·광장 테두리를 먼저, 속을 나중에 (둥근 끝). 연못은 씨앗 난수로 울퉁불퉁한 덩어리. 길 위 조약돌 점, 풀밭에 풀 한 포기(`map/tuft` 그림이 있으면 그림, 없으면 짧은 획 셋)를 씨앗 난수로 흩뿌린다. 한 번 그려서 RenderTexture 여러 장(타일)로 굽는다 (큰 Graphics를 매 프레임 그리지 않게).
   경주로(`data/map.ts RACE_TRACK`)도 바닥에 굽는다: 길과 같은 모래·테두리의 타원 띠, 안쪽 풀밭, 레인 사이 크림색 선, 출발선(출발대 바로 앞, `mapUtil.ts RACE_START_P`), 결승선 바둑판.
 - 그림 놓기: `view/art.ts`의 `artSprite(group, key, { k, anchor })`. 배율 `ART_SCALE` (건물 0.7, 놀이부스 0.5), 손님 발 기준점 `monsterFoot(종, 포즈)` = 그 포즈 그림의 아래 끝
@@ -114,9 +134,21 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   같은 손님을 다시 누를 수 있게 넉넉한 hit 영역. 선이 너무 가늘어지지 않게 텍스처는 mipmap (art.ts가 켠다).
 - 건물(`buildings.ts`): 건물·놀이부스·장식 소품·진행자(`BoothSpot.hosts`의 자리마다 한 사람, 자리 0을 본다, 앉은 손님도 진행자 0을 본다). 경주장의 출발대·결승선은 `BoothSpot.props` (출발대는 칸 색이 레인 순서와 맞게 뒤집는다). 닫힌 부스는 빈 부지 표식(`map/lot_sign`)과 흐린 건물.
   부스 옆 상금 항아리(`map/prize_pot`)는 항아리 비율에 따라 크기가 살짝 커진다 (슬롯은 부스 그림 계산대 위 항아리를 덮어 그린다).
-- 경주장(`racetrack.ts`): 선수 넷(`racers/<key>`, 레인 = 선수 번호)이 `BoothState.race`를 매 프레임 따라간다. idle·gathering = 출발선에 서서 들썩 (출발 3초 전 웅크리고 3·2·1),
+- 단체 놀이 지도 화면 (`view/group/registry.ts GROUP_MAP`, 부스마다 하나, `world.ts`가 만든다): `GroupMapRenderer { update(dt, view), hitTest(wx, wy), restoreTextures?(), destroy() }`.
+  바탕 `view/group/base.ts GroupMapBase` (보이기·화면 시계 `clock`·판 `play`·참가자·`own(층, 그릇)`·손님 몸 맡기기 `puppet(id, MonsterPuppet)`·시작 숫자 3·2·1 `startCount(x, y, 진행자)`: 출발 조건이 맞을 때만). 손님을 그리기 전에 불린다.
+  씨름 `group/ssireum.ts`, 오리배 `group/boat.ts`, 연날리기 `group/kite.ts`, 줄다리기 `group/tug.ts`, 보물찾기 `group/dig.ts`, 경주장은 `racetrack.ts`.
+  손님 몸 맡기기: `MonstersView.puppet(id, { dx, dy, lift, rot, sx, sy, pose, facing, still, alpha })` (그 프레임만, sim 좌표는 그대로).
+  지도 배치: 씨름 `SSIREUM_RING`, 오리배 `BOAT_COURSE`(`boatPoint(레인, p)`, 고리 길 `LoopCourse`·`lanePoint`), 연 `KITE_FIELD`, 줄다리기 `TUG_FIELD`, 보물찾기 `DIG_FIELD` (`data/map.ts`).
+  바닥에 깔리는 부스 그림·소품은 `BoothSpot.flat`·`props[].flat` (buildings.ts가 floor층에, path.ts는 그 위를 걸어도 된다).
+  씨름·줄다리기·보물찾기는 손님 몸 맡기기를 `group/ssireumPuppets.ts PuppetSet`(부드럽게 맡기고 놓기 = 일어나기, 누운 몸 그림자 `LieShadows`)으로 한다.
+  보물찾기의 할아버지는 상자를 아무도 못 찾으면 `buildings.hostNode('dig', 0)`을 직접 옮겨 걸어가 판다 (buildings.ts는 매 프레임 y·scale만 다시 잡는다).
+  연은 하늘 층에 그림자(같은 그림을 어둡게, 아래로)를 달고 뜨고, 보이는 세계 폭이 넓을수록 조금 커진다 (`kite.ts FAR_FROM`: 지도를 넓게 봐도 연이 보이게).
+  오리배 물길은 왼쪽 아래(출발) → 위 → 오른쪽 끝(결승): 출발·결승·결승 뒤 미끄러지기가 선착장 차양 밖이다. 판이 끝나면 아래 물길(선착장 앞)을 레인 안쪽(`RETURN_LANE`)으로 지나 출발선까지 돌아간다.
+  잠긴 부스(구역은 열림)의 물길·말뚝·방석은 흐리게. 씨름 진 손님은 몸 가운데를 축으로 눕힌다 (머리가 모래판 밧줄 기둥·옆 구경 자리까지 가지 않게).
+  단체 놀이 승자의 받은 코인 글자는 바싹 붙어 선 승자끼리 단(0~2)을 엇갈리고 조금씩 늦게 띄운다 (`world.ts groupFinished`, `fx.floatText(…, delay, dy)`).
+- 경주장(`racetrack.ts`): 선수 넷(`racers/<key>`, 레인 = 선수 번호)이 `BoothState.group`(play.race)을 매 프레임 따라간다. idle·gathering = 출발선에 서서 들썩 (출발 3초 전 웅크리고 3·2·1),
   running = `sim/race.ts raceProgress`로 레인을 달린다 (화면 시계가 sim 시계를 부드럽게 따라감, 오른쪽으로 달리면 뒤집기, 선수마다 걸음), 결승 뒤 미끄러져 서고 1등이 통통,
-  다음 경주를 받으면 남은 반 바퀴를 돌아 출발선으로. 관중석 자리마다 방석 (그림자층). 참가자 응원은 sim `raceProgress` 이벤트를 구경꾼처럼 작게. 경주로·선수를 누르면 경주장.
+  다음 경주를 받으면 남은 반 바퀴를 돌아 출발선으로. 관중석 자리마다 방석 (그림자층). 참가자 응원은 sim `groupEvent` 이벤트를 구경꾼처럼 작게 (모든 단체 놀이 같이). 경주로·선수를 누르면 경주장.
 - WebGL 문맥을 잃었다 되찾으면 코드로 구운 텍스처(바닥 타일·효과·구름)를 다시 굽는다 (`webglcontextrestored`).
   구름(`map/cloud_puff`)이 닫힌 구역을 덮고, 열리면 흩어지며 사라진다.
 - 효과(`fx.ts`): 코인 튀기기(`items/coin`), 색종이(`fx/fx_confetti` 여러 색으로 tint), 반짝이(`fx/emote_sparkle` 작게), 먼지(`fx/fx_puff`), 떠오르는 숫자(+12, 둥근 굵은 글꼴, 흰 테두리). 대박이면 크게.
@@ -124,7 +156,12 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
 ## 확대 화면 (src/view/closeup)
 
 - 부스를 누르면 화면 위쪽 약 55%에 확대 화면 (Pixi Container, 둥근 테두리 패널), 아래는 HTML 부스 정보(UI).
-- 장면 고르기는 `registry.ts`: 보통 부스는 `BoothScene` + 부스 장치(`RIGS[b]`, Rig 약속은 rig.ts), 경주장은 자기 장면 `RaceScene`(race.ts). 둘 다 `CloseupScene` 약속.
+- 장면 고르기는 `registry.ts`: 보통 부스는 `BoothScene` + 부스 장치(`RIGS[b]`, Rig 약속은 rig.ts), 단체 놀이는 `GROUP_SCENES[b]`: 경주장 `RaceScene`(race.ts),
+  씨름·오리배·연날리기·줄다리기·보물찾기는 `GroupScene`(group.ts: 배경·진행자·자리마다 손님·발밑 표·항아리·안내·결과를 맡는다)을 이은 `closeup/<booth>.ts`
+  (`layout(L)` = 자리·진행자 자리, `drawPlay(play, t, dt)` = 그 시각의 모습, `move(actor, dx, dy, rot)`). 모두 `CloseupScene` 약속.
+  GroupScene 훅: `pickText(참가자)` = 발밑 표, `waitText(group)` = 출발 조건이 안 맞을 때 위쪽 글 (씨름 '선수를 기다려요', 줄다리기 '홍 1 : 청 2'), `shakePot()` = 코인이 나갈 때 항아리 흔들기.
+  장면 공용 도구: `ssireum_kit.ts` (씨름·줄다리기·보물찾기: `Timeline` 사건 재생, `Talk` 말풍선, `settle` 결과 (받은 코인 숫자는 결과 글자 위로), 먼지·흙·반짝이), `boat_kite_shared.ts` (오리배·연: `fitHost` 진행자를 작게, `HostTalk`, `pickBadge`).
+  사건은 CloseupView가 넘기지 않으니 장면이 `play.events`를 자기 시계로 읽는다 (중간에 열면 지난 사건은 건너뛴다). 개발용 미리보기 `_dev/group3_preview.html`·`_dev/boat_kite_preview.html` (진짜 Sim을 돌려 고른 순간에 멈춘다).
   장치는 `RigCtx`(배치 Layout, 트윈, 자리의 손님·진행자, 앞층, 도감에서 본 종 `plushPool`)만 받는다. 그림에서 잰 값은 장치 파일 안 상수 (공용 layout.ts는 바닥·차양·벽).
   장치가 `guardRight`를 주면 (고리 던지기 선반 오른쪽 끝) 장면이 넓은 종을 그 선 오른쪽으로 민다 (패널 끝이 먼저).
   배경 그림이 늦게 오면 자리 표시로 지었다가 그림이 오면 장면을 다시 짓는다 (`needsRebuild`, 차양 띠도 그림에서 잘라 쓴다).
@@ -140,18 +177,20 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   - ring: 코드로 그린 3단 선반에 병 3×3, 고리 셋이 차례로 포물선을 그려 throws[i].bottle로. 걸리면 목을 타고 내려가 앉는다 (고리 뒤 반쪽은 병 뒤, 앞 반쪽은 병 앞). wobble은 입구에서 빙글. 선반 앞 표시 셋.
   - claw: 기계 창 속 인형 더미(도감에서 본 종, 창 모양 마스크)와 레일 위 집게(진자). win/double은 출구로 옮겨 문으로 톡, slip은 slipAt에서 놓쳐 출구 앞에 떨어진다, miss는 허공을 집는다.
   - pouch: 손님의 특산 재료가 진행자 손으로 날아가고, 손님이 망설이다 '빨강!/파랑!/노랑!', 고른 주머니가 탁자에 떨어져 열린다 (대박 = 금빛·코인 분수, coins = 코인 비, one = 한 닢, empty = 먼지 퐁).
-  - race (`RaceScene`): 상태(`booths.race.race`)를 매 프레임 읽는다 (중간에 열어도 그 순간). 모이는 중 = '출발까지 N초'·3·2·1, 달리는 중 = 순위표·해설 말풍선·자기 선수가 앞서면 들썩·꼴찌면 땀, 사진 판정은 화면 시계를 멈췄다 따라잡는다, 결과 = 1등 메달·코인·관중 반응.
+  - race (`RaceScene`): 상태(`booths.race.group`, 판의 `play.race`)를 매 프레임 읽는다 (중간에 열어도 그 순간). 모이는 중 = '출발까지 N초'·3·2·1, 달리는 중 = 순위표·해설 말풍선·자기 선수가 앞서면 들썩·꼴찌면 땀, 사진 판정은 화면 시계를 멈췄다 따라잡는다, 결과 = 1등 메달·코인·관중 반응.
 - 반응: 결과에 맞는 포즈·이모트·연출을 지도보다 크게. 코인이 항아리에서 손님에게 튄다.
 
 ## UI (src/ui)
 
 - HTML 오버레이(`#ui`, 캔버스 위). 모바일 세로 기준, 엄지가 닿는 아래쪽에 조작. 글꼴: 'Jua'(제목·숫자), 'Gowun Dodum'(본문). 색은 art-kit 안내서 1.8의 CSS 토큰.
-- 위: 코인, 재료 가방(누르면 재료·귀한 물건·가공품 목록과 얻는 곳, 재료는 그 종이 오는 구역별로 묶음), 마을 레벨. 그 아래 '다음 목표' 칩 (`ui/goal.ts`: 손님 응원 → 부스 구경 → 새 구역이 열렸으면 보러 가기 → 열린 부스의 꼭 필요한 빈 자리 → 지금 살 수 있는 가장 싼 짓기 → 다음 부스와 다음 마을회관 중 코인이 덜 드는 쪽, 누르면 그 화면).
+- 위: 코인, 재료 가방(누르면 재료·귀한 물건·가공품 목록과 얻는 곳, 재료는 그 종이 오는 구역별로 묶음), 마을 레벨. 그 아래 '다음 목표' 칩 (`ui/goal.ts`: 손님 응원 → 부스 구경 → 새 구역이 열렸으면 보러 가기 → 열린 부스의 꼭 필요한 빈 자리 → 아직 구경하지 않은 새 단체 놀이(경주장 빼고)의 판이 모이거나 한창이면 지도에서 보러 가기 (구경한 놀이는 `mpv-hints-v1`의 `watched`) → 지금 살 수 있는 가장 싼 짓기 → 다음 부스와 다음 마을회관 중 코인이 덜 드는 쪽, 누르면 그 화면).
 - 아래 탭: 마을(지도) / 짓기(건물·부스 업그레이드, 해금, 구역별 묶음과 잠긴 이유) / 주민(진행자 자리 칸: 열린 부스의 자리마다 한 칸, 고용·배치·레벨) / 공방(가공 레시피와 진행) / 도감(손님 | 인형 바꾸기: 종·본 반응, 인형 뽑기로 모은 인형). 그 탭에서 지금 할 수 있는 일이 있으면 작은 점.
 - 비용 칩은 아이템 그림과 이름을 같이 (폰에는 hover가 없다).
 - 손님 카드(손님을 누르면): 그림, 이름(별명 + 종), 성격, 지갑, 기분 막대, 이번 방문 기록, [응원하기] [간식 주기 ▾].
 - 부스 패널(부스를 누르면): 확대 화면 + 이름, 레벨, 참가비(복주머니는 특산 재료 1개), 항아리, 진행자 자리마다 한 줄(자리 이름·쓰는 능력치·꼭 필요/있으면 좋아요, [바꾸기 ▾] = `ui/staffMenu.ts`), 줄, [업그레이드] [응원 도구 걸기 ▾].
-  경주장은 경주 상태(기다림·출발까지 N초·달리는 중·결과), 선수 카드 넷(응원 수, 지금 순위로 정렬), 관중석 목록.
+  단체 놀이(경주장 포함)는 확대 화면 바로 아래에 상태 줄과 판(`ui/groupBoard.ts GroupSection`, 글은 `ui/groupText.ts`): 단계·남은 초·기다리는 조건 (씨름 빠진 편, 줄다리기 편 인원)·접히기 전 경고, 승부가 나면 결과 먼저, [지도] = 패널을 닫고 지도에서 그 판을 보여 준다.
+  판: 경주·오리배 = 선수 카드 넷 (지금 순위), 씨름 = 홍·청 선수와 미는 힘 막대, 줄다리기 = 편마다 자리와 밧줄 띠, 연 = 연 넷 (나는 중·엉킴·끊김·우승), 보물찾기 = 지도와 같은 3×2 흙더미 (판 깊이·나온 것·'바로 옆!'·상자 자리).
+  다음 판을 모으는 동안은 지난 판 카드 (결과·몇 초 전·손님마다 결과와 받은 코인, 접힌 판은 까닭: 메모리에만), 참가자 줄 (포즈·고른 것·건 코인·결과).
 - 토스트: sim `toast` 이벤트와 행동 Result 실패 이유. HUD·목표 칩 바로 아래 (`--toast-top`), 부스 패널이 열려 있으면 화면 아래, 고르기 판이 열려 있으면 판 아래 층.
   '처음 보는 손님이 왔어요: …'처럼 '머리: 이름'인 토스트가 이어 오면 한 줄로 묶는다.
 - 목표 칩: 빈 진행자 자리 → 부스 패널을 열고 그 자리의 고르기 판을 연다 (`showBooth(b, role)`), 고용 → 주민 탭을 고용 후보 칸으로 (`openHire`). 시트가 열려 있으면 숨는다.

@@ -60,6 +60,11 @@ const OBJECT_BOOTHS: Readonly<Record<string, readonly BoothId[]>> = {
   pouch_red: ['pouch'],
   pouch_blue: ['pouch'],
   pouch_gold: ['pouch'],
+  // 셋째 묶음: 연날리기 연 (지도 하늘 층과 확대 화면)
+  kite_red: ['kite'],
+  kite_blue: ['kite'],
+  kite_yellow: ['kite'],
+  kite_green: ['kite'],
 };
 
 const boothReady = (b: BoothId, hall: number): boolean => boothDef(b).unlock.hall <= hall;
@@ -92,7 +97,8 @@ function wanted(group: string, key: string, hall: number): boolean {
       return (OBJECT_BOOTHS[key] ?? []).some((b) => boothReady(b, hall));
     }
     case 'racers':
-      return boothReady('race', hall);
+      // 오리배(boat_*)는 오리배 경주, 그 밖(racer_*)은 경주장.
+      return key.startsWith('boat_') ? boothReady('boat', hall) : boothReady('race', hall);
     case 'icons':
     case 'fx':
     case 'items':
@@ -104,6 +110,8 @@ function wanted(group: string, key: string, hall: number): boolean {
 
 /** 작게 줄여 그리는 그림만 mipmap (지도 위 건물·손님·주민·효과·코인·경주 선수). 확대 화면에서 거의 1:1로 그리는 그림은 끈다 (메모리 1/3 아낌). */
 const MIPMAP_GROUPS = new Set(['map', 'monsters', 'characters', 'fx', 'items', 'racers']);
+/** 그 밖에 지도 위에 작게 그리는 그림 (연날리기 연은 지도 하늘 층에 작게). */
+const MIPMAP_KEYS = new Set(['objects/kite_red', 'objects/kite_blue', 'objects/kite_yellow', 'objects/kite_green']);
 
 /** 그림 하나를 다시 받아 보는 횟수. */
 const LOAD_RETRIES = 3;
@@ -120,7 +128,7 @@ async function loadList(list: readonly { group: string; key: string }[], onProgr
         // 한꺼번에 많이 받다가 하나가 실패해도(느린 폰 망, 동시 요청이 많을 때) 몇 번 다시 받는다. 끝내 실패하면 자리 표시.
         const tex = await Assets.load<Texture>(`${BASE}${group}/${key}.webp`, { strategy: 'retry', retryCount: LOAD_RETRIES, retryDelay: 600 });
         tex.source.scaleMode = 'linear';
-        if (MIPMAP_GROUPS.has(group)) {
+        if (MIPMAP_GROUPS.has(group) || MIPMAP_KEYS.has(id(group, key))) {
           tex.source.autoGenerateMipmaps = true;
           tex.source.updateMipmaps();
         }

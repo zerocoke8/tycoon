@@ -1,10 +1,14 @@
 // UI 글자 만들기 (DOM 없음): 이름, 효과 설명, 손님 상태 글, 기분, 구역·자리 묶기.
 
 import {
+  BOAT,
   BOOTH_IDS,
   BOOTHS,
   boothDef,
   BUILDINGS,
+  KITE,
+  SIDES,
+  TUG,
   GOODS,
   MATERIALS,
   ODDS,
@@ -15,6 +19,7 @@ import {
   SPECIES_IDS,
   type BoothId,
   type BuildingId,
+  type GroupBoothId,
   type MaterialId,
   type SpeciesId,
   type StaffStats,
@@ -22,7 +27,7 @@ import {
 import { BOOTH_SPOTS, DISTRICTS, type DistrictId } from '../data/map.ts';
 import { presetPost } from '../sim/staff.ts';
 import { josa } from '../sim/text.ts';
-import type { Candidate, Monster, MonsterPhase, Staff } from '../sim/types.ts';
+import type { Candidate, GroupRole, Monster, MonsterPhase, Staff } from '../sim/types.ts';
 import { fmt } from './dom.ts';
 
 export const BUILDING_IDS = Object.keys(BUILDINGS) as BuildingId[];
@@ -114,8 +119,16 @@ export const boothShort = (b: BoothId): string => BOOTHS[b].name.replace(/\s*부
 /** 좁은 칸용 짧은 이름: '몬스터 경주장' → '경주장'. */
 export const boothTiny = (b: BoothId): string => boothShort(b).replace(/^몬스터\s*/, '');
 
-/** 자리 수 낱말 (boothEffect와 같은 말): 경주장은 관중석. */
-export const seatWord = (b: BoothId): string => (boothDef(b).roles.length > 1 ? '관중석' : '자리');
+/** 자리 수 낱말 (boothEffect와 같은 말): 경주장은 관중석, 오리배는 선착장, 그 밖은 자리. */
+export const seatWord = (b: BoothId): string => (b === 'race' ? '관중석' : b === 'boat' ? '선착장' : '자리');
+
+/** 단체 놀이 자리 나눔 (자리 수 seats일 때): '선수 2·구경 4', '연 4·구경 2', '편마다 3'. 나눔이 없으면 null. */
+export function groupSeatSplit(b: BoothId, seats: number): string | null {
+  if (b === 'ssireum') return `선수 2·구경 ${Math.max(0, seats - 2)}`;
+  if (b === 'kite') return `연 ${Math.min(KITE.flyers, seats)}·구경 ${Math.max(0, seats - KITE.flyers)}`;
+  if (b === 'tug') return `편마다 ${Math.floor(seats / 2)}`;
+  return null;
+}
 
 /** 참가비 글: '참가비 3' / 복주머니는 '특산 재료 1개'. */
 export function feeText(b: BoothId, fee: number): string {
@@ -134,12 +147,12 @@ export function roleStat(b: BoothId, role: number): keyof StaffStats | null {
   return roles.length > 1 ? (roles[role]?.stat ?? null) : null;
 }
 
-/** 자리가 하는 일 한 줄 (비어 있을 때 보여 준다). */
+/** 자리가 하는 일 한 줄 (비어 있을 때 보여 준다). 경주장·오리배는 '출발', 그 밖의 단체 놀이는 '시작'. */
 export function roleHelp(b: BoothId, role: number): string {
   const stat = roleStat(b, role);
   if (stat === null) return '진행: 한판이 빨라요 · 입담: 기분 + · 손님맞이: 손님 +';
-  if (stat === 'pace') return '진행이 높을수록 출발을 덜 기다려요';
-  if (stat === 'charm') return '입담이 높을수록 관중 기분이 올라요';
+  if (stat === 'pace') return `진행이 높을수록 ${b === 'race' || b === 'boat' ? '출발' : '시작'}을 덜 기다려요`;
+  if (stat === 'charm') return b === 'race' ? '입담이 높을수록 관중 기분이 올라요' : '입담이 높을수록 참가 손님 기분이 올라요';
   return '손님맞이가 높을수록 손님이 더 몰려요';
 }
 
@@ -175,7 +188,8 @@ export function boothEffect(b: BoothId, level: number): string | null {
   const seats = d.seats[i];
   const cap = d.potCap[i];
   if (fee === undefined || seats === undefined || cap === undefined) return null;
-  return `참가비 ${feeText(b, fee)} · ${seatWord(b)} ${seats} · 항아리 ${fmt(cap)}`;
+  const split = groupSeatSplit(b, seats);
+  return `참가비 ${feeText(b, fee)} · ${seatWord(b)} ${seats}${split === null ? '' : ` (${split})`} · 항아리 ${fmt(cap)}`;
 }
 
 /** 진행자 자리 줄 (자리가 여럿인 부스만): '출발 신호 · 해설자 · 사육사(있으면 좋아요)'. */
@@ -185,8 +199,8 @@ export function boothRolesText(b: BoothId): string | null {
   return roles.map((r) => (r.optional === true ? `${r.name}(있으면 좋아요)` : r.name)).join(' · ');
 }
 
-/** 부스만의 규칙 한 줄 (없으면 null). */
-export function boothRule(b: BoothId): string | null {
+/** 부스만의 규칙 한 줄 (없으면 null). start = 단체 놀이의 시작 조건까지 (부스 패널은 상태 줄이 말하니 false). */
+export function boothRule(b: BoothId, start = true): string | null {
   const d = boothDef(b);
   if (b === 'duck') {
     const back = ODDS.duck.lose[1];
@@ -196,8 +210,33 @@ export function boothRule(b: BoothId): string | null {
   if (b === 'claw') return '뽑은 인형은 도감의 인형 칸에 모여요';
   if (b === 'wheel') return '찜한 칸에 멈추면 이겨요 · 종 칸이면 대박';
   if (b === 'ring') return '고리 셋 가운데 둘 이상 걸면 이겨요';
-  if (b === 'race') return `손님마다 선수 하나를 응원해요 · ${RACE.minRunners}명 이상 모이면 곧 출발`;
+  const when = (s: string): string => (start ? ` · ${s}` : '');
+  if (b === 'race') return `손님마다 선수 하나를 응원해요${when(`${RACE.minRunners}명 이상 모이면 곧 출발`)}`;
+  if (b === 'ssireum') return `손님 둘이 홍·청으로 겨루고, 구경 손님은 한 편에 걸어요${when('선수 둘이 와야 시작')}`;
+  if (b === 'boat') return `손님마다 배 하나를 응원해요${when(`${RACE.minRunners}명 이상 모이면 곧 출발`)}`;
+  if (b === 'kite') return '연 넷이 연싸움, 마지막까지 남은 연이 이겨요 · 날리는 손님이 없는 연은 말뚝에 묶여 날아요';
+  // 설명('홍·청 두 편이 밧줄을 당긴다')과 겹치지 않게 시작 조건만.
+  if (b === 'tug') return start ? `편마다 ${TUG.minSide}명이 모이면 곧 시작해요 · 편 인원은 맞춰요` : null;
+  if (b === 'dig') return '손님마다 땅 한 곳을 파요 · 보물상자는 가끔 한 곳에만 묻혀요';
   return null;
+}
+
+/** 단체 놀이에서 고른 것 이름: '달팽이', '오리배', '홍 선수', '청 편', '빨강 연 날리기'·'빨강 연 응원', '3번 땅'. */
+export function groupPickName(b: GroupBoothId, pick: number, role: GroupRole = 'bettor'): string {
+  switch (b) {
+    case 'race':
+      return RACE.racers[pick]?.name ?? '?';
+    case 'boat':
+      return BOAT.boats[pick]?.name ?? '?';
+    case 'ssireum':
+      return `${SIDES[pick]?.name ?? '?'}${role === 'player' ? ' 선수' : ' 응원'}`;
+    case 'tug':
+      return `${SIDES[pick]?.name ?? '?'} 편`;
+    case 'kite':
+      return `${KITE.kites[pick]?.name ?? '?'}${role === 'player' ? ' 날리기' : ' 응원'}`;
+    case 'dig':
+      return `${pick + 1}번 땅`;
+  }
 }
 
 export function boothPotCap(b: BoothId, level: number): number {

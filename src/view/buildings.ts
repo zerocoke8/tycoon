@@ -3,6 +3,7 @@
 // 바뀔 때의 연출: 업그레이드·해금·진행자 바뀜 = 통통 + 먼지, 구역 열림 = 구름이 흩어지고 소품이 톡 나타난다.
 // 구름은 구역 사각형에 붙여 깔고(바깥으로 조금만 삐져나옴), 물체층 안에서 구역 아래 변의 y로 정렬한다:
 // 구역 바로 아래에 선 키 큰 건물(예: 북쪽 언덕 아래 마을회관 지붕)이 구름에 가리지 않고 앞에 선다.
+// 바닥에 깔리는 부스 그림·소품(map.ts BoothSpot.flat·props[].flat: 씨름 모래판, 오리배 선착장, 보물찾기 흙더미)은 바닥층(floor)에 그린다: 손님이 그 위에 선다.
 
 import { Container, Graphics, Sprite, type Renderer, type Texture } from 'pixi.js';
 import { BOOTHS, BOOTH_IDS, type BoothId, type BuildingId, type OutcomeTier } from '../data/defs.ts';
@@ -41,6 +42,10 @@ const PROP_PH: Record<string, { w: number; h: number; color: number }> = {
   lot_sign: { w: 220, h: 300, color: 0xc9995f },
 };
 const BUILDING_PH = { w: 760, h: 700, color: 0xd9c7a6 };
+/** 바닥에 깔리는 부스 그림의 자리 표시 (납작하게). */
+const FLAT_PH = { w: 760, h: 420, color: 0xe2c38f };
+/** 바닥 그림을 물체층에 넣을 때 (바닥층이 없을 때) 맨 아래로. */
+const FLAT_Z = -1e6;
 const POT_PH = { w: 500, h: 460, color: 0xc9824a };
 const PERSON_PH = { w: 560, h: 980, color: 0xf2d0a9 };
 
@@ -131,6 +136,8 @@ export type MapHit = { readonly kind: 'booth'; readonly id: BoothId } | { readon
 export interface BuildingLayers {
   /** y로 정렬되는 물체층 (구름 묶음도 여기에 zIndex = 구역 아래 변으로 들어간다). */
   readonly objects: Container;
+  /** 바닥층 (바닥 타일 위, 그림자 아래): 바닥에 깔리는 그림. 없으면 물체층 맨 아래. */
+  readonly floor?: Container;
 }
 
 function emptyBox(): Box {
@@ -264,10 +271,11 @@ export class BuildingsView {
     // 놀이부스: 건물, 빈 부지 표식, 상금 항아리, 진행자
     for (const id of BOOTH_IDS) {
       const spot = BOOTH_SPOTS[id];
-      const building = new ArtNode({ k: ART_SCALE.booth, anchor: 'bottom', placeholder: BUILDING_PH });
+      const flat = spot.flat === true;
+      const building = new ArtNode({ k: spot.buildingK ?? ART_SCALE.booth, anchor: 'bottom', placeholder: flat ? FLAT_PH : BUILDING_PH });
       building.setArt('map', BOOTHS[id].building);
       building.position.set(spot.base.x, spot.base.y);
-      building.zIndex = spot.base.y;
+      building.zIndex = flat ? FLAT_Z : spot.base.y;
       const lot = new ArtNode({ k: ART_SCALE.prop, anchor: 'bottom', placeholder: PROP_PH.lot_sign });
       lot.setArt('map', 'lot_sign');
       lot.position.set(spot.base.x, spot.base.y + 30);
@@ -282,7 +290,8 @@ export class BuildingsView {
       // 계산대 위 항아리는 부스 그림 바로 앞에 (그림 속 항아리를 덮는다).
       const potOnCounter = spot.pot.y < spot.base.y;
       pot.zIndex = potOnCounter ? spot.base.y + 1 : spot.pot.y;
-      layers.objects.addChild(building, lot, pot);
+      this.floorOf(flat).addChild(building);
+      layers.objects.addChild(lot, pot);
       const buildingProp = this.addProp(building, spot.base);
       this.addProp(lot, spot.base);
       this.addProp(pot, spot.pot);
@@ -299,12 +308,12 @@ export class BuildingsView {
       });
       // 같이 놓는 그림 (경주장 출발대·결승선). 출발대는 칸 색이 레인 순서와 맞게 뒤집기도 한다 (mapUtil RACE_GATE_FLIP).
       const extras = (spot.props ?? []).map((p) => {
-        const node = new ArtNode({ k: p.k, anchor: 'bottom', placeholder: { w: 600, h: 500, color: 0xa0703f } });
+        const node = new ArtNode({ k: p.k, anchor: 'bottom', placeholder: p.flat === true ? { w: 500, h: 220, color: 0xb88a5a } : { w: 600, h: 500, color: 0xa0703f } });
         node.setArt('map', p.key);
         node.position.set(p.at.x, p.at.y);
-        node.zIndex = p.at.y;
+        node.zIndex = p.flat === true ? FLAT_Z : p.at.y;
         if (p.key === 'race_gate' && RACE_GATE_FLIP) node.scale.x = -1;
-        layers.objects.addChild(node);
+        this.floorOf(p.flat === true).addChild(node);
         this.addProp(node, p.at);
         return node;
       });
@@ -331,6 +340,11 @@ export class BuildingsView {
 
     this.sync();
     this.initialized = true;
+  }
+
+  /** 바닥에 깔리는 그림은 바닥층에 (없으면 물체층 맨 아래). */
+  private floorOf(flat: boolean): Container {
+    return flat ? (this.layers.floor ?? this.layers.objects) : this.layers.objects;
   }
 
   private addProp(node: Container, at: Pt): Prop {
@@ -678,6 +692,17 @@ export class BuildingsView {
       }
     }
     if (tier === 'jackpot') this.chiefHopT = 0;
+  }
+
+  /** 부스 그림 (단체 놀이 화면이 흔들거나 숨길 때: 보물상자 뚜껑 등은 자기 그림으로). */
+  boothNode(booth: BoothId): ArtNode | null {
+    return this.booths.find((b) => b.id === booth)?.building ?? null;
+  }
+
+  /** 진행자 자리 role의 그림과 서는 점 (단체 놀이 화면이 진행자 연출을 더할 때, 없으면 null). 진행자가 없으면 node.visible = false. */
+  hostNode(booth: BoothId, role: number): { node: ArtNode; at: Pt } | null {
+    const hv = this.booths.find((b) => b.id === booth)?.hosts[role];
+    return hv === undefined ? null : { node: hv.node, at: hv.at };
   }
 
   /** 진행자 한 사람만 통통 (경주장 출발 신호·해설자). 그 자리에 진행자가 없으면 아무것도 안 한다. */

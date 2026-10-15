@@ -1,10 +1,10 @@
 // 지도 위 몬스터 경주장: 경주 선수 넷(racers/<key>)과 관중석 방석. 경주로 바닥은 ground.ts가 굽고, 출발대·관중석·결승선 그림은 buildings.ts.
-// sim의 경주 상태(BoothState.race)를 매 프레임 읽는다 (이벤트를 놓쳐도, 저장을 불러와도 맞는다):
+// sim의 경주 상태(BoothState.group, 단체 놀이 엔진: play.kind 'race')를 매 프레임 읽는다 (이벤트를 놓쳐도, 저장을 불러와도 맞는다):
 //   idle·gathering: 선수는 출발대 앞 자기 레인의 출발선(mapUtil RACE_START_P)에 선다. 모이는 중이면 가끔 들썩,
 //                   출발 3초 전부터 웅크리고 출발대 위에 3·2·1.
 //   running: sim/race.ts raceProgress(result, 선수, 초)로 자기 레인을 달린다 (레인 = 선수 번호). 화면 시계가 sim 시계(0.1초 틱)를
 //            부드럽게 따라가서 움직임이 매끈하다. 결승을 지나면 조금 미끄러지며 선다.
-//            (관중의 응원 반응은 sim의 raceProgress 이벤트로 world.ts가 작게 보여 준다.)
+//            (관중의 응원 반응은 sim의 groupEvent 이벤트로 world.ts가 작게 보여 준다.)
 //   done: 결승선 너머에 서고, 1등 선수가 통통 (결승선에 색종이). 다음 경주를 받으면(idle·gathering) 레인을 따라
 //         남은 반 바퀴를 돌아 출발선으로 돌아간다 (출발이 가까우면 서두른다).
 // 선수 그림은 왼쪽을 본다: 오른쪽으로 달리면 좌우로 뒤집는다 (몸을 돌리듯 납작해지며). 걸음은 선수마다 (달팽이 미끄럼, 개구리 깡충).
@@ -15,7 +15,8 @@ import { RACE } from '../data/defs.ts';
 import { BOOTH_SPOTS, RACE_TRACK, trackPoint } from '../data/map.ts';
 import type { SimApi } from '../sim/api.ts';
 import { raceProgress } from '../sim/race.ts';
-import type { RaceResult, RaceState, RacerIndex } from '../sim/types.ts';
+import { raceOf } from '../sim/group/core.ts';
+import type { GroupState, RaceResult, RacerIndex } from '../sim/types.ts';
 import { ArtNode, artMeta } from './art.ts';
 import type { BuildingsView } from './buildings.ts';
 import type { FxLayer } from './fx.ts';
@@ -125,7 +126,7 @@ export class RaceTrackView {
   private readonly district = districtAt(RACE_TRACK.center.x, RACE_TRACK.center.y);
   private shown = false;
   private initialized = false;
-  /** 지금 화면이 따라가는 경주 (sim RaceState.result와 같은 객체). */
+  /** 지금 화면이 따라가는 경주 (sim GroupState.play.race와 같은 객체). */
   private result: RaceResult | null = null;
   /** 화면 시계 (출발 뒤 초). */
   private clock = 0;
@@ -222,7 +223,7 @@ export class RaceTrackView {
     if (show !== this.shown) this.setShown(show);
     if (!show) return;
 
-    const rs = bs.race;
+    const rs = bs.group;
     this.followRace(rs, dt);
     for (let i = 0; i < this.racers.length; i++) {
       const r = this.racers[i] as Racer;
@@ -246,10 +247,10 @@ export class RaceTrackView {
   }
 
   /** sim의 경주를 따라간다: 새 경주 시작·화면 시계·결승·출발 숫자. */
-  private followRace(rs: RaceState | null, dt: number): void {
-    const live = rs !== null && (rs.phase === 'running' || rs.phase === 'done') && rs.result !== null;
-    if (live) {
-      const res = rs.result as RaceResult;
+  private followRace(rs: GroupState | null, dt: number): void {
+    const cur = rs !== null && (rs.phase === 'running' || rs.phase === 'done') ? raceOf(rs.play) : null;
+    if (rs !== null && cur !== null) {
+      const res = cur;
       if (res !== this.result) {
         this.result = res;
         this.clock = rs.elapsed;
@@ -324,7 +325,7 @@ export class RaceTrackView {
   }
 
   /** 선수 자리를 정한다 (경주로 p). 움직인 거리(세계 px)를 돌려준다. */
-  private drive(r: Racer, rs: RaceState | null, dt: number): number {
+  private drive(r: Racer, rs: GroupState | null, dt: number): number {
     const res = this.result;
     if (res !== null) {
       r.p = raceTrackP(this.progress(res, r, this.clock));
@@ -353,7 +354,7 @@ export class RaceTrackView {
     return step;
   }
 
-  private draw(r: Racer, rs: RaceState | null, moved: number, dt: number, view: ViewRect): void {
+  private draw(r: Racer, rs: GroupState | null, moved: number, dt: number, view: ViewRect): void {
     const g = r.gait;
     const speed = dt > 0 ? moved / dt : 0;
     r.run += (clamp(speed / RUN_FULL, 0, 1) - r.run) * follow(10, dt);

@@ -1,17 +1,16 @@
 // 부스 패널: 위쪽은 확대 화면(CloseupView, 캔버스), 아래는 HTML 부스 정보 시트.
 // 열려 있는 동안 지도 입력을 막고, 확대 화면 둘레(그늘)를 누르면 닫힌다. 확대 화면 자리는 캔버스가 그대로 누르기를 받는다.
 
-import { BOOTHS, boothDef, GOODS, RACE, SPECIES, STAFF_STAT_NAMES, type BoothId, type GoodId } from '../data/defs.ts';
-import { RACERS, racePlace, raceStandings } from '../sim/race.ts';
+import { BOOTHS, boothDef, GOODS, isGroupBooth, STAFF_STAT_NAMES, type BoothId, type GoodId } from '../data/defs.ts';
 import { josa } from '../sim/text.ts';
-import type { BoothState, MonsterId, RaceResult, RaceState, RacerIndex } from '../sim/types.ts';
 import { closeupRadius, type Rect } from '../view/contracts.ts';
 import { btn, fmt, fmtSec, h, revealInSheet, setText } from './dom.ts';
+import { GroupResults, GroupSection } from './groupBoard.ts';
 import { icon } from './icons.ts';
-import { boothEffect, boothPotCap, boothRule, RACER_COLOR, roleHelp, roleStat, seatWord } from './labels.ts';
+import { boothEffect, boothPotCap, boothRule, roleHelp, roleStat, seatWord } from './labels.ts';
 import type { MenuItem } from './menu.ts';
 import { BasePanel, type UiCtx } from './panel.ts';
-import { itemIcon, monsterPic, pic, placeholder, racerPic, staffPic } from './pics.ts';
+import { itemIcon, pic, placeholder, staffPic } from './pics.ts';
 import { Sheet } from './sheet.ts';
 import { openRoleMenu } from './staffMenu.ts';
 import { costChips, makeBar, secHead, statBlock } from './widgets.ts';
@@ -65,7 +64,7 @@ export class BoothPanel {
     parent.append(this.hole);
     this.sheet = new Sheet(parent, 'booth');
     this.sheet.onClose = () => ctx.closeAll();
-    this.info = new BoothInfo(ctx);
+    this.info = new BoothInfo(ctx, new GroupResults(ctx.sim));
     this.sheet.body.append(this.info.el);
   }
 
@@ -173,47 +172,18 @@ export class BoothPanel {
   }
 }
 
-/** 경주에 건 손님 하나 (경주 상태가 없을 때는 자리마다의 한판에서). */
-interface RaceSeat {
-  readonly monster: MonsterId;
-  readonly racer: RacerIndex;
-  readonly bet: number;
-}
-
-/** 경주장 참가자: 경주 상태(BoothState.race)의 참가자, 없으면 지금 한판 중인 자리의 선수. */
-function raceSeats(bs: BoothState): RaceSeat[] {
-  const r = bs.race;
-  if (r !== null && r.participants.length > 0) return r.participants;
-  const out: RaceSeat[] = [];
-  for (const rd of bs.rounds) {
-    if (rd !== null && rd.outcome.detail.kind === 'race') out.push({ monster: rd.monster, racer: rd.outcome.detail.racer, bet: rd.bet });
-  }
-  return out;
-}
-
-/** 선수 순서: 달리는 중이면 지금 순위, 끝났으면 들어온 순서, 아니면 번호 순서. */
-function racerOrder(race: RaceState | null): readonly RacerIndex[] {
-  if (race === null || race.result === null) return RACERS;
-  if (race.phase === 'running') return raceStandings(race.result, race.elapsed);
-  if (race.phase === 'done') return race.result.finishOrder;
-  return RACERS;
-}
-
-/** 손님 하나의 경주 결과 글: '역전 대박!' / '1등!' / '아깝다! 사진 판정' / '3등'. */
-function raceResultTag(result: RaceResult, racer: RacerIndex): { text: string; cls: string } {
-  const place = racePlace(result, racer);
-  if (place === 1) return result.comeback ? { text: '역전 대박!', cls: 'gold' } : { text: '1등!', cls: 'win' };
-  if (place === 2 && result.photoFinish) return { text: '아깝다! 사진 판정', cls: 'near' };
-  return { text: `${place}등`, cls: '' };
-}
-
 /** 부스 정보 (시트 몸통). */
 class BoothInfo extends BasePanel {
   booth: BoothId = 'slot';
   /** 진행자 자리 줄과 그 버튼 (BoothPanel.focusRole). */
   private readonly roleRows = new Map<number, { el: HTMLElement; btn: HTMLElement }>();
-  /** 막 끝난 경주의 1등 (다음 경주를 모으는 처음 몇 초 동안 보여 준다: 확대 화면은 아직 결과를 보이는 중). */
-  private lastWin: { text: string; at: number } | null = null;
+  /** 단체 놀이의 지난 판 (부스마다, 패널이 닫혀 있어도 sim 이벤트로 모은다). */
+  private readonly results: GroupResults;
+
+  constructor(ctx: UiCtx, results: GroupResults) {
+    super(ctx);
+    this.results = results;
+  }
 
   roleRow(role: number): { el: HTMLElement; btn: HTMLElement } | undefined {
     return this.roleRows.get(role);
@@ -222,7 +192,8 @@ class BoothInfo extends BasePanel {
   sig(): string {
     const s = this.st;
     const bs = s.booths[this.booth];
-    const race = this.booth === 'race' ? `${bs.race?.phase ?? '-'}:${raceSeats(bs).map((e) => `${e.monster}.${e.racer}`).join(',')}:${bs.seats.join('/')}` : '-';
+    // 단체 놀이: 단계·참가자(고른 것)·자리가 바뀌면 다시 짓는다 (순위·막대·연·보물은 live로).
+    const race = bs.group !== null ? `${bs.group.phase}:${bs.group.participants.map((e) => `${e.monster}.${e.pick}`).join(',')}:${bs.seats.join('/')}` : '-';
     return [this.booth, bs.unlocked, bs.level, bs.staff.join('/'), bs.cheer?.good ?? '-', race, s.staff.map((st) => `${st.id}:${st.level}:${st.post === null ? '-' : `${st.post.booth}.${st.post.role}`}`).join(',')].join('|');
   }
 
@@ -240,6 +211,10 @@ class BoothInfo extends BasePanel {
       const missing = def.roles.filter((r, i) => r.optional !== true && (bs.staff[i] ?? null) === null).map((r) => r.name);
       this.el.append(h('div', 'mpv-alert', def.roles.length > 1 ? `${missing.join('·')} 자리가 비어 쉬는 중이에요` : '진행자가 없어 쉬는 중이에요'), ...roles);
     }
+
+    // 단체 놀이: 지금 판(상태 줄·고른 것 판)을 맨 위에 (확대 화면 바로 아래, 짧은 폰에서도 먼저 보이게).
+    const group = isGroupBooth(b) ? new GroupSection(this.ctx, this.live, b, this.results) : null;
+    if (group !== null) this.el.append(...group.top());
 
     // 참가비 · 자리 · 줄
     const seatsV = h('span');
@@ -260,15 +235,16 @@ class BoothInfo extends BasePanel {
       ),
     );
 
-    // 부스만의 규칙 (오리 낚시 반 돌려받기, 복주머니 재료 참가비 …)
-    const rule = boothRule(b);
-    if (rule !== null && b !== 'race') {
+    // 부스만의 규칙 (오리 낚시 반 돌려받기, 복주머니 재료 참가비, 단체 놀이 규칙 …)
+    // 단체 놀이의 시작 조건은 상태 줄이 말한다 (경주장·오리배는 규칙 전부가 상태 줄과 겹친다: 작은 화면에서 참가자 목록이 밀리지 않게).
+    const rule = boothRule(b, false);
+    if (rule !== null && b !== 'race' && b !== 'boat') {
       const go = b === 'claw' ? btn('sub small', '인형 보기', () => this.ctx.openDex('plush')) : null;
       this.el.append(h('div', 'mpv-rule', h('span', 'mpv-grow', rule), go));
     }
 
-    // 경주장: 다음 경주, 선수, 참가자
-    if (b === 'race') this.buildRace();
+    // 단체 놀이: 지난 판과 참가자 (고른 것·하는 일·건 코인, 끝나면 결과와 받은 코인).
+    if (group !== null) this.el.append(...group.list());
 
     // 상금 항아리
     const pot = makeBar();
@@ -358,131 +334,6 @@ class BoothInfo extends BasePanel {
       out.push(row);
     });
     return out;
-  }
-
-  /** 경주장: 다음 경주까지 남은 때, 선수 넷(지금 순위·응원하는 손님 수), 관중석 참가자와 고른 선수. */
-  private buildRace(): void {
-    const b = this.booth;
-    const bs = this.st.booths[b];
-    const race = bs.race;
-    const phase = race?.phase ?? 'idle';
-    const seats = raceSeats(bs);
-    const result = race?.result ?? null;
-
-    // 상태 줄 (남은 초는 4Hz로)
-    const title = h('b');
-    const sub = h('small');
-    this.live.add(() => {
-      const cur = this.st.booths[b];
-      const r = cur.race;
-      const n = raceSeats(cur).length;
-      const cd = Math.max(0, Math.ceil(r?.countdown ?? 0));
-      const ph = r?.phase ?? 'idle';
-      // 출발 신호·해설자가 빠졌으면 (달리던 경주는 끝까지 달린다) 손님을 받지 않는다.
-      if (!this.sim.boothOpen(b) && (ph === 'idle' || ph === 'gathering')) {
-        const need = boothDef(b).roles.filter((x, i) => x.optional !== true && (cur.staff[i] ?? null) === null).map((x) => x.name);
-        setText(title, '쉬는 중');
-        setText(sub, `${need.join('·')} 자리를 채우면 손님이 와요`);
-        return;
-      }
-      // 막 끝난 경주의 1등 (처음 몇 초)
-      const last = this.lastWin !== null && performance.now() - this.lastWin.at < 6000 ? `${this.lastWin.text} · ` : '';
-      switch (ph) {
-        case 'idle':
-          setText(title, n > 0 ? '한판 중' : '손님을 기다려요');
-          setText(sub, `${last}관중석에 손님이 앉으면 출발을 준비해요 · ${RACE.minRunners}명 이상 모이면 곧 출발`);
-          break;
-        case 'gathering':
-          // 0초가 되어도 관중석으로 걸어오는 손님이 있으면 sim이 조금 더 기다려 준다.
-          setText(title, cd > 0 ? `출발까지 ${cd}초` : '곧 출발!');
-          setText(sub, last + (cd <= 0 ? `${n}명이 응원해요 · 오는 손님을 기다려요` : n >= RACE.minRunners ? `${n}명이 응원해요 · 곧 출발!` : `${n}명이 응원해요 · ${RACE.minRunners}명이 모이면 곧 출발`));
-          break;
-        case 'running':
-          setText(title, '달리는 중!');
-          setText(sub, `${n}명이 응원해요`);
-          break;
-        case 'done': {
-          const res = r?.result ?? null;
-          const win = res === null ? undefined : RACE.racers[res.finishOrder[0] ?? 0];
-          const flags = [res?.comeback === true ? '꼴찌에서 역전' : '', res?.photoFinish === true ? '사진 판정' : ''].filter((x) => x !== '');
-          setText(title, win === undefined ? '결승!' : [`${josa(win.name, '이', '가')} 1등!`, ...flags].join(' · '));
-          if (win !== undefined) this.lastWin = { text: `지난 경주: ${win.name} 1등`, at: performance.now() };
-          setText(sub, cd > 0 ? `다음 경주 준비 ${cd}초` : '다음 경주를 준비해요');
-          break;
-        }
-      }
-    });
-    this.el.append(h('div', `mpv-race-st ${phase}`, h('span', 'flag', phase === 'running' ? '달려라' : phase === 'done' ? '결승' : '경주'), h('div', 'mpv-grow', title, sub)));
-
-    // 선수 넷: 지금 순위(달리는 중·끝남), 응원하는 손님 수
-    const grid = h('div', 'mpv-racers');
-    const cards = RACE.racers.map((rc, i) => {
-      const fans = seats.filter((e) => e.racer === i).length;
-      const place = h('span', 'place');
-      const color = RACER_COLOR[i] ?? 'var(--dd-paper)';
-      const card = h('div', 'mpv-racer', place, racerPic(rc.key, rc.name, color), h('span', 'name', rc.name), h('span', 'fans', fans > 0 ? `응원 ${fans}` : '응원 0'));
-      card.classList.toggle('nofans', fans === 0);
-      card.style.setProperty('--bib', color);
-      return { card, place };
-    });
-    let lastOrder = '';
-    this.live.add(() => {
-      const r = this.st.booths[b].race;
-      const order = racerOrder(r);
-      const ranked = r !== null && (r.phase === 'running' || r.phase === 'done') && r.result !== null;
-      const key = `${ranked}:${order.join('')}`;
-      if (key === lastOrder) return;
-      lastOrder = key;
-      order.forEach((ri, k) => {
-        const c = cards[ri];
-        if (c === undefined) return;
-        grid.append(c.card);
-        setText(c.place, ranked ? `${k + 1}` : '');
-        c.place.hidden = !ranked;
-        c.card.classList.toggle('first', ranked && k === 0);
-      });
-    });
-    this.el.append(grid);
-
-    // 관중석: 이번 경주 참가자(고른 선수·건 코인, 끝나면 결과), 그리고 다음 경주를 기다리는 손님. 누르면 손님 카드.
-    const inRace = new Set(seats.map((e) => e.monster));
-    const waiting = bs.seats.filter((id): id is MonsterId => id !== null && !inRace.has(id));
-    this.el.append(secHead('관중석', `${seats.length}명 응원 중${waiting.length > 0 ? ` · ${waiting.length}명 다음 경주` : ''}`));
-    if (seats.length === 0 && waiting.length === 0) {
-      this.el.append(h('div', 'mpv-empty sm', '손님이 앉으면 고른 선수가 여기에 보여요'));
-      return;
-    }
-    const list = h('div', 'mpv-entries');
-    const row = (id: MonsterId, ...right: HTMLElement[]): void => {
-      const m = this.sim.monster(id);
-      if (m === undefined) return;
-      const sp = SPECIES[m.species];
-      const el = h('button', 'mpv-entry', monsterPic(m.species, m.pose, sp.name), h('span', 'who', h('b', null, m.nickname), h('small', null, sp.name)), ...right);
-      el.type = 'button';
-      el.setAttribute('aria-label', `${m.nickname} 손님 보기`);
-      el.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        this.ctx.showMonster(m.id);
-      });
-      list.append(el);
-    };
-    for (const e of seats) {
-      const rc = RACE.racers[e.racer];
-      const color = RACER_COLOR[e.racer] ?? 'var(--dd-paper)';
-      const racerChip = h('span', 'mpv-racer-chip', racerPic(rc?.key ?? '', rc?.name ?? '?', color), rc?.name ?? '?');
-      racerChip.style.setProperty('--bib', color);
-      const tag = phase === 'done' && result !== null ? raceResultTag(result, e.racer) : null;
-      row(e.monster, racerChip, tag !== null ? h('span', `mpv-res ${tag.cls}`.trim(), tag.text) : h('span', 'mpv-chip bet', itemIcon('coin'), fmt(e.bet)));
-    }
-    for (const id of waiting) {
-      // 걸어오던 손님이 앉으면 '다음 경주'로 (손님 걸음은 sig에 없어 4Hz로 고친다).
-      const tag = h('span', 'mpv-res wait');
-      const set = (): void => setText(tag, this.sim.monster(id)?.phase === 'toSeat' ? '오는 중' : '다음 경주');
-      set();
-      this.live.add(set);
-      row(id, tag);
-    }
-    this.el.append(list);
   }
 
   private openCheerMenu(anchor: HTMLElement): void {

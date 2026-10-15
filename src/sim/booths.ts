@@ -1,9 +1,10 @@
 // 놀이부스: 레벨 값, 진행자 자리, 열림 여부, 자리·줄 위치, 손님의 부스 고르기.
 
 import type { Rng } from '../core/rng.ts';
-import { BOOTHS, BOOTH_IDS, boothDef, SPECIES, type BoothId, type BoothRole, type StaffStats } from '../data/defs.ts';
+import { BOOTHS, BOOTH_IDS, boothDef, isGroupBooth, SPECIES, type BoothId, type BoothRole, type StaffStats } from '../data/defs.ts';
 import { BOOTH_SPOTS, type Pt } from '../data/map.ts';
 import { byLevel, goodDef, type GoodDef } from './economy.ts';
+import { groupGame } from './group/index.ts';
 import { TUNE } from './tuning.ts';
 import type { BoothState, GameState, Monster, Staff } from './types.ts';
 
@@ -161,9 +162,12 @@ export function chooseBooth(state: GameState, rng: Rng, m: Monster, avoid: Booth
     let w = fav.includes(b) ? TUNE.favoriteWeight : 1;
     w *= Math.max(0.2, 1 + (boothStat(state, b, 'welcome', TUNE.emptyWelcome) - 3) * TUNE.welcomePerPoint);
     w /= 1 + state.booths[b].queue.length * TUNE.queuePenalty;
-    // 경주장: 모이는 중인 경주는 손님을 더 끈다 (여럿이 같이 보고 싶다).
-    const race = state.booths[b].race;
-    if (race !== null && race.phase === 'gathering') w *= 1 + race.participants.length * TUNE.raceGatherPull;
+    // 단체 놀이: 모이는 중인 판은 손님을 더 끈다 (여럿이 같이 보고 싶다). 출발 조건이 아직 안 맞으면 (밀어내기 상대가 없음) 더, 많아야 groupPullMax배.
+    const g = state.booths[b].group;
+    if (g !== null && g.phase === 'gathering' && isGroupBooth(b)) {
+      const need = groupGame(b).readiness(g.participants, g.elapsed) === 'none';
+      w *= Math.min(TUNE.groupPullMax, 1 + g.participants.length * TUNE.groupGatherPull * (need ? TUNE.groupNeedPull : 1));
+    }
     if (b === avoid) w *= 0.35;
     entries.push([b, w]);
   }

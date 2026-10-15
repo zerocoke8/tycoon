@@ -45,8 +45,8 @@ export const TUNE = {
   /** 미식가가 간식에서 받는 기분 배수. */
   foodieSnack: 1.5,
 
-  /** 같은 자리에서 다시 한판 할 확률 (기본, 아깝다 뒤 +, 줄이 있으면 -, 경주장은 다음 경주도 관중석에서 +). */
-  playAgain: { base: 0.55, afterNearMiss: 0.2, queue: -0.3, bold: 0.1, race: 0.25 },
+  /** 같은 자리에서 다시 한판 할 확률 (기본, 아깝다 뒤 +, 줄이 있으면 -, 단체 놀이는 다음 판도 그 자리에서 +). */
+  playAgain: { base: 0.55, afterNearMiss: 0.2, queue: -0.3, bold: 0.1, group: 0.25 },
   /** 줄에서 이만큼 기다리면 포기하고 다른 걸 한다. */
   queueGiveUpSec: 75,
   queueGiveUpMood: -4,
@@ -93,19 +93,52 @@ export const TUNE = {
   /** 손님맞이 자리가 비어 있을 때의 손님맞이 값 (경주장 사육사가 없으면 손님이 조금 덜 온다). */
   emptyWelcome: 2,
 
-  // ── 몬스터 경주장 ──
-  /** 모이는 중인 경주에 손님이 끌리는 정도: 부스 고르기 가중치 × (1 + 참가자 수 × 이 값). */
-  raceGatherPull: 0.5,
+  // ── 단체 놀이 (경주장과 셋째 묶음, 값은 경주장에서 맞췄다) ──
+  /**
+   * 모이는 중인 판에 손님이 끌리는 정도: 부스 고르기 가중치 × (1 + 참가자 수 × 이 값). 출발 조건이 아직 안 맞으면 (밀어내기 상대·줄다리기 편) × groupNeedPull 더.
+   * 많아야 × groupPullMax (줄다리기처럼 자리가 많은 판이 마을 손님을 다 데려가지 않게).
+   */
+  groupGatherPull: 1.5,
+  groupNeedPull: 2.5,
+  groupPullMax: 4,
+  /** 모이는 시간(gatherSec)이 지나도 이 초 안에 자리에 닿는 손님은 기다려 준다 (첫 손님이 앉고 gatherSec + groupWaitExtraSec까지). */
+  groupWaitWalkSec: 12,
+  groupWaitExtraSec: 20,
+  /** 판에 끼지 못하고(편 맞추기) 자리에서 이만큼 기다리면 다른 걸 하러 간다 (초). */
+  groupBenchGiveUpSec: 75,
   /** 출발 뒤 이 초부터 1등을 알린다 (출발선에서는 순위가 없다). */
   raceCheerStartSec: 1,
-  /** raceProgress(1등 바뀜) 사이 최소 초. */
+  /** 경주·오리배 1등 바뀜(groupEvent lead) 사이 최소 초. */
   raceCheerGapSec: 0.8,
-  /** 1등이 바뀔 때마다 참가자 기분 + 해설자 입담 × 이 값. */
-  raceCommentMood: 0.25,
-  /** 결승 뒤 경주로 근처(경주로 가운데에서 이 반경) 손님이 구경 반응. */
-  raceSpectateRadius: 950,
-  raceSpectateChance: 0.6,
-  raceWatcherSpectateChance: 0.95,
-  /** 구경꾼 기분 + 해설자 입담 × 이 값 (TUNE.spectateMood에 더해). */
-  raceCasterSpectate: 0.5,
+  /** 사건(1등 바뀜 등)마다 참가자 기분 + 입담 × 이 값. */
+  groupCommentMood: 0.25,
+  /** 결과 뒤 놀이 가운데(GroupGame.center)에서 이 반경 안 손님이 구경 반응. */
+  groupSpectateRadius: 950,
+  groupSpectateChance: 0.6,
+  groupWatcherSpectateChance: 0.95,
+  /** 구경꾼 기분 + 입담 × 이 값 (TUNE.spectateMood에 더해). */
+  groupCasterSpectate: 0.5,
+  /**
+   * 진행 중 큰 사건(GroupGame.buzz: 뒤집기·질 뻔함·연줄 끊김·보물·막판 역전)에 놀이 가운데에서 groupSpectateRadius 안의 손님(참가자 말고)이 들썩일 확률.
+   * 구경꾼 성격은 watcher 값, 입담 1점마다 + buzzPerCharm. 이미 반응 중인 손님(pose를 보여 주는 중)은 넘어간다.
+   */
+  groupBuzzChance: 0.4,
+  groupWatcherBuzzChance: 0.85,
+  groupBuzzPerCharm: 0.04,
+  /** 들썩일 때 기분 +. */
+  groupBuzzMood: { wow: 2, gasp: 0.5, cheer: 1, laugh: 1 },
+  /** 경주·오리배: 1등 결승 시각의 이 비율 뒤에 1등이 바뀌어야 구경꾼이 들썩인다 (막판). */
+  raceBuzzFrom: 0.55,
+  /**
+   * 판이 시작할 때 근처(groupDrawRadius)를 걷던 손님이 발을 멈추고 구경하러 갈 확률 (구경꾼 성격은 watcher 값).
+   * 손님맞이(그 부스의 손님맞이 자리, 없으면 0번 자리) 1점마다 × (1 + drawPerWelcome). 구경은 판이 끝나고 결과를 볼 때까지.
+   */
+  groupDrawRadius: 1200,
+  groupDrawChance: 0.2,
+  groupWatcherDrawChance: 0.6,
+  groupDrawPerWelcome: 0.15,
+  /** 구경꾼 성격이 구경할 부스를 고를 때 진행 중인 단체 놀이의 무게 (다른 부스는 1). */
+  groupWatchWeight: 3,
+  /** 진행(심판·바람지기·삽 대여): 경주장·오리배 밖의 단체 놀이 판 길이 = roundSec / (1 + (진행 - 3) × 이 값). */
+  groupPacePerPoint: 0.05,
 } as const;

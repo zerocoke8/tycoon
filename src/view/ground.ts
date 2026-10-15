@@ -53,14 +53,14 @@ interface Tile {
 }
 
 /** 연못 둘레 점 (씨앗 난수로 울퉁불퉁). */
-function pondOutline(c: Pt, rx: number, ry: number, seed: number): number[] {
+function pondOutline(c: Pt, rx: number, ry: number, seed: number, wobble = 1): number[] {
   const rng = new Rng(seed);
   const p1 = rng.next() * Math.PI * 2;
   const p2 = rng.next() * Math.PI * 2;
   const p3 = rng.next() * Math.PI * 2;
-  const a1 = 0.07 + rng.next() * 0.05;
-  const a2 = 0.05 + rng.next() * 0.04;
-  const a3 = 0.02 + rng.next() * 0.03;
+  const a1 = (0.07 + rng.next() * 0.05) * wobble;
+  const a2 = (0.05 + rng.next() * 0.04) * wobble;
+  const a3 = (0.02 + rng.next() * 0.03) * wobble;
   const n = 44;
   const pts: number[] = [];
   for (let i = 0; i < n; i++) {
@@ -164,7 +164,7 @@ function buildBase(): Graphics {
   g.ellipse(B.cx, B.cy, B.rxIn - S.edge, B.ryIn - S.edge).fill(S.grass);
   drawTrackMarks(g);
   PONDS.forEach((p, i) => {
-    const pts = pondOutline(p.c, p.rx, p.ry, hash2(i, 77, SEED));
+    const pts = pondOutline(p.c, p.rx, p.ry, hash2(i, 77, SEED), p.wobble ?? 1);
     smoothClosed(g, pts).stroke({ width: S.edge * 2, color: S.roadEdge, join: 'round' });
     smoothClosed(g, pts).fill(S.pond);
   });

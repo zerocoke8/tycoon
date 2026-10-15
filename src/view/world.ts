@@ -1,26 +1,28 @@
 // 마을 지도 화면 (VillageView): 카메라·층·입력, sim 이벤트를 연출로 잇는다.
-// 층 (카메라 안, 세계 좌표): 바닥(구운 타일, 경주로 포함) → 그림자(+ 경주장 방석) → 물체(건물·소품·주민·손님·경주 선수, y로 정렬) → 효과(이모트·입자·숫자) → 디버그.
+// 층 (카메라 안, 세계 좌표): 바닥(구운 타일, 경주로 포함) → 바닥 그림(모래판·선착장·흙더미, 단체 놀이 표시) → 그림자(+ 경주장 방석)
+//   → 물체(건물·소품·주민·손님·경주 선수·배, y로 정렬) → 효과(이모트·입자·숫자) → 하늘(연, 모든 것 위) → 디버그.
 // 닫힌 구역의 구름은 물체층 안에서 구역 아래 변의 y로 정렬한다 (buildings.ts): 구역 바로 아래 키 큰 건물이 구름 앞에 선다.
 // 조작: 한 손가락 끌기 = 이동(관성), 두 손가락 = 확대·축소(두 손가락 가운데 기준), 휠 = 확대·축소(커서 기준).
-//       짧게 누르기(8px 안, 350ms 안) = 누르기: 손님 → 부스 → 건물 → 경주로·경주 선수(= 경주장) → 빈 땅.
-// 경주장 선수·방석은 racetrack.ts (sim 경주 상태를 따라 달린다).
+//       짧게 누르기(8px 안, 350ms 안) = 누르기: 손님 → 부스 → 건물 → 단체 놀이 마당(경주로·모래판·밧줄·연…) → 빈 땅.
+// 단체 놀이 화면(경주장 racetrack.ts, 씨름·오리배·연·줄다리기·보물찾기 view/group/<booth>.ts)은 view/group/registry.ts가 부스마다 만든다.
+// 손님을 그리기 전에 단체 놀이 화면을 먼저 돌린다 (손님 몸을 그 프레임에 맡길 수 있게).
 // sim은 읽기만 한다 (sim.state를 매 프레임 읽고, sim.bus 이벤트로 연출). 세계 크기는 map.ts WORLD를 따른다.
 
 import { Container, Graphics, Rectangle, type Application, type FederatedPointerEvent, type FederatedWheelEvent } from 'pixi.js';
-import type { BoothId, BuildingId } from '../data/defs.ts';
+import type { BoothId, BuildingId, GroupBoothId } from '../data/defs.ts';
 import { ART_SCALE, artMeta } from './art.ts';
-import { BOOTH_IDS, BOOTHS } from '../data/defs.ts';
+import { BOOTH_IDS, BOOTHS, GROUP_BOOTHS } from '../data/defs.ts';
 import { BOOTH_SPOTS, PLAZAS, WORLD, type Pt } from '../data/map.ts';
 import type { SimApi } from '../sim/api.ts';
-import type { ActiveRound, MonsterId } from '../sim/types.ts';
+import type { ActiveRound, GroupState, MonsterId } from '../sim/types.ts';
 import { BuildingsView } from './buildings.ts';
 import type { VillageViewApi } from './contracts.ts';
 import { buildDebugOverlay } from './debug.ts';
 import { FxLayer } from './fx.ts';
 import { GroundView } from './ground.ts';
 import { clamp, follow, makeViewRect, type ViewRect } from './mapUtil.ts';
+import { GROUP_MAP, type GroupMapRenderer } from './group/registry.ts';
 import { MonstersView } from './monsterView.ts';
-import { RaceTrackView } from './racetrack.ts';
 
 export const ZOOM_MIN = 0.35;
 export const ZOOM_MAX = 1.6;
@@ -44,6 +46,9 @@ const RUBBER = 140;
 const FRICTION = 4.5;
 /** 세계 밖 바탕색 (풀밭보다 조금 어둡게). */
 const BACKDROP = 0x82a05a;
+/** 단체 놀이 승자 코인 글자: 같은 줄로 치는 자리 y 폭과 바싹 붙었다고 치는 x 거리 (세계 px, groupFinished). */
+const PAY_BAND = 90;
+const PAY_NEAR = 230;
 
 const NONE = 0;
 const PENDING = 1;
@@ -66,15 +71,18 @@ export class VillageView implements VillageViewApi {
   private readonly sim: SimApi;
   private readonly backdrop = new Graphics();
   private readonly camera = new Container();
+  private readonly floorLayer = new Container();
   private readonly shadowLayer = new Container();
   private readonly objectLayer = new Container();
   private readonly effectLayer = new Container();
   private readonly emoteLayer = new Container();
+  private readonly skyLayer = new Container();
   private readonly debugLayer = new Container();
   private readonly ground: GroundView;
   private readonly buildings: BuildingsView;
   private readonly monsters: MonstersView;
-  private readonly race: RaceTrackView;
+  /** 단체 놀이 화면 (부스마다 하나, view/group/registry.ts). */
+  private readonly groups: { readonly booth: GroupBoothId; readonly r: GroupMapRenderer }[];
   private readonly fx: FxLayer;
   private debugNode: Container | null = null;
   private readonly hitRect = new Rectangle(0, 0, 1, 1);
@@ -119,6 +127,8 @@ export class VillageView implements VillageViewApi {
   private time = 0;
   private readonly offs: (() => void)[] = [];
   private readonly tmp = { x: 0, y: 0 };
+  /** 단체 놀이 승자 → 받은 코인 글자 단 0~2 (groupFinished). */
+  private readonly payRows = new Map<MonsterId, number>();
   private readonly onKey: (e: KeyboardEvent) => void;
   private readonly onCancel: (e: PointerEvent) => void;
   private readonly onRestored: () => void;
@@ -134,20 +144,21 @@ export class VillageView implements VillageViewApi {
     this.ground = new GroundView(renderer);
     this.fx = new FxLayer(renderer);
     this.objectLayer.sortableChildren = true;
-    for (const l of [this.shadowLayer, this.objectLayer, this.effectLayer, this.emoteLayer, this.debugLayer]) {
+    for (const l of [this.floorLayer, this.shadowLayer, this.objectLayer, this.effectLayer, this.emoteLayer, this.skyLayer, this.debugLayer]) {
       l.eventMode = 'none';
       l.interactiveChildren = false;
     }
     this.effectLayer.addChild(this.emoteLayer, this.fx.node);
-    this.camera.addChild(this.ground.node, this.shadowLayer, this.objectLayer, this.effectLayer, this.debugLayer);
+    this.camera.addChild(this.ground.node, this.floorLayer, this.shadowLayer, this.objectLayer, this.effectLayer, this.skyLayer, this.debugLayer);
     this.camera.eventMode = 'none';
     this.camera.interactiveChildren = false;
     this.root.addChild(this.backdrop, this.camera);
     this.root.label = 'VillageView';
 
-    this.buildings = new BuildingsView(sim, { objects: this.objectLayer }, this.fx, renderer);
+    this.buildings = new BuildingsView(sim, { objects: this.objectLayer, floor: this.floorLayer }, this.fx, renderer);
     this.monsters = new MonstersView(sim, { objects: this.objectLayer, shadows: this.shadowLayer, effects: this.emoteLayer }, this.fx);
-    this.race = new RaceTrackView(sim, { objects: this.objectLayer, shadows: this.shadowLayer }, this.fx, this.buildings);
+    const layers = { floor: this.floorLayer, shadows: this.shadowLayer, objects: this.objectLayer, effects: this.effectLayer, sky: this.skyLayer };
+    this.groups = GROUP_BOOTHS.map((booth) => ({ booth, r: GROUP_MAP[booth]({ sim, booth, layers, fx: this.fx, buildings: this.buildings, monsters: this.monsters }) }));
 
     // 입력: 화면 전체를 받는 root 하나. 지도 안 물체는 직접 재서 고른다 (Pixi 히트 테스트를 물체마다 돌리지 않게).
     this.root.eventMode = 'static';
@@ -174,6 +185,7 @@ export class VillageView implements VillageViewApi {
       this.ground.invalidate();
       this.fx.tex.reset();
       this.buildings.restoreTextures();
+      for (const g of this.groups) g.r.restoreTextures?.();
     };
     app.canvas.addEventListener('webglcontextrestored', this.onRestored);
 
@@ -185,10 +197,11 @@ export class VillageView implements VillageViewApi {
       bus.on('monsterReact', (e) => this.monsters.react(e.id, e.reaction, false)),
       bus.on('monsterSpectate', (e) => this.monsters.react(e.id, e.reaction, true)),
       bus.on('monsterCheered', (e) => this.monsters.cheered(e.id, e.by)),
-      // 경주 중 1등이 바뀌면 참가자 응원 반응 (구경꾼처럼 작게).
-      bus.on('raceProgress', (e) => {
+      // 단체 놀이 사건(경주 1등 바뀜 등)마다 참가자 응원 반응 (구경꾼처럼 작게).
+      bus.on('groupEvent', (e) => {
         for (const c of e.cheers) this.monsters.react(c.id, c.reaction, true);
       }),
+      bus.on('groupFinished', (e) => this.groupFinished(e.booth, e.group)),
       bus.on('roundFinished', (e) => this.roundFinished(e.booth, e.round, e.payout)),
       bus.on('potFestival', (e) => this.potFestival(e.booth, e.monster)),
       bus.on('coinsChanged', (e) => {
@@ -265,8 +278,9 @@ export class VillageView implements VillageViewApi {
     const dpr = this.app.renderer.resolution;
     this.ground.update(this.view, this.zoom * dpr);
     this.buildings.update(dt, this.view);
+    // 단체 놀이 화면 먼저 (그 프레임의 손님 몸을 맡긴다), 그다음 손님.
+    for (const g of this.groups) g.r.update(dt, this.view);
     this.monsters.update(dt, this.time, this.view, this.zoom);
-    this.race.update(dt, this.view);
     this.fx.update(dt, this.zoom);
   }
 
@@ -352,7 +366,7 @@ export class VillageView implements VillageViewApi {
     this.app.canvas.removeEventListener('pointercancel', this.onCancel);
     this.app.canvas.removeEventListener('webglcontextrestored', this.onRestored);
     this.root.removeAllListeners();
-    this.race.destroy();
+    for (const g of this.groups) g.r.destroy();
     this.monsters.destroy();
     this.buildings.destroy();
     this.ground.destroy();
@@ -361,6 +375,26 @@ export class VillageView implements VillageViewApi {
   }
 
   // ── sim 이벤트 연출 ──
+
+  /**
+   * 단체 놀이 판이 끝났다 (곧 승자마다 roundFinished가 잇달아 온다): 받은 코인 글자를 띄울 단(0~2)을 정한다.
+   * 왼쪽 승자부터, 바싹 붙어 선 승자(자리가 x PAY_NEAR·y PAY_BAND 안)가 쓰지 않은 가장 낮은 단에 (셋 다 쓰면 가장 먼 승자의 단):
+   * 줄다리기 한 편처럼 나란히 선 승자들의 글자가 한 줄로 붙어 읽히지 않게. 떨어져 선 승자(보물찾기 판 자리)는 그대로 0단.
+   */
+  private groupFinished(booth: GroupBoothId, g: GroupState): void {
+    this.payRows.clear();
+    const outs = g.play?.outcomes ?? [];
+    const seats = BOOTH_SPOTS[booth].seats;
+    const at = (seat: number): Pt => seats[seat] ?? { x: 0, y: 0 };
+    const won = g.participants.filter((_, i) => (outs[i]?.multiplier ?? 0) > 0).map((e) => ({ id: e.monster, p: at(e.seat), row: 0 }));
+    won.sort((a, b) => a.p.x - b.p.x);
+    won.forEach((w, i) => {
+      const near = won.slice(0, i).filter((o) => Math.abs(o.p.x - w.p.x) < PAY_NEAR && Math.abs(o.p.y - w.p.y) < PAY_BAND);
+      const free = [0, 1, 2].find((r) => !near.some((o) => o.row === r));
+      w.row = free ?? near[0]?.row ?? 0;
+      this.payRows.set(w.id, w.row);
+    });
+  }
 
   private roundFinished(booth: BoothId, round: ActiveRound, payout: number): void {
     const tier = round.outcome.tier;
@@ -371,7 +405,11 @@ export class VillageView implements VillageViewApi {
       this.buildings.potTop(booth, this.tmp);
       const n = clamp(Math.round(payout / 4), 3, tier === 'jackpot' ? 26 : 12);
       this.fx.coinArc(this.tmp.x, this.tmp.y, v.x, v.y - v.headH * 0.45, n);
-      this.fx.floatText(v.x, v.y - v.headH - 78, `+${payout}`, 'win', tier === 'jackpot');
+      // 단체 놀이 승자: 단마다 글자 한 줄 높이씩 올리고 조금씩 늦게 (groupFinished).
+      const row = this.payRows.get(round.monster) ?? 0;
+      this.payRows.delete(round.monster);
+      const big = tier === 'jackpot';
+      this.fx.floatText(v.x, v.y - v.headH - 78, `+${payout}`, 'win', big, row * 0.12, row * (big ? 58 : 40));
     }
     if (tier === 'jackpot') {
       this.fx.confetti(v.x, v.y - 30, 40);
@@ -660,7 +698,7 @@ export class VillageView implements VillageViewApi {
     }
   }
 
-  /** 누르기: 손님(앞쪽) → 부스 → 건물 → 경주로·선수 → 빈 땅. 구름 덮인 곳은 빈 땅. */
+  /** 누르기: 손님(앞쪽) → 부스 → 건물 → 단체 놀이 마당 → 빈 땅. 구름 덮인 곳은 빈 땅. */
   private tap(sx: number, sy: number): void {
     const w = this.screenToWorld(sx, sy, this.tmp);
     const wx = w.x;
@@ -678,10 +716,12 @@ export class VillageView implements VillageViewApi {
         else this.onTapBuilding(hit.id);
         return;
       }
-      // 경주로(모래 띠)나 경주 선수를 누르면 경주장.
-      if (this.race.hitTest(wx, wy)) {
-        this.onTapBooth('race');
-        return;
+      // 단체 놀이 마당(경주로·모래판·밧줄·연·물길…)을 누르면 그 부스.
+      for (const g of this.groups) {
+        if (g.r.hitTest(wx, wy)) {
+          this.onTapBooth(g.booth);
+          return;
+        }
       }
     }
     this.onTapEmpty();

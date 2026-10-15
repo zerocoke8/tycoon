@@ -951,6 +951,129 @@ const MATERIALS2: readonly Entry[] = [
   itemIcon('mat_cactusflower', '선인장 꽃 (말랑 선인장)', ITEM('One small soft pink cactus flower (#f2b5a8) with five rounded petals and a soft yellow center (#f3d36a).')),
 ];
 
+// ── 단체 놀이 셋째 묶음 (2026-10-15): 씨름장, 줄다리기, 보물찾기 마당, 오리배 경주, 연날리기 대회 ─────
+// 지도에서 봐도 재미있게: 손님이 직접 겨루거나(씨름·줄다리기·보물찾기) 탈것·연이 지도 위를 움직인다. 바닥·밧줄·연줄은 코드로 그린다.
+
+const GROUP_MAP: readonly Entry[] = [
+  building(
+    'ssireum_ring',
+    '밀어내기 대결장',
+    'A round outdoor sand ring for a friendly pushing contest (two players try to push each other out): a flat round sandy circle (#ebc68e) bordered all around by a ring of plump straw-rope sandbags (#d9b27a), ' +
+      'four short wooden corner posts with small cloth banners (two soft red #c9614a, two soft blue #7fa8d6), and one low wooden bench for spectators on the side. The sand circle is EMPTY (no people).',
+  ),
+  building(
+    'tug_stand',
+    '줄다리기 심판대',
+    'A small wooden referee platform for a tug-of-war field: a low square wooden deck (#a0703f) with two steps, a short railing, and one round striped parasol in cream (#f6ebd5) and soft orange (#f2b279) on top. EMPTY (no people).',
+  ),
+  prop('tug_flag_red', '줄다리기 홍팀 깃발', 'A team flag on a wooden pole stuck in the ground: one plain soft red (#c9614a) triangle flag with one simple round white dot (no letters).'),
+  prop('tug_flag_blue', '줄다리기 청팀 깃발', 'A team flag on a wooden pole stuck in the ground: one plain soft blue (#7fa8d6) triangle flag with one simple round white dot (no letters).'),
+  prop('dig_sign', '보물찾기 표지판', 'A wooden signpost for a treasure digging field: one board showing a simple picture of a small shovel and a big X mark (picture symbols only, no letters).'),
+  prop('dirt_mound', '흙 둔덕', 'One small round mound of freshly dug soft brown dirt (#a0785a) with a few small pebbles, low and wide.'),
+  prop('treasure_chest', '보물상자 (닫힘)', 'One small chunky treasure chest, closed: warm wood brown (#b07a4f) with two plain golden-yellow bands (#f3d36a) and a small round golden lock plate. No face.'),
+  prop('treasure_chest_open', '보물상자 (열림)', 'One small chunky treasure chest with its lid wide open, full of round gold coins (#f3d36a) and one small sky-blue gem (#8ec8ee) on top: warm wood brown (#b07a4f) with two plain golden-yellow bands. No face, no glow.'),
+  building(
+    'boat_dock',
+    '오리배 선착장',
+    'A small wooden boat dock at the edge of a pond: a short wooden pier (#a0703f) on round posts sticking out over flat blue water (#8ec8ee, only a small patch of water under the pier), ' +
+      'a little striped canopy in cream and soft sky blue (#8ec8ee) over a bench at the land end, and one round life ring (soft red and white) hanging on a post. No boats, no people.',
+  ),
+];
+
+/** 오리배 경주의 배 넷 (옆에서 본 모습, 왼쪽으로 간다). 배마다 깃발 색이 다르다. */
+const BOAT_COMMON =
+  `Draw ONE cute little paddle boat for a pond boat race in ${GAME}, seen from the SIDE, moving toward the LEFT edge of the image, floating on a few short flat blue water wave lines (#8ec8ee) at its bottom. ` +
+  'The boat itself has a cute simple face (two dot eyes and a tiny smile) on its front, round chunky shapes, a few flat color blocks, and one small plain flag on a short pole in the color described below (no numbers, no letters). ' +
+  'Draw it fairly SMALL in the canvas (in the middle half of the canvas) with the same VERY fat, bold dark brown marker outline as the dwarf. No people in it. Transparent background with a real alpha channel: no sky, no shore, no shadow.';
+const boat = (key: string, label: string, look: string): Entry => ({
+  key,
+  size: '1024x1024',
+  transparent: true,
+  max: 256,
+  label,
+  refs: ['d_dwarf_idle'],
+  ownStyle: true,
+  prompt: para(STYLE, STYLE_REF_ONLY, BOAT_COMMON, look),
+});
+const BOATS: readonly Entry[] = [
+  boat('boat_duck', '오리배: 노랑 오리', 'A plump yellow rubber-duck shaped boat (#f3d36a) with an orange beak (#f2a65a) at the front. Flag: soft red (#c9614a).'),
+  boat('boat_swan', '오리배: 하얀 백조', 'A plump white swan shaped boat (#f7f3ea) with a short curved neck and a small orange beak at the front. Flag: soft blue (#7fa8d6).'),
+  boat('boat_frog', '오리배: 초록 개구리', 'A plump round green frog shaped boat (#9cbf7a) with two round eye bumps on top at the front. Flag: soft yellow (#f3d36a).'),
+  boat('boat_whale', '오리배: 파란 고래', 'A plump round blue-grey whale shaped boat (#9db8cc) with a tiny tail fin at the back and a little water spout. Flag: mint (#bfe6d2).'),
+];
+
+/** 연날리기 대회의 연 넷 (정면, 하늘에 뜬다). 연줄은 코드로 그린다. 사용자 의견으로 방패연이 아닌 흔한 마름모 연. */
+const KITE_COMMON =
+  'A classic simple diamond-shaped kite seen straight from the front: a plump diamond of flat paper in the color described below with a cream (#f6ebd5) cross stripe, two thin wooden sticks drawn as a simple cross, ' +
+  'and one long wavy tail hanging from the bottom corner with three small cream bow ties along it. No string (it is drawn by the game), no letters, no symbols, no face. ' +
+  'Draw it filling about half of the canvas, centered, with the same VERY fat, bold dark brown marker outline as the dwarf. Transparent background with a real alpha channel: no sky, no clouds.';
+const kite = (key: string, label: string, color: string): Entry => ({
+  key,
+  size: '1024x1024',
+  transparent: true,
+  max: 256,
+  label,
+  refs: ['d_dwarf_idle'],
+  ownStyle: true,
+  prompt: para(STYLE, STYLE_REF_ONLY, KITE_COMMON, `Color: ${color}.`),
+});
+const KITES: readonly Entry[] = [
+  kite('kite_red', '연: 빨강', 'soft red (#c9614a)'),
+  kite('kite_blue', '연: 파랑', 'soft blue (#7fa8d6)'),
+  kite('kite_yellow', '연: 노랑', 'soft yellow (#f3d36a)'),
+  kite('kite_green', '연: 초록', 'soft leaf green (#8fae6b)'),
+];
+
+const GROUP_ITEMS: readonly Entry[] = [
+  itemIcon('old_boot', '헌 장화 (꽝)', ITEM('One old worn rubber boot in faded brown (#8a6a50) with a small patch on its side and a tiny green weed sticking out of the top. Funny and harmless.')),
+  itemIcon('shovel', '삽', ITEM('One small toy garden shovel lying diagonally: a short wooden handle (#a0703f) with a round grip and a rounded grey blade (#b3aea8).')),
+];
+
+const GROUP_CLOSEUP: readonly Entry[] = [
+  closeupBg(
+    'bg_ssireum',
+    '씨름장 확대 배경',
+    'This place: an outdoor Korean ssireum wrestling ring seen from the side. A plain flat pale sky (#d6eaf5) in the top part with one simple cloud, a row of plump straw-rope sandbags (#d9b27a) across the middle as the ring edge, ' +
+      'two short wooden posts at the far left and far right with small banners (soft red on the left, soft blue on the right), and a wide flat sandy floor (#ebc68e) across the bottom third with one simple edge line.',
+  ),
+  closeupBg(
+    'bg_tug',
+    '줄다리기 확대 배경',
+    'This place: a tug-of-war field seen from the side. A plain flat pale sky (#d6eaf5) in the top part with two simple clouds, a soft green grassy field (#9cc27a) across the bottom half with one short straight white center line drawn on the ground in the middle, ' +
+      'a small red team flag (#c9614a) on a pole at the far left and a small blue team flag (#7fa8d6) on a pole at the far right.',
+  ),
+  closeupBg(
+    'bg_dig',
+    '보물찾기 확대 배경',
+    'This place: a treasure digging field seen from the side. A plain flat pale sky (#d6eaf5) in the top part with one simple cloud, a low wooden fence (#a0703f) across the middle, ' +
+      'and a wide flat soft brown dirt field (#c9a07a) across the bottom half with three small round dirt mounds and a few tiny pebbles.',
+  ),
+  closeupBg(
+    'bg_boat',
+    '오리배 경주 확대 배경',
+    'This place: a calm pond seen from the side for a little boat race. A plain flat pale sky (#d6eaf5) in the top part with two simple clouds, a soft green far shore strip (#9cc27a) with two small round bushes across the middle, ' +
+      'and wide flat blue water (#8ec8ee) across the bottom half with a few short simple wave lines. A short wooden dock edge pokes in from the bottom right corner.',
+  ),
+  closeupBg(
+    'bg_kite',
+    '연날리기 확대 배경',
+    'This place: a breezy grassy hill top for flying kites. A big plain flat pale sky (#d6eaf5) filling the upper two thirds with two or three simple round clouds, and a gentle soft green hill (#9cc27a) across the bottom third with a few tiny grass tufts. Wide open empty sky.',
+  ),
+];
+
+const GROUP_STAFF: readonly Entry[] = [
+  villager('ssireum_referee', '밀어내기 대결 심판', 'the referee of the push-out arena (a friendly sand-ring pushing contest): a sturdy, kind middle-aged man with a short round black hair blob, a soft grey shirt (#cfc8c0) with a black bow tie, brown trousers, a whistle on a cord, holding one small round red flag and one small round blue flag. A serious but friendly face.'),
+  villager('ssireum_caster', '밀어내기 대결 해설자', 'the commentator of the push-out arena: a cheerful round grandma with a short curly grey hair blob, a soft mint cardigan (#bfe6d2), holding a small round microphone on a short stand-less handle. Mouth open, cheering.'),
+  villager('tug_referee', '줄다리기 심판', 'the referee of the tug-of-war field: a tall skinny young man with neat brown hair, a plain cream shirt with a soft orange vest (#f2b279), a whistle in his mouth, one arm raised straight up. Eyes wide, very focused.'),
+  villager('tug_cheer', '줄다리기 응원단장', 'the cheer leader of the tug-of-war field: an energetic little girl with a short bob of dark hair, a soft red headband (#c9614a), a cream shirt and short brown skirt, holding two round fluffy pompoms (one red, one blue) up high. A huge cheering smile.'),
+  villager('dig_grandpa', '보물 지도 할아버지', 'the keeper of the treasure digging field: a cheerful old grandpa with a round white beard blob and a brown flat cap, a moss-green vest (#8fae6b), holding a rolled-up old paper treasure map in one hand. A mysterious little smile.'),
+  villager('dig_lender', '삽 대여 언니', 'the shovel lender of the treasure digging field: a sturdy cheerful young woman with a short brown ponytail, a soft orange bandana (#f2b279), brown work overalls, holding two small toy shovels crossed. A confident grin.'),
+  villager('boat_starter', '오리배 출발 신호', 'the starter of the pond boat race: a small cheerful boy in a round white sailor cap with a soft blue ribbon (#7fa8d6), a cream sailor shirt with a blue collar, short brown trousers, holding a small plain soft blue flag. An excited open smile.'),
+  villager('boat_lifeguard', '오리배 구조 요원', 'the lifeguard of the pond boat race: a calm tall young person with short sandy hair, a soft red shirt (#c9614a), cream shorts, holding a round red-and-white life ring under one arm. A calm reassuring smile.'),
+  villager('kite_master', '연 장인', 'the kite master of the kite contest: a gentle old grandma with a neat grey bun, a long soft blue jacket (#7fa8d6) over a cream skirt, holding a round wooden kite reel (eolle) with string wound on it. A wise, warm smile.'),
+  villager('kite_wind', '바람지기', 'the wind watcher of the kite contest: a small dreamy child with fluffy light brown hair, a soft yellow raincoat (#f3d36a), holding up a little colorful pinwheel on a stick. Looking up at the sky with a tiny smile.'),
+];
+
 // ── 목록 ─────────────────────────────────────────────────────────────────
 
 /**
@@ -980,6 +1103,12 @@ export const PROJECT_ASSETS: readonly ArtAsset[] = lockLeads([
   ...inGroup('monsters', ...MONSTERS2),
   ...inGroup('objects', ...PLUSH2),
   ...inGroup('items', ...MATERIALS2),
+  ...inGroup('map', ...GROUP_MAP),
+  ...inGroup('racers', ...BOATS),
+  ...inGroup('objects', ...KITES),
+  ...inGroup('items', ...GROUP_ITEMS),
+  ...inGroup('closeup', ...GROUP_CLOSEUP),
+  ...inGroup('characters', ...GROUP_STAFF),
 ]);
 
 // 쓰지 않는 키트 이름 (빌드 검사에서 지우지 않게): mapSameSet은 놀이부스 다음 판에서 쓸 수 있다.

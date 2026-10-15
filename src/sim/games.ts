@@ -9,11 +9,13 @@
 //   claw: jackpot = double(둘), win = win(하나), nearMiss = slip(slipAt 0.75~0.95), lose = miss(헛집기).
 //   pouch: jackpot = 노랑 주머니(2)의 대박, win = 코인 주머니, nearMiss = 동전 하나, lose = 빈 주머니.
 //   race: 손님 하나의 한판으로 부르면 경주 하나를 만들어 선수 하나를 고른다 (경주장이 손님 여럿을 한 경주로 묶기 전까지의 임시 길).
+//   그 밖의 단체 놀이(씨름·오리배·연·줄다리기·보물찾기)도 손님 하나로 부르면 그 놀이 모듈로 한 사람짜리 판을 만든다 (미리보기·시험용). 게임에서는 단체 놀이 엔진(sim.ts)이 판을 정한다.
 
 import type { Rng } from '../core/rng.ts';
-import { CLAW, DUCK, ODDS, POUCH, RING, SLOT_SYMBOLS, SPECIES_IDS, WHEEL, type BoothId, type OutcomeTier, type SlotSymbol, type SpeciesId } from '../data/defs.ts';
+import { CLAW, DUCK, isGroupBooth, ODDS, POUCH, RING, SLOT_SYMBOLS, SPECIES_IDS, WHEEL, type BoothId, type GroupBoothId, type OutcomeTier, type SlotSymbol, type SpeciesId } from '../data/defs.ts';
+import { groupGame } from './group/index.ts';
 import { generateRace, raceOutcome, RACERS } from './race.ts';
-import type { DuckMark, PouchContent, RingThrow, RoundDetail, RoundOutcome } from './types.ts';
+import type { DuckMark, GroupEntry, PouchContent, RingThrow, RoundDetail, RoundOutcome } from './types.ts';
 
 const TIERS: readonly OutcomeTier[] = ['jackpot', 'win', 'nearMiss', 'lose'];
 type OddsRow = Partial<Record<OutcomeTier, readonly [number, number]>>;
@@ -50,8 +52,19 @@ export interface GameCtx {
 
 export function decideOutcome(rng: Rng, booth: BoothId, luck: number, ctx: GameCtx): RoundOutcome {
   if (booth === 'race') return soloRace(rng, luck, ctx);
+  if (isGroupBooth(booth)) return soloGroup(rng, booth, luck, ctx);
   const tier = rng.weighted(tierWeights(booth, luck));
   return { tier, multiplier: multiplierOf(booth, tier), detail: makeDetail(rng, booth, tier, ctx) };
+}
+
+/** 단체 놀이를 손님 하나로: 고른 것을 무작위로 정하고 한 사람짜리 판을 만든다 (행운이면 그 손님 쪽이 이긴다). */
+function soloGroup(rng: Rng, booth: GroupBoothId, luck: number, ctx: GameCtx): RoundOutcome {
+  const game = groupGame(booth);
+  const pick = rng.int(0, game.picks - 1);
+  const entry: GroupEntry = { monster: 0, seat: pick, pick, role: booth === 'boat' || booth === 'race' ? 'bettor' : 'player', bet: 1, fee: 0 };
+  const lucky = luck > 0 && rng.chance(luck) ? 0 : -1;
+  const play = game.generate(rng, [entry], { duration: ctx.raceSec ?? 10, level: ctx.level, pace: ctx.pace, lucky, seats: 6 });
+  return play.outcomes[0] as RoundOutcome;
 }
 
 /** 경주 하나를 만들어 선수 하나에 건다 (행운만큼 1등 선수를 고를 확률이 오른다). */
@@ -62,7 +75,7 @@ function soloRace(rng: Rng, luck: number, ctx: GameCtx): RoundOutcome {
   return raceOutcome(race, racer);
 }
 
-function makeDetail(rng: Rng, booth: BoothId, tier: OutcomeTier, ctx: GameCtx): RoundDetail {
+function makeDetail(rng: Rng, booth: Exclude<BoothId, GroupBoothId>, tier: OutcomeTier, ctx: GameCtx): RoundDetail {
   switch (booth) {
     case 'slot':
       return { kind: 'slot', reels: slotReels(rng, tier) };
@@ -82,12 +95,6 @@ function makeDetail(rng: Rng, booth: BoothId, tier: OutcomeTier, ctx: GameCtx): 
       return claw(rng, tier, ctx);
     case 'pouch':
       return pouch(rng, tier);
-    case 'race': {
-      // decideOutcome이 먼저 받는다. 여기로 오면 등급에 맞는 선수로 경주를 하나 만든다.
-      const race = generateRace(rng, ctx.raceSec ?? 10, tier === 'nearMiss' ? { comeback: false, photo: true } : { comeback: tier === 'jackpot' });
-      const at = tier === 'jackpot' || tier === 'win' ? 0 : tier === 'nearMiss' ? 1 : rng.int(2, 3);
-      return raceOutcome(race, race.finishOrder[at] ?? 0).detail;
-    }
   }
 }
 

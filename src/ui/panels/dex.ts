@@ -2,13 +2,47 @@
 // 손님: 구역마다 종 칸(못 본 종은 그림자), 고른 종의 방문·본 반응·모은 인형 (고른 종 카드는 그 구역 칸 바로 아래에).
 // 인형: 인형 뽑기 부스에서 뽑은 인형 (objects/plush_<종>, 모은 수). 못 모은 인형은 그림자.
 
-import { BOOTHS, SPECIES, SPECIES_IDS, TRAITS, type SpeciesId } from '../../data/defs.ts';
+import { BOOTH_IDS, BOOTHS, isGroupBooth, SPECIES, SPECIES_IDS, TRAITS, type BoothId, type SpeciesId } from '../../data/defs.ts';
 import { DISTRICTS } from '../../data/map.ts';
+import { reactionLabels, type ReactTier } from '../../sim/reactions.ts';
 import { btn, fmt, h, revealInSheet, setText } from '../dom.ts';
-import { boothLockText, DISTRICT_ORDER, itemName, speciesDistrict } from '../labels.ts';
+import { boothLockText, boothTiny, DISTRICT_ORDER, itemName, speciesDistrict } from '../labels.ts';
 import { BasePanel, type DexView } from '../panel.ts';
 import { itemIcon, monsterPic, plushPic } from '../pics.ts';
 import { secHead, segmented } from '../widgets.ts';
+
+/**
+ * 놀이마다 결과 반응 묶음 (도감의 '본 반응'을 놀이별로): 자기 반응 표가 있는 부스는 하나씩,
+ * 공통 표를 쓰는 처음 네 부스는 한 묶음. 반응 이름은 먼저 나온 묶음에 (같은 이름이 여러 표에 있으면).
+ */
+interface PlayGroup {
+  readonly booths: readonly BoothId[];
+  readonly name: string;
+  readonly labels: ReadonlySet<string>;
+  readonly group: boolean;
+}
+
+const TIERS: readonly ReactTier[] = ['jackpot', 'win', 'nearMiss', 'lose'];
+
+const PLAY_GROUPS: readonly PlayGroup[] = (() => {
+  // 공통 표의 이름은 공통 묶음 몫 (처음 네 부스, 항아리 축제 대박도 이 표). 자기 표가 있는 부스는 공통 표에 없는 이름만.
+  const common = new Set(TIERS.flatMap((t) => reactionLabels(t, null)));
+  const taken = new Set(common);
+  const commonBooths: BoothId[] = [];
+  const out: PlayGroup[] = [];
+  const name = (bs: readonly BoothId[]): string => bs.map((b) => boothTiny(b)).join('·');
+  for (const b of BOOTH_IDS) {
+    const own = [...new Set(TIERS.flatMap((t) => reactionLabels(t, b)))].filter((l) => !taken.has(l));
+    if (own.length === 0) {
+      commonBooths.push(b);
+      continue;
+    }
+    for (const l of own) taken.add(l);
+    out.push({ booths: [b], name: name([b]), labels: new Set(own), group: isGroupBooth(b) });
+  }
+  if (commonBooths.length > 0) out.unshift({ booths: commonBooths, name: name(commonBooths), labels: common, group: false });
+  return out;
+})();
 
 export class DexPanel extends BasePanel {
   view: DexView = 'species';
@@ -18,7 +52,7 @@ export class DexPanel extends BasePanel {
 
   sig(): string {
     const d = this.st.dex;
-    return [this.view, this.selected, this.sim.hallLevel(), this.st.booths.claw.unlocked, ...SPECIES_IDS.map((s) => `${d[s]?.visits ?? -1}:${d[s]?.reactions.length ?? 0}:${d[s]?.plush ?? 0}`)].join('|');
+    return [this.view, this.selected, this.sim.hallLevel(), BOOTH_IDS.map((b) => (this.st.booths[b].unlocked ? 1 : 0)).join(''), ...SPECIES_IDS.map((s) => `${d[s]?.visits ?? -1}:${d[s]?.reactions.length ?? 0}:${d[s]?.plush ?? 0}`)].join('|');
   }
 
   protected build(): void {
@@ -119,7 +153,7 @@ export class DexPanel extends BasePanel {
     const plush = rec.plush ?? 0;
     const favs = h('div', 'mpv-labels', ...d.favorite.map((b) => h('span', 'mpv-label sky', BOOTHS[b].name)));
     const traits = h('div', 'mpv-labels', ...d.traits.map((t) => h('span', 'mpv-label', TRAITS[t].name)));
-    const reactions = rec.reactions.length > 0 ? h('div', 'mpv-labels', ...rec.reactions.map((r) => h('span', 'mpv-label green', r))) : h('div', 'mpv-note', '아직 본 반응이 없어요');
+    const reactions = this.reactionsByPlay(rec.reactions);
     return h(
       'div',
       'mpv-card col mpv-dex-sel',
@@ -142,6 +176,41 @@ export class DexPanel extends BasePanel {
       h('div', 'mpv-desc', `본 반응 ${rec.reactions.length}가지`),
       reactions,
     );
+  }
+
+  /**
+   * 본 반응을 놀이마다: [놀이 이름 본 수/모두] 반응 이름들. 단체 놀이는 꼬리표를 달고,
+   * 열린 놀이 가운데 이 종이 아직 반응을 보인 적 없는 곳은 끝에 한 줄로 (다음에 모을 거리).
+   */
+  private reactionsByPlay(seen: readonly string[]): HTMLElement {
+    const el = h('div', 'mpv-dex-react');
+    if (seen.length === 0) {
+      el.append(h('div', 'mpv-note', '아직 본 반응이 없어요'));
+      return el;
+    }
+    const left = new Set(seen);
+    const open = (g: PlayGroup): boolean => g.booths.some((b) => this.st.booths[b].unlocked);
+    const notYet: string[] = [];
+    for (const g of PLAY_GROUPS) {
+      const mine = seen.filter((l) => g.labels.has(l));
+      for (const l of mine) left.delete(l);
+      if (mine.length === 0) {
+        if (open(g)) notYet.push(g.name);
+        continue;
+      }
+      el.append(
+        h(
+          'div',
+          'mpv-react-play',
+          h('div', 'head', h('span', 'nm', g.name), g.group ? h('span', 'mpv-tag group', '여럿이 한판') : null, h('small', null, `${mine.length} / ${g.labels.size}`)),
+          h('div', 'mpv-labels', ...mine.map((r) => h('span', g.group ? 'mpv-label sky' : 'mpv-label green', r))),
+        ),
+      );
+    }
+    // 빈털터리·간식 같은 놀이 밖 반응
+    if (left.size > 0) el.append(h('div', 'mpv-react-play', h('div', 'head', h('span', 'nm', '그 밖'), h('small', null, '빈털터리·간식')), h('div', 'mpv-labels', ...[...left].map((r) => h('span', 'mpv-label', r)))));
+    if (notYet.length > 0) el.append(h('div', 'mpv-note', `아직 반응을 못 본 놀이: ${notYet.join(', ')}`));
+    return el;
   }
 
   /** 인형: 모은 인형과 수. 인형 뽑기 부스가 닫혀 있으면 여는 길을 알려 준다. */

@@ -2,7 +2,7 @@
 // GameState는 그대로 JSON으로 저장된다 (함수·클래스 인스턴스·Map을 넣지 않는다).
 
 import type { Emitter } from '../core/events.ts';
-import type { BoothId, BuildingId, GoodId, MaterialId, OutcomeTier, PreciousId, SlotSymbol, SpeciesId, StaffStats, TraitId } from '../data/defs.ts';
+import type { BoothId, BuildingId, GoodId, GroupBoothId, MaterialId, OutcomeTier, PreciousId, SlotSymbol, SpeciesId, StaffStats, TraitId } from '../data/defs.ts';
 import type { DistrictId, NodeId, Pt } from '../data/map.ts';
 
 export type MonsterId = number;
@@ -123,18 +123,24 @@ export interface BoothState {
   rounds: (ActiveRound | null)[];
   /** 걸어 둔 응원 도구와 남은 초. */
   cheer: { good: GoodId; left: number } | null;
-  /** 몬스터 경주장의 경주 (다른 부스는 null). */
-  race: RaceState | null;
+  /** 단체 놀이 부스(경주장·씨름장·오리배·연날리기·줄다리기·보물찾기, defs.ts GROUP_BOOTHS)의 한 판 (다른 부스는 null). */
+  group: GroupState | null;
 }
 
-/** 경주 선수 번호 = 레인 (0 달팽이·1 거북·2 개구리·3 무당벌레, defs.ts RACE.racers). */
+/** 경주 선수 번호 = 레인 (0 달팽이·1 거북·2 개구리·3 무당벌레, defs.ts RACE.racers). 오리배도 배 번호 0~3 (defs.ts BOAT.boats). */
 export type RacerIndex = 0 | 1 | 2 | 3;
 
-/** 선수 하나의 진행 키프레임: 출발 뒤 t초에 진행 p (0~1, 1 = 결승선). t는 오름차순, 마지막 키는 결승 시각 (p = 1). */
-export interface RaceKey {
+/**
+ * 키프레임 하나: 판이 시작하고 t초에 값 p (뜻은 놀이마다, GroupPlay 주석). t는 오름차순.
+ * 키 사이 값은 sim/group/core.ts trackAt(keys, t) (넘치지 않는 3차 보간: 키 사이에서 두 키 값 밖으로 나가지 않는다).
+ */
+export interface GroupKey {
   t: number;
   p: number;
 }
+
+/** 선수 하나의 진행 키프레임: 출발 뒤 t초에 진행 p (0~1, 1 = 결승선). t는 오름차순, 마지막 키는 결승 시각 (p = 1). */
+export type RaceKey = GroupKey;
 
 /** 경주 하나의 결과 (출발할 때 정한다: sim/race.ts generateRace). 화면은 raceProgress(result, 선수, 초)로 자리를 읽는다. */
 export interface RaceResult {
@@ -152,49 +158,170 @@ export interface RaceResult {
   margin: number;
 }
 
-/** 경주에 건 손님 하나. */
-export interface RaceEntry {
+/** 편 (씨름·줄다리기): 0 = 홍, 1 = 청. */
+export type GroupSide = 0 | 1;
+
+/** 단체 놀이 안의 역할: player = 직접 겨루는·날리는·파는 손님 (자기에게 건다), bettor = 구경하며 거는 손님 (경주·오리배는 모두 bettor). */
+export type GroupRole = 'player' | 'bettor';
+
+/**
+ * 단체 놀이에 참가한 손님 하나. pick = 고른 것 (놀이마다):
+ *   race·boat = 선수·배 0~3, ssireum = 편 0 홍·1 청 (선수는 자기 편: 자리 0 = 홍, 1 = 청), tug = 편 0 홍·1 청 (자리 짝수 = 홍, 홀수 = 청),
+ *   kite = 연 0~3 (날리는 손님은 자기 연 = 자리 0~3), dig = 판 자리 0~5 (= 자리, map.ts DIG_FIELD.spots).
+ * 어느 자리에 앉을지는 놀이 모듈 GroupGame.seatFor가 고른다 (씨름 선수·구경, 연 날리기·구경, 줄다리기 편 맞추기, 보물찾기 판 자리).
+ */
+export interface GroupEntry {
   monster: MonsterId;
-  /** 관중석 자리 (BoothState.seats index). */
+  /** 앉은 자리 (BoothState.seats index). */
   seat: number;
-  racer: RacerIndex;
+  pick: number;
+  role: GroupRole;
   bet: number;
   fee: number;
 }
 
 /**
- * 경주장 상태 (BoothState.race). idle → (첫 손님이 관중석에 앉아 선수를 고르면) gathering → (countdown 0) running → (elapsed ≥ duration) done → idle.
- * - gathering: 손님이 앉을 때마다 참가 (참가비는 마을로, 건 코인은 항아리로). 첫 손님부터 RACE.gatherSec, 둘 이상이면 RACE.startSoonSec 안에 출발
- *   (출발 신호의 진행이 높을수록 짧게). 자리 6이 다 차면 곧 출발.
- * - running: 결과(result)를 이때 정한다. 참가자마다 BoothState.rounds[자리]에 한판(outcome = raceOutcome(result, 선수))이 생기고 roundStarted가 난다.
- *   1등이 바뀌면 raceProgress (참가자 응원 반응 포함).
- * - done: 모든 선수가 들어왔다. 참가자마다 roundFinished·monsterReact가 한꺼번에, 경주로 근처 손님은 monsterSpectate. countdown(RACE.resultSec) 뒤 idle.
- * running·done 동안 새로 앉은 손님은 다음 경주를 기다린다 (phase 'playing', 참가자 목록에 없음).
- * 손님마다의 등급은 sim/race.ts raceOutcome(result, racer).
+ * 타임라인의 사건 종류 (시각 순서, 생성기가 정한다. 경주·오리배의 'lead'는 sim이 달리는 중에 순위를 보고 낸다).
+ * sim은 사건 시각이 되면 groupEvent를 낸다 (참가자 응원 반응 포함). 화면은 타임라인(play.events)을 직접 읽어도 되고 이벤트를 들어도 된다.
+ *   lead   = 앞선 쪽이 바뀌었다. 경주·오리배: actor = 이제 1등, prev = 앞서던 선수(-1 = 처음), order = 그때 순위. 씨름·줄다리기: actor = 이제 앞선 편.
+ *   brink  = 한쪽이 질 뻔했다 (씨름 모래판 끝, 줄다리기 선 바로 앞, 연이 끊길 뻔함). actor = 위태로운 편·연.
+ *   flip   = 뒤집기·역전 시작 (씨름·줄다리기 jackpot 판에서 위태롭던 편이 되민다). actor = 뒤집는 편.
+ *   tangle = 연싸움: 연 둘의 줄이 엇갈렸다. actor·other = 두 연.
+ *   cut    = 연줄이 끊어졌다. actor = 끊긴 연, other = 끊은 연.
+ *   dig    = 보물찾기: 한 자리에서 삽질을 시작했다. actor = 판 자리.
+ *   find   = 보물찾기: 무언가 튀어 올랐다. actor = 판 자리, value = DIG_FINDS index (defs.ts).
+ *   reveal = 보물찾기: 아무도 못 찾은 상자를 할아버지가 파서 보여 준다. actor = 상자 자리 (map.ts DIG_FIELD.chests index).
+ *   finish = 승부가 났다 (씨름 넘어뜨리기, 줄다리기 선 넘음, 마지막 연). actor = 이긴 편·연.
  */
-export interface RaceState {
-  phase: 'idle' | 'gathering' | 'running' | 'done';
-  /** gathering: 출발까지 남은 초. done: 다음 경주를 받을 때까지 남은 초. */
-  countdown: number;
-  /** gathering: 첫 손님이 참가하고 지난 초. running: 출발 뒤 지난 초. */
-  elapsed: number;
-  /** running: 경주 시간 (마지막 선수가 들어오고 조금 뒤). */
-  duration: number;
-  participants: RaceEntry[];
-  /** running·done: 이번 경주. */
-  result: RaceResult | null;
-  /** running: 마지막으로 알린 1등 선수 (raceProgress, 없으면 아직 안 알림). */
-  leader?: RacerIndex | null;
-  /** running: 마지막 raceProgress를 낸 때 (elapsed). */
-  cheerAt?: number;
+export type GroupEventType = 'lead' | 'brink' | 'flip' | 'tangle' | 'cut' | 'dig' | 'find' | 'reveal' | 'finish';
+
+export interface GroupEvent {
+  t: number;
+  type: GroupEventType;
+  actor: number;
+  other?: number;
+  value?: number;
+  prev?: number;
+  order?: number[];
 }
 
-/** 경주 중 참가자 하나의 응원 반응 (raceProgress.cheers): lead = 자기 선수가 1등으로, behind = 1등을 뺏기거나 꼴찌. */
-export interface RaceCheer {
+/** 보물찾기에서 나온 것: chest = 보물상자 (jackpot), coins·gem = 작은 보물 (win), boot·pebble = 헌 장화·조약돌 (lose·nearMiss), none = 아무도 안 판 자리. */
+export type DigFind = 'none' | 'chest' | 'coins' | 'gem' | 'boot' | 'pebble';
+
+interface GroupPlayBase {
+  /** 판 길이 (초) = GroupState.duration. 이때 결과가 난다. */
+  end: number;
+  /** 움직이는 것마다 키프레임 (뜻은 놀이마다, 아래). sim/group/core.ts trackAt(play.tracks[i], t). */
+  tracks: GroupKey[][];
+  /** 사건 (시각 순서). */
+  events: GroupEvent[];
+  /** 참가자마다 결과 (출발한 참가자 GroupState.participants와 같은 순서·같은 길이). */
+  outcomes: RoundOutcome[];
+}
+
+/**
+ * 단체 놀이 한 판 (출발할 때 생성기 sim/group/<booth>.ts가 다 정한다. 화면은 이것을 그대로 재생한다).
+ * kind마다 tracks의 뜻:
+ *   race·boat: tracks[선수] = 진행 0~1 (= race.keys, 읽기는 sim/race.ts raceProgress(race, 선수, t)).
+ *   ssireum: tracks[0] = 미는 힘 p (-1~1, +1 = 홍이 청을 넘어뜨림, -1 = 청이 이김). throwAt에 ±1.
+ *   tug: tracks[0] = 밧줄 가운데 c (-1~1, +1 = 홍 쪽 선까지 끌려감 = 홍 승리, -1 = 청 승리). crossAt에 ±1.
+ *   kite: tracks[2k] = 연 k의 높이 (0 = 낮게 뜬 높이 KITE_FIELD.skyLow, 1 = 가장 높이 skyHigh: 화면은 손에서 연줄로 잇는다), tracks[2k + 1] = 연 k의 좌우 (-1~1, 자기 자리 위가 0). 끊긴 뒤의 키는 없다 (화면이 날려 보낸다).
+ *   dig: tracks[자리] = 판 깊이 (0~1, findAt에 1). 아무도 안 판 자리는 빈 목록.
+ */
+export type GroupPlay = GroupPlayBase &
+  (
+    | { kind: 'race'; race: RaceResult }
+    | { kind: 'boat'; race: RaceResult }
+    | {
+        kind: 'ssireum';
+        /** 이긴 편. */
+        winner: GroupSide;
+        /** 뒤집기: 이긴 편이 막판에 거의 질 뻔하다 뒤집었다 (이긴 편에 건 손님 jackpot). */
+        flip: boolean;
+        /** 진 편이 끝나기 직전까지 이기고 있었다 (진 편에 건 손님 nearMiss). */
+        close: boolean;
+        /** 넘어뜨린 때 (초). */
+        throwAt: number;
+      }
+    | {
+        kind: 'tug';
+        winner: GroupSide;
+        /** 역전승: 이긴 편이 거의 지다가 뒤집었다 (jackpot). */
+        comeback: boolean;
+        /** 진 편이 마지막 20% 시간까지 이기고 있었다 (nearMiss). */
+        close: boolean;
+        /** 밧줄 가운데가 한 편 선을 넘은 때 (초). */
+        crossAt: number;
+        /** 편마다 줄을 잡은 손님 수 (홍, 청). */
+        sizes: [number, number];
+      }
+    | {
+        kind: 'kite';
+        /** 끊긴 순서 (먼저 끊긴 연부터, 마지막 = 이긴 연). 길이 = 연 수 (KITE.kites). */
+        order: number[];
+        /** 연마다 끊긴 초 (이긴 연은 -1). */
+        cutAt: number[];
+        /** 이긴 연이 끊길 뻔했다 (그 연에 건 손님 jackpot). */
+        close: boolean;
+        /** 마지막에서 두 번째 연이 끝나기 직전에 끊겼다 (그 연에 건 손님 nearMiss). */
+        late: boolean;
+      }
+    | {
+        kind: 'dig';
+        /** 판 자리마다 나온 것 (DIG_FIELD.spots 순서). */
+        finds: DigFind[];
+        /** 판 자리마다 무언가 튀어 오르는 때 (초, 아무도 안 판 자리는 -1). */
+        findAt: number[];
+        /** 상자가 묻힌 곳 (DIG_FIELD.chests index, -1 = 이번 판엔 상자가 없다). 앞 여섯은 판 자리와 같은 곳. */
+        chest: number;
+        /** 손님이 상자를 찾았다 (아니면 끝에 할아버지가 파서 보여 준다: 'reveal'). */
+        found: boolean;
+      }
+  );
+
+export type GroupKind = GroupPlay['kind'];
+export type GroupPhase = 'idle' | 'gathering' | 'running' | 'done';
+
+/**
+ * 단체 놀이 상태 (BoothState.group). idle → (첫 손님이 자리에 앉아 고르면) gathering → (countdown 0, 출발 조건) running → (elapsed ≥ duration) done → idle.
+ * - gathering: 손님이 앉을 때마다 참가 (참가비는 마을로, 건 코인은 항아리로). 첫 손님부터 GROUP_RULES.gatherSec, 출발 조건이 '곧'이면 startSoonSec 안에
+ *   (진행 능력치가 높을수록 짧게). 자리가 다 차면 곧 출발. 모이는 중에 자리를 뜨면 건 코인을 돌려받는다.
+ * - running: 판(play)을 이때 정한다. 참가자마다 BoothState.rounds[자리]에 한판(outcome = play.outcomes[i])이 생기고 roundStarted가 난다.
+ *   사건마다 groupEvent (참가자 응원 반응 포함).
+ * - done: 끝났다. 참가자마다 roundFinished·monsterReact가 한꺼번에, 근처 손님은 monsterSpectate. countdown(GROUP_RULES.resultSec) 뒤 idle.
+ * running·done 동안 새로 앉은 손님은 다음 판을 기다린다 (phase 'playing', 참가자 목록에 없음).
+ */
+export interface GroupState {
+  phase: GroupPhase;
+  /** gathering: 출발까지 남은 초. done: 다음 판을 받을 때까지 남은 초. */
+  countdown: number;
+  /** gathering: 첫 손님이 참가하고 지난 초. running: 시작 뒤 지난 초. */
+  elapsed: number;
+  /** running: 판 길이 (= play.end). */
+  duration: number;
+  participants: GroupEntry[];
+  /** running·done: 이번 판. */
+  play: GroupPlay | null;
+  /** running: 마지막으로 알린 사건의 주인공 (경주의 1등, 처음엔 null). */
+  mark?: number | null;
+  /** running: 마지막 사건을 알린 때 (elapsed). */
+  markAt?: number;
+  /** running: 다음에 알릴 타임라인 사건 (play.events index). */
+  cursor?: number;
+  /** 편 맞추기(줄다리기 lineup)로 판에서 빠져 참가비를 이미 낸 손님: 다음 참가 때 참가비를 다시 받지 않는다. */
+  prepaid?: MonsterId[];
+}
+
+/**
+ * 진행 중 사건에 근처 구경꾼(참가하지 않은 손님)이 들썩이는 모양 (GroupGame.buzz → monsterSpectate):
+ * wow = 뒤집기·역전·보물상자 (환호), gasp = 질 뻔함·연싸움·끊김 (어머나), cheer = 앞선 쪽이 바뀜·작은 보물 (박수), laugh = 헌 장화 (킥킥).
+ */
+export type GroupBuzz = 'wow' | 'gasp' | 'cheer' | 'laugh';
+
+/** 단체 놀이 사건 때 참가자 하나의 응원 반응 (groupEvent.cheers): lead = 자기 쪽이 앞서거나 좋은 일, behind = 뒤처지거나 위태로움. */
+export interface GroupCheer {
   id: MonsterId;
-  racer: RacerIndex;
-  /** 지금 등수 (1~4). */
-  place: number;
+  pick: number;
   kind: 'lead' | 'behind';
   reaction: Reaction;
 }
@@ -228,8 +355,18 @@ export type RoundDetail =
   | { kind: 'claw'; x: number; target: SpeciesId; target2: SpeciesId | null; result: ClawResult; slipAt: number }
   /** 복주머니: 고른 주머니 0~2 (빨강·파랑·노랑) 와 속. jackpot은 늘 노랑(2). */
   | { kind: 'pouch'; pick: number; content: PouchContent }
-  /** 경주: 이 손님이 건 선수와 등수 (1~4), 경주의 역전·사진 판정. 경주 자체는 BoothState.race.result. */
-  | { kind: 'race'; racer: RacerIndex; place: number; comeback: boolean; photoFinish: boolean };
+  /** 경주: 이 손님이 건 선수와 등수 (1~4), 경주의 역전·사진 판정. 경주 자체는 BoothState.group.play (kind 'race', play.race). */
+  | { kind: 'race'; racer: RacerIndex; place: number; comeback: boolean; photoFinish: boolean }
+  /** 오리배 경주: 경주와 같은 모양 (racer = 배 0~3, defs.ts BOAT.boats). */
+  | { kind: 'boat'; racer: RacerIndex; place: number; comeback: boolean; photoFinish: boolean }
+  /** 씨름: 이 손님의 편·역할 (player = 직접 겨룬 선수), 이겼나, 뒤집기(jackpot)·막판 역전당함(nearMiss). */
+  | { kind: 'ssireum'; side: GroupSide; role: GroupRole; won: boolean; flip: boolean; close: boolean }
+  /** 줄다리기: 이 손님의 편, 이겼나, 역전승(jackpot)·막판 역전당함(nearMiss). */
+  | { kind: 'tug'; side: GroupSide; won: boolean; comeback: boolean; close: boolean }
+  /** 연날리기: 이 손님의 연 0~3·역할, 등수 (1 = 마지막까지 남음), 끊긴 초 (-1 = 안 끊김). */
+  | { kind: 'kite'; kite: number; role: GroupRole; place: number; cutAt: number }
+  /** 보물찾기: 판 자리 0~5, 나온 것, 상자가 바로 옆에 묻혀 있었다 (nearMiss). */
+  | { kind: 'dig'; spot: number; find: DigFind; chestNear: boolean };
 
 export type DuckMark = 'gold' | 'silver' | 'none';
 export interface RingThrow {
@@ -254,7 +391,7 @@ export interface CraftJob {
 }
 
 export interface GameState {
-  version: 2;
+  version: 3;
   /** 시뮬레이션 누적 초. */
   time: number;
   rng: number;
@@ -307,25 +444,31 @@ export interface SimEvents extends Record<string, unknown> {
   monsterSpawned: { id: MonsterId };
   monsterLeft: { id: MonsterId; tip: number; material: MaterialId | null; precious: PreciousId | null };
   monsterReact: { id: MonsterId; reaction: Reaction };
-  /** 구경꾼이 다른 손님의 결과에 따라 반응. */
+  /**
+   * 구경꾼이 다른 손님의 결과에 따라 반응. 단체 놀이는 결과 뒤(groupFinished 다음)와 진행 중 큰 사건(groupEvent 다음, buzz)에
+   * 놀이 근처 손님(참가하지 않은 손님, 자리에서 다음 판을 기다리는 손님 포함)이. target = 그 판·사건의 주인공 참가자.
+   */
   monsterSpectate: { id: MonsterId; target: MonsterId; reaction: Reaction };
   monsterCheered: { id: MonsterId; by: 'tap' | GoodId };
   roundStarted: { booth: BoothId; seat: number; round: ActiveRound };
   roundFinished: { booth: BoothId; seat: number; round: ActiveRound; payout: number };
   potFestival: { booth: BoothId; monster: MonsterId; amount: number };
+  /** 단체 놀이: 손님이 자리에 앉아 고르고 걸었다 (gathering에 참가). */
+  groupJoined: { booth: GroupBoothId; monster: MonsterId; seat: number; pick: number; role: GroupRole; bet: number };
   /**
-   * 경주장: 출발(race.phase = 'running', result가 정해지고 참가자마다 BoothState.rounds[자리]가 열린 뒤, 그다음 참가자마다 roundStarted)과 끝(모든 선수 결승, race.phase = 'done',
-   * 그다음 참가자마다 roundFinished·monsterReact, 경주로 근처 구경꾼 monsterSpectate). race는 상태 그 자체 (복사본 아님).
+   * 단체 놀이 시작 (group.phase = 'running', play가 정해지고 참가자마다 BoothState.rounds[자리]가 열린 뒤. 그다음 참가자마다 roundStarted).
+   * group은 상태 그 자체 (복사본 아님).
    */
-  raceStarted: { booth: BoothId; race: RaceState };
-  raceFinished: { booth: BoothId; race: RaceState };
-  /** 손님이 관중석에 앉아 선수를 골랐다 (gathering에 참가). */
-  raceJoined: { booth: BoothId; monster: MonsterId; seat: number; racer: RacerIndex; bet: number };
+  groupStarted: { booth: GroupBoothId; group: GroupState };
   /**
-   * 경주 중 1등이 바뀌었다 (너무 잦지 않게 TUNE.raceCheerGapSec 간격). standings = 지금 순위 (앞선 선수부터).
-   * cheers = 참가자 응원 반응 (sim이 손님 pose도 잠깐 바꾼다). 화면은 monsterSpectate처럼 작게 보여 주면 된다.
+   * 진행 중 사건 (경주 1등 바뀜, 씨름 뒤집기, 연줄 끊김, 보물 나옴 …, 너무 잦지 않게). cheers = 참가자 응원 반응 (sim이 손님 pose도 잠깐 바꾼다).
+   * 화면은 monsterSpectate처럼 작게 보여 주면 된다.
    */
-  raceProgress: { booth: BoothId; race: RaceState; elapsed: number; standings: RacerIndex[]; leader: RacerIndex; cheers: RaceCheer[] };
+  groupEvent: { booth: GroupBoothId; group: GroupState; event: GroupEvent; cheers: GroupCheer[] };
+  /** 단체 놀이 끝 (group.phase = 'done'). 그다음 참가자마다 roundFinished·monsterReact, 근처 구경꾼 monsterSpectate. */
+  groupFinished: { booth: GroupBoothId; group: GroupState };
+  /** 모이던 판을 접었다 (closed = 꼭 있어야 하는 진행자가 빠짐, timeout = 출발 조건이 안 맞은 채 오래 기다림). 건 코인은 돌려준다. */
+  groupCancelled: { booth: GroupBoothId; reason: 'closed' | 'timeout' };
   coinsChanged: { coins: number; delta: number; at: Pt | null };
   itemsChanged: Record<string, never>;
   buildingUpgraded: { id: BuildingId | BoothId; level: number };

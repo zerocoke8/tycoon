@@ -1,12 +1,14 @@
 // 반응 고르기: 등급 × 성격 × 기분 → Reaction (포즈, 이모트, 연출, 세기, 시간, 이름).
 // 등급마다 후보 3~5개를 무게로 뽑는다. 이름(label)은 도감에 남는다.
-// 처음 네 부스는 공통 표(TABLE), 둘째 묶음 부스(돌림판·오리 낚시·고리 던지기·경주장·인형 뽑기·복주머니)는 부스마다 자기 표(BOOTH_TABLE).
-// 경주장은 경주 중 응원(raceCheerReaction)과 경주로 근처 구경꾼(raceSpectateReaction)도 따로.
+// 처음 네 부스는 공통 표(TABLE), 둘째·셋째 묶음 부스(돌림판·오리 낚시·고리 던지기·경주장·인형 뽑기·복주머니, 밀어내기·오리배·연·줄다리기·보물찾기)는
+// 부스마다 자기 표(BOOTH_TABLE, 셋째 묶음은 GROUP_TABLE). 결과 세부가 후보를 좁힌다 (only: 밀어내기·연은 선수·구경 손님, 보물찾기는 나온 것).
+// 단체 놀이는 진행 중 참가자 응원(groupCheerReaction, 사건마다 다른 말: on), 진행 중 근처 구경꾼(groupBuzzReaction),
+// 결과 뒤 근처 구경꾼(groupSpectateReaction)도 부스마다 따로.
 
 import type { Rng } from '../core/rng.ts';
-import { MOOD, type BoothId, type OutcomeTier, type TraitId } from '../data/defs.ts';
+import { MOOD, type BoothId, type GroupBoothId, type OutcomeTier, type TraitId } from '../data/defs.ts';
 import { TUNE } from './tuning.ts';
-import type { EmoteKind, Monster, Motion, Pose, Reaction } from './types.ts';
+import type { EmoteKind, GroupBuzz, Monster, Motion, Pose, Reaction, RoundDetail } from './types.ts';
 
 /** 반응 등급: 놀이 결과 + 빈털터리. */
 export type ReactTier = OutcomeTier | 'broke';
@@ -24,9 +26,17 @@ interface Cand {
   /** 기본 시간 (초). */
   readonly sec: number;
   readonly tags: readonly Tag[];
+  /** 결과 세부의 열쇠가 이것일 때만 (detailKeys: 'player'·'bettor', 보물찾기 'coins'·'gem'·'boot'·'pebble'). 없으면 늘. */
+  readonly only?: string;
+  /** 응원: 이 사건 열쇠일 때만 (cheerKey: 'lead'·'brink'·'flip'·'cut'·'find'… 남의 일이면 뒤에 ':other'). 없으면 사건 말이 없을 때. */
+  readonly on?: readonly string[];
 }
 
 const c = (pose: Pose, emote: EmoteKind | null, motion: Motion, label: string, k: number, sec: number, ...tags: Tag[]): Cand => ({ pose, emote, motion, label, k, sec, tags });
+/** 결과 세부 열쇠가 key일 때만 나오는 후보. */
+const only = (key: string, cands: readonly Cand[]): Cand[] => cands.map((x) => ({ ...x, only: key }));
+/** 응원 사건 열쇠가 keys 가운데 하나일 때만 나오는 후보. */
+const on = (keys: readonly string[], cands: readonly Cand[]): Cand[] => cands.map((x) => ({ ...x, on: keys }));
 
 const TABLE: Record<ReactTier, readonly Cand[]> = {
   jackpot: [
@@ -64,7 +74,7 @@ const TABLE: Record<ReactTier, readonly Cand[]> = {
 };
 
 /** 둘째 묶음 부스의 결과 반응 (빈털터리는 공통 표). 오리 낚시는 느긋하게 (세기 작게, 지면 대개 기본 포즈). */
-const BOOTH_TABLE: Partial<Record<BoothId, Record<OutcomeTier, readonly Cand[]>>> = {
+const SECOND_TABLE: Partial<Record<BoothId, Record<OutcomeTier, readonly Cand[]>>> = {
   wheel: {
     jackpot: [
       c('joy', 'sparkle', 'bigHop', '종이다 종!', 1.2, 3.4, 'main', 'loud'),
@@ -230,6 +240,194 @@ const BOOTH_TABLE: Partial<Record<BoothId, Record<OutcomeTier, readonly Cand[]>>
   },
 };
 
+/**
+ * 셋째 묶음 단체 놀이의 결과 반응. 밀어내기·연은 선수(player)와 구경하며 건 손님(bettor)이 다른 말을 한다 (벌러덩은 모래판의 선수만),
+ * 보물찾기는 나온 것마다 (헌 장화·조약돌·동전·보석). 줄다리기 진 편은 우르르 넘어지고, 이긴 편은 엉덩방아 뒤 만세.
+ */
+const GROUP_TABLE: Record<Exclude<GroupBoothId, 'race'>, Record<OutcomeTier, readonly Cand[]>> = {
+  ssireum: {
+    jackpot: [
+      ...only('player', [
+        c('joy', 'sparkle', 'bigHop', '뒤집기!', 1.3, 3.6, 'main', 'loud'),
+        c('joy', 'note', 'bounceLoop', '모래판의 영웅', 1.15, 3.6, 'loud', 'bright'),
+        c('joy', 'shock', 'bigHop', '이게 되네?', 1.0, 3.0, 'calm'),
+        c('joy', 'tear', 'tremble', '벼랑 끝 역전승', 1.05, 3.4, 'tear'),
+      ]),
+      ...only('bettor', [
+        c('joy', 'sparkle', 'bigHop', '뒤집기 봤어?!', 1.2, 3.4, 'main', 'loud'),
+        c('joy', 'heart', 'spin', '믿고 걸었지!', 1.1, 3.2, 'bright'),
+        c('joy', 'tear', 'tremble', '손에 땀이 다 났네', 1.0, 3.2, 'tear', 'calm'),
+      ]),
+    ],
+    win: [
+      ...only('player', [
+        c('joy', 'sparkle', 'hop', '밀어냈다!', 1.05, 2.4, 'main', 'loud'),
+        c('joy', 'heart', 'squash', '번쩍 넘겼다', 1.0, 2.2, 'loud'),
+        c('joy', 'note', 'hop', '힘자랑', 1.0, 2.2, 'bright'),
+        c('base', 'note', 'bounceLoop', '모래 털고 씨익', 0.85, 2.4, 'calm'),
+      ]),
+      ...only('bettor', [
+        c('joy', 'sparkle', 'hop', '우리 편 승!', 1.05, 2.4, 'main', 'loud'),
+        c('joy', 'heart', 'hop', '응원한 보람', 1.0, 2.2, 'bright'),
+        c('base', 'note', 'bounceLoop', '짝짝 박수', 0.85, 2.4, 'calm'),
+      ]),
+    ],
+    nearMiss: [
+      ...only('player', [
+        c('agony', 'shock', 'tremble', '다 이겼는데!', 1.15, 2.6, 'main'),
+        c('agony', 'anger', 'shake', '발이 미끄러졌어!', 1.15, 2.4, 'loud', 'angry'),
+        c('agony', 'sweat', 'squash', '한 끗 차이', 0.95, 2.2, 'calm'),
+        c('agony', 'tear', 'tremble', '분해서 모래 쾅', 1.0, 2.6, 'tear'),
+      ]),
+      ...only('bettor', [
+        c('agony', 'shock', 'tremble', '아까운 우리 편', 1.1, 2.4, 'main'),
+        c('agony', 'anger', 'shake', '거의 이겼잖아!', 1.1, 2.4, 'loud', 'angry'),
+        c('agony', 'sweat', 'squash', '심장이 쿵', 0.95, 2.2, 'calm'),
+      ]),
+    ],
+    lose: [
+      ...only('player', [
+        c('sad', 'tear', 'slump', '벌러덩', 1.0, 2.4, 'main', 'tear', 'gloom'),
+        c('sad', 'storm', 'none', '모래 범벅', 0.95, 2.4, 'gloom'),
+        c('base', 'sweat', 'shake', '하늘이 빙글', 0.9, 2.0, 'calm'),
+        c('base', 'note', 'hop', '다음엔 안 져!', 0.9, 1.8, 'bright', 'loud'),
+      ]),
+      ...only('bettor', [
+        c('sad', 'tear', 'slump', '내 편이 졌어', 1.0, 2.2, 'main', 'tear', 'gloom'),
+        c('sad', 'storm', 'none', '아이고 넘어갔네', 0.95, 2.4, 'gloom'),
+        c('base', 'note', 'hop', '다음엔 저쪽!', 0.9, 1.8, 'bright', 'loud'),
+      ]),
+    ],
+  },
+  boat: {
+    jackpot: [
+      c('joy', 'sparkle', 'bigHop', '물보라 역전', 1.3, 3.6, 'main', 'loud'),
+      c('joy', 'shock', 'bigHop', '꼴찌 배가 1등!', 1.15, 3.2, 'calm'),
+      c('joy', 'note', 'bounceLoop', '노 젓기 만세', 1.15, 3.6, 'loud', 'bright'),
+      c('joy', 'heart', 'spin', '첨벙 만세', 1.15, 3.4, 'loud'),
+      c('joy', 'tear', 'tremble', '배 따라 울컥', 1.1, 3.4, 'tear'),
+    ],
+    win: [
+      c('joy', 'sparkle', 'hop', '내 배가 1등!', 1.05, 2.4, 'main', 'loud'),
+      c('joy', 'heart', 'hop', '첨벙첨벙 신나', 1.0, 2.4, 'loud'),
+      c('joy', 'note', 'bounceLoop', '뱃노래 흥얼', 1.0, 2.6, 'bright'),
+      c('base', 'heart', 'squash', '물결 따라 미소', 0.85, 2.4, 'calm'),
+    ],
+    nearMiss: [
+      c('agony', 'shock', 'tremble', '뱃머리 하나 차이!', 1.15, 2.6, 'main'),
+      c('agony', 'anger', 'shake', '노를 더 저었으면!', 1.15, 2.4, 'loud', 'angry'),
+      c('agony', 'sweat', 'squash', '물결 한 뼘', 0.95, 2.2, 'calm'),
+      c('agony', 'tear', 'tremble', '부표가 얄미워', 1.0, 2.6, 'tear'),
+    ],
+    lose: [
+      c('sad', 'tear', 'slump', '퐁당 시무룩', 1.0, 2.2, 'main', 'tear', 'gloom'),
+      c('sad', 'storm', 'none', '물결만 출렁', 0.95, 2.4, 'gloom'),
+      c('base', 'sweat', 'shake', '그래도 시원했어', 0.85, 2.0, 'calm', 'bright'),
+      c('base', 'note', 'hop', '다음 배는 꼭!', 0.9, 1.8, 'bright', 'loud'),
+    ],
+  },
+  kite: {
+    jackpot: [
+      c('joy', 'sparkle', 'bigHop', '끝까지 살아남았다!', 1.3, 3.6, 'main', 'loud'),
+      c('joy', 'shock', 'bigHop', '끊길 뻔했는데!', 1.05, 3.2, 'calm'),
+      ...only('player', [c('joy', 'note', 'bounceLoop', '하늘의 왕', 1.15, 3.6, 'loud', 'bright'), c('joy', 'tear', 'tremble', '얼레 꼭 쥐고 울컥', 1.05, 3.4, 'tear')]),
+      ...only('bettor', [c('joy', 'heart', 'spin', '연아 고마워', 1.1, 3.4, 'bright'), c('joy', 'tear', 'tremble', '눈물 나게 좋아', 1.05, 3.4, 'tear')]),
+    ],
+    win: [
+      c('joy', 'sparkle', 'hop', '끝까지 날았다', 1.05, 2.4, 'main', 'loud'),
+      c('joy', 'note', 'hop', '높이 높이', 1.0, 2.2, 'bright'),
+      ...only('player', [c('joy', 'heart', 'squash', '바람 타기 장인', 1.0, 2.2, 'loud'), c('base', 'note', 'bounceLoop', '얼레 감으며 씨익', 0.85, 2.4, 'calm')]),
+      ...only('bettor', [c('joy', 'heart', 'squash', '내가 고른 연!', 1.0, 2.2, 'loud'), c('base', 'note', 'bounceLoop', '연 보는 눈이 있지', 0.85, 2.4, 'calm')]),
+    ],
+    nearMiss: [
+      c('agony', 'shock', 'tremble', '조금만 버텼으면!', 1.15, 2.6, 'main'),
+      c('agony', 'anger', 'shake', '바람이 미워!', 1.15, 2.4, 'loud', 'angry'),
+      c('agony', 'sweat', 'squash', '훨훨 날아가네', 0.95, 2.2, 'calm'),
+      c('agony', 'tear', 'tremble', '마지막에 끊어졌어', 1.0, 2.6, 'tear'),
+    ],
+    lose: [
+      c('sad', 'tear', 'slump', '줄이 끊겼다', 1.0, 2.2, 'main', 'tear', 'gloom'),
+      c('sad', 'storm', 'none', '연이 날아갔다', 0.95, 2.4, 'gloom'),
+      c('base', 'note', 'hop', '다음엔 더 높이!', 0.9, 1.8, 'bright', 'loud'),
+      ...only('player', [c('base', 'sweat', 'shake', '빈 얼레만 빙글', 0.85, 2.0, 'calm')]),
+      ...only('bettor', [c('base', 'sweat', 'shake', '연아 잘 가', 0.85, 2.0, 'calm')]),
+    ],
+  },
+  tug: {
+    jackpot: [
+      c('joy', 'sparkle', 'bigHop', '대역전 줄다리기!', 1.3, 3.6, 'main', 'loud'),
+      c('joy', 'note', 'bounceLoop', '끝까지 버텼다', 1.15, 3.6, 'loud', 'bright'),
+      c('joy', 'heart', 'spin', '영차 만세', 1.15, 3.4, 'loud'),
+      c('joy', 'shock', 'bigHop', '얼떨떨', 1.0, 3.0, 'calm'),
+      c('joy', 'tear', 'tremble', '줄 잡고 엉엉', 1.05, 3.4, 'tear'),
+    ],
+    win: [
+      c('joy', 'heart', 'squash', '엉덩방아 만세', 1.05, 2.4, 'main', 'bright'),
+      c('joy', 'sparkle', 'hop', '우리 편 이겼다', 1.05, 2.4, 'loud'),
+      c('joy', 'note', 'hop', '줄다리기 최고', 1.0, 2.2, 'loud'),
+      c('base', 'sweat', 'bounceLoop', '후유 이겼다', 0.85, 2.4, 'calm'),
+    ],
+    nearMiss: [
+      c('agony', 'shock', 'tremble', '거의 이겼는데!', 1.15, 2.6, 'main'),
+      c('agony', 'anger', 'shake', '으아 끌려갔다', 1.15, 2.4, 'loud', 'angry'),
+      c('agony', 'sweat', 'squash', '손이 미끄러졌어', 0.95, 2.2, 'calm'),
+      c('agony', 'tear', 'tremble', '줄이 야속해', 1.0, 2.6, 'tear'),
+    ],
+    lose: [
+      c('sad', 'tear', 'slump', '우르르', 1.0, 2.4, 'main', 'tear', 'gloom'),
+      c('sad', 'storm', 'none', '손바닥 얼얼', 0.95, 2.4, 'gloom'),
+      c('base', 'sweat', 'shake', '팔이 덜덜', 0.9, 2.0, 'calm'),
+      c('base', 'note', 'hop', '다음엔 더 세게!', 0.9, 1.8, 'bright', 'loud'),
+    ],
+  },
+  dig: {
+    jackpot: [
+      c('joy', 'sparkle', 'bigHop', '보물상자다!', 1.3, 3.6, 'main', 'loud'),
+      c('joy', 'note', 'bounceLoop', '삽질의 보람', 1.15, 3.6, 'loud', 'bright'),
+      c('joy', 'heart', 'spin', '반짝반짝 상자', 1.15, 3.4, 'bright'),
+      c('joy', 'shock', 'bigHop', '꿈만 같아', 1.0, 3.0, 'calm'),
+      c('joy', 'tear', 'tremble', '상자 안고 울컥', 1.05, 3.4, 'tear'),
+    ],
+    win: [
+      c('joy', 'sparkle', 'hop', '흙 속의 보물', 1.05, 2.4, 'loud'),
+      c('base', 'note', 'bounceLoop', '삽 들고 씨익', 0.85, 2.4, 'calm'),
+      ...only('coins', [c('joy', 'heart', 'squash', '동전 주머니!', 1.0, 2.2, 'main', 'bright'), c('joy', 'note', 'hop', '짤랑짤랑', 1.0, 2.2, 'loud')]),
+      ...only('gem', [c('joy', 'sparkle', 'squash', '반짝 보석!', 1.0, 2.2, 'main', 'bright'), c('joy', 'heart', 'hop', '보석이 쏙', 1.0, 2.2, 'loud')]),
+    ],
+    nearMiss: [
+      c('agony', 'shock', 'tremble', '바로 옆이었는데!', 1.15, 2.6, 'main'),
+      c('agony', 'anger', 'shake', '한 삽만 옆이었으면', 1.15, 2.4, 'loud', 'angry'),
+      c('agony', 'sweat', 'squash', '흙만 한가득', 0.95, 2.2, 'calm'),
+      c('agony', 'tear', 'tremble', '상자가 눈앞에', 1.0, 2.6, 'tear'),
+    ],
+    lose: [
+      c('base', 'sweat', 'shake', '흙투성이', 0.85, 2.0, 'calm'),
+      c('base', 'note', 'hop', '다음엔 꼭 찾을래', 0.9, 1.8, 'bright', 'loud'),
+      ...only('boot', [c('sad', 'tear', 'slump', '헌 장화…', 1.0, 2.2, 'main', 'tear', 'gloom'), c('sad', 'storm', 'none', '장화 한 짝', 0.95, 2.4, 'gloom')]),
+      ...only('pebble', [c('sad', 'tear', 'slump', '조약돌 하나', 1.0, 2.2, 'main', 'tear', 'gloom'), c('sad', 'storm', 'none', '돌멩이네', 0.95, 2.4, 'gloom')]),
+    ],
+  },
+};
+
+const BOOTH_TABLE: Partial<Record<BoothId, Record<OutcomeTier, readonly Cand[]>>> = { ...SECOND_TABLE, ...GROUP_TABLE };
+
+/**
+ * 결과 세부의 열쇠 (후보의 only와 맞춘다): 밀어내기 = 선수·구경 손님, 연 = 날린 손님·구경 손님, 보물찾기 = 나온 것.
+ * 다른 부스는 없다 (only가 붙은 후보가 없다).
+ */
+export function detailKeys(d: RoundDetail | null | undefined): string[] {
+  if (d === null || d === undefined) return [];
+  switch (d.kind) {
+    case 'ssireum':
+    case 'kite':
+      return [d.role];
+    case 'dig':
+      return [d.find];
+    default:
+      return [];
+  }
+}
+
 const POSITIVE: ReadonlySet<ReactTier> = new Set(['jackpot', 'win']);
 
 function weightOf(cand: Cand, traits: readonly TraitId[], mood: number, positive: boolean): number {
@@ -264,22 +462,35 @@ function choose(rng: Rng, cands: readonly Cand[], m: Monster, positive: boolean)
   return rng.weighted(cands.map((x) => [x, weightOf(x, m.traits, m.mood, positive)] as const));
 }
 
-/** 이 부스·등급의 결과 반응 후보 (둘째 묶음 부스는 자기 표, 그 밖과 빈털터리는 공통 표). */
-function candidates(tier: ReactTier, booth: BoothId | null): readonly Cand[] {
+/** 이 부스·등급의 결과 반응 후보 (둘째·셋째 묶음 부스는 자기 표, 그 밖과 빈털터리는 공통 표). keys = 결과 세부 열쇠 (only가 맞는 후보만). */
+function candidates(tier: ReactTier, booth: BoothId | null, keys: readonly string[] = []): readonly Cand[] {
   if (tier === 'broke' || booth === null) return TABLE[tier];
-  return BOOTH_TABLE[booth]?.[tier] ?? TABLE[tier];
+  const all = BOOTH_TABLE[booth]?.[tier] ?? TABLE[tier];
+  const fit = all.filter((x) => x.only === undefined || keys.includes(x.only));
+  return fit.length > 0 ? fit : all;
 }
 
-/** 한판 결과 반응. boost = 응원 도구의 반응 배수 (없으면 1). booth를 주면 그 부스의 반응 표. */
-export function pickReaction(rng: Rng, tier: ReactTier, m: Monster, boost = 1, booth: BoothId | null = null): Reaction {
+/** 한판 결과 반응. boost = 응원 도구의 반응 배수 (없으면 1). booth를 주면 그 부스의 반응 표, detail을 주면 그 세부에 맞는 후보만. */
+export function pickReaction(rng: Rng, tier: ReactTier, m: Monster, boost = 1, booth: BoothId | null = null, detail: RoundDetail | null = null): Reaction {
   const positive = POSITIVE.has(tier);
-  const cand = choose(rng, candidates(tier, booth), m, positive);
+  const cand = choose(rng, candidates(tier, booth, detailKeys(detail)), m, positive);
   return build(cand, intensityOf(cand, m.traits, m.mood, positive, boost));
 }
 
-/** 이 부스·등급에서 나올 수 있는 반응 이름 (도감·시험용). */
-export function reactionLabels(tier: ReactTier, booth: BoothId | null = null): string[] {
-  return candidates(tier, booth).map((x) => x.label);
+/**
+ * 이 부스·등급에서 나올 수 있는 반응 이름 (도감·시험용). key를 주면 그 세부 열쇠의 손님에게 나올 수 있는 이름만
+ * (only가 붙은 후보는 그 열쇠일 때만), 없으면 그 등급의 모든 이름.
+ */
+export function reactionLabels(tier: ReactTier, booth: BoothId | null = null, key?: string): string[] {
+  const cands = key === undefined ? (tier === 'broke' || booth === null ? TABLE[tier] : (BOOTH_TABLE[booth]?.[tier] ?? TABLE[tier])) : candidates(tier, booth, [key]);
+  return cands.map((x) => x.label);
+}
+
+/** 결과 세부 열쇠의 종류 (시험용: 그 부스·등급의 후보에 only로 쓰인 열쇠들, 없으면 빈 목록). */
+export function reactionKeys(booth: BoothId, tier: OutcomeTier): string[] {
+  const keys = new Set<string>();
+  for (const x of BOOTH_TABLE[booth]?.[tier] ?? []) if (x.only !== undefined) keys.add(x.only);
+  return [...keys];
 }
 
 const SPECTATE: Record<OutcomeTier, readonly Cand[]> = {
@@ -327,9 +538,96 @@ const RACE_SPECTATE: Record<OutcomeTier, readonly Cand[]> = {
   lose: [c('base', 'note', 'hop', '재밌는 경주', 0.8, 1.6, 'bright')],
 };
 
-export function raceSpectateReaction(rng: Rng, tier: OutcomeTier, m: Monster): Reaction {
-  const cand = choose(rng, RACE_SPECTATE[tier], m, POSITIVE.has(tier));
+/** 단체 놀이마다 결과 뒤 근처 구경꾼 반응 (jackpot = 역전·뒤집기, nearMiss = 아슬아슬, win = 그 밖). */
+const GROUP_SPECTATE: Record<GroupBoothId, Record<OutcomeTier, readonly Cand[]>> = {
+  race: RACE_SPECTATE,
+  boat: {
+    jackpot: [c('joy', 'sparkle', 'hop', '오리배 대역전!', 0.95, 2.2, 'loud'), c('base', 'shock', 'hop', '물 위의 역전', 0.9, 1.8, 'calm'), c('joy', 'note', 'bounceLoop', '같이 첨벙', 0.9, 2.2, 'bright')],
+    win: [c('base', 'note', 'hop', '와아 골인!', 0.85, 1.8, 'bright'), c('joy', 'heart', 'hop', '배들 최고', 0.85, 1.8, 'loud'), c('base', 'sparkle', 'none', '연못 구경 잘했다', 0.8, 1.6, 'calm')],
+    nearMiss: [c('agony', 'shock', 'hop', '뱃머리 판정이래', 0.9, 2.0, 'loud'), c('base', 'sweat', 'none', '코앞이었네', 0.8, 1.8, 'calm'), c('agony', 'sweat', 'tremble', '물보라에 땀이', 0.85, 1.8, 'tear')],
+    lose: [c('base', 'note', 'hop', '재밌는 뱃놀이', 0.8, 1.6, 'bright')],
+  },
+  ssireum: {
+    jackpot: [c('joy', 'sparkle', 'hop', '뒤집기에 박수', 0.95, 2.2, 'loud'), c('base', 'shock', 'hop', '우와 뒤집었다', 0.9, 1.8, 'calm'), c('joy', 'note', 'bounceLoop', '덩실덩실', 0.9, 2.2, 'bright')],
+    win: [c('base', 'note', 'hop', '멋진 한판', 0.85, 1.8, 'bright'), c('joy', 'heart', 'hop', '힘이 장사네', 0.85, 1.8, 'loud'), c('base', 'sparkle', 'none', '대결 구경 잘했다', 0.8, 1.6, 'calm')],
+    nearMiss: [c('agony', 'shock', 'hop', '아슬아슬했다', 0.9, 2.0, 'loud'), c('base', 'sweat', 'none', '손에 땀이', 0.8, 1.8, 'calm'), c('agony', 'sweat', 'tremble', '아이고 아까워', 0.85, 1.8, 'tear')],
+    lose: [c('base', 'note', 'hop', '좋은 승부', 0.8, 1.6, 'bright')],
+  },
+  kite: {
+    jackpot: [c('joy', 'sparkle', 'hop', '연싸움 장관', 0.95, 2.2, 'loud'), c('base', 'shock', 'hop', '와 살아남았다', 0.9, 1.8, 'calm'), c('joy', 'note', 'bounceLoop', '하늘 보며 박수', 0.9, 2.2, 'bright')],
+    win: [c('base', 'note', 'hop', '연 구경 최고', 0.85, 1.8, 'bright'), c('joy', 'heart', 'hop', '높이 난다', 0.85, 1.8, 'loud'), c('base', 'sparkle', 'none', '바람 좋네', 0.8, 1.6, 'calm')],
+    nearMiss: [c('agony', 'shock', 'hop', '어머 날아간다', 0.9, 2.0, 'loud'), c('base', 'sweat', 'none', '아깝게 끊겼네', 0.8, 1.8, 'calm'), c('agony', 'sweat', 'tremble', '실이 아까워', 0.85, 1.8, 'tear')],
+    lose: [c('base', 'note', 'hop', '하늘이 예뻐', 0.8, 1.6, 'bright')],
+  },
+  tug: {
+    jackpot: [c('joy', 'sparkle', 'hop', '역전 줄다리기!', 0.95, 2.2, 'loud'), c('base', 'shock', 'hop', '와 뒤집혔다', 0.9, 1.8, 'calm'), c('joy', 'note', 'bounceLoop', '들썩들썩', 0.9, 2.2, 'bright')],
+    win: [c('base', 'note', 'hop', '영차 구경', 0.85, 1.8, 'bright'), c('joy', 'heart', 'hop', '힘내라 홍청', 0.85, 1.8, 'loud'), c('base', 'sparkle', 'none', '줄다리기 구경 끝', 0.8, 1.6, 'calm')],
+    nearMiss: [c('agony', 'shock', 'hop', '팽팽했어', 0.9, 2.0, 'loud'), c('base', 'sweat', 'none', '아깝다 저 편', 0.8, 1.8, 'calm'), c('agony', 'sweat', 'tremble', '조마조마했네', 0.85, 1.8, 'tear')],
+    lose: [c('base', 'note', 'hop', '재밌는 줄다리기', 0.8, 1.6, 'bright')],
+  },
+  dig: {
+    jackpot: [c('joy', 'sparkle', 'hop', '상자가 나왔대', 0.95, 2.2, 'loud'), c('base', 'shock', 'hop', '우와 보물이다', 0.9, 1.8, 'calm'), c('joy', 'note', 'bounceLoop', '나도 파 볼래', 0.9, 2.2, 'bright')],
+    win: [c('base', 'note', 'hop', '보물 구경', 0.85, 1.8, 'bright'), c('joy', 'heart', 'hop', '부럽다 보물', 0.85, 1.8, 'loud'), c('base', 'sparkle', 'none', '반짝반짝하네', 0.8, 1.6, 'calm')],
+    nearMiss: [c('agony', 'shock', 'hop', '바로 옆이었대', 0.9, 2.0, 'loud'), c('base', 'sweat', 'none', '할아버지가 찾았네', 0.8, 1.8, 'calm'), c('agony', 'sweat', 'tremble', '아이고 아까워라', 0.85, 1.8, 'tear')],
+    lose: [c('base', 'note', 'hop', '흙놀이 재밌다', 0.8, 1.6, 'bright')],
+  },
+};
+
+/** 단체 놀이 근처 구경꾼: 판 하나를 보고 (등급은 GroupGame.crowd). */
+export function groupSpectateReaction(rng: Rng, booth: GroupBoothId, tier: OutcomeTier, m: Monster): Reaction {
+  const cand = choose(rng, GROUP_SPECTATE[booth][tier], m, POSITIVE.has(tier));
   return build(cand, intensityOf(cand, m.traits, m.mood, true, 1));
+}
+
+export function raceSpectateReaction(rng: Rng, tier: OutcomeTier, m: Monster): Reaction {
+  return groupSpectateReaction(rng, 'race', tier, m);
+}
+
+/** 진행 중 큰 사건에 근처 구경꾼 (GroupBuzz): 놀이마다 없는 모양은 BUZZ. 작고 짧게. */
+const BUZZ: Record<GroupBuzz, readonly Cand[]> = {
+  wow: [c('joy', 'sparkle', 'hop', '우와아!', 0.9, 1.8, 'loud'), c('base', 'shock', 'hop', '눈을 의심', 0.85, 1.6, 'calm'), c('joy', 'note', 'bounceLoop', '들썩들썩!', 0.9, 2.0, 'bright')],
+  gasp: [c('agony', 'shock', 'hop', '어머어머', 0.85, 1.6, 'loud'), c('base', 'sweat', 'none', '아슬아슬', 0.8, 1.5, 'calm'), c('agony', 'sweat', 'tremble', '못 보겠어', 0.8, 1.6, 'tear')],
+  cheer: [c('base', 'note', 'hop', '오오!', 0.8, 1.4, 'bright'), c('joy', 'heart', 'hop', '힘내라!', 0.8, 1.4, 'loud'), c('base', 'sparkle', 'none', '재밌다', 0.75, 1.4, 'calm')],
+  laugh: [c('joy', 'note', 'hop', '킥킥', 0.8, 1.4, 'bright'), c('base', 'note', 'squash', '푸핫', 0.8, 1.4, 'loud'), c('joy', 'heart', 'none', '귀여워라', 0.75, 1.4, 'calm')],
+};
+
+const GROUP_BUZZ: Record<GroupBoothId, Partial<Record<GroupBuzz, readonly Cand[]>>> = {
+  race: {
+    wow: [c('joy', 'sparkle', 'hop', '꼴찌가 치고 나온다!', 0.95, 1.8, 'loud'), c('base', 'shock', 'hop', '대역전 조짐!', 0.85, 1.6, 'calm'), c('joy', 'note', 'bounceLoop', '관중석이 들썩', 0.9, 2.0, 'bright')],
+    cheer: [c('base', 'note', 'hop', '와 앞질렀다', 0.8, 1.4, 'bright'), c('joy', 'heart', 'hop', '달려라!', 0.8, 1.4, 'loud'), c('base', 'sweat', 'none', '막판 승부다', 0.75, 1.5, 'calm')],
+  },
+  boat: {
+    wow: [c('joy', 'sparkle', 'hop', '물보라 대역전!', 0.95, 1.8, 'loud'), c('base', 'shock', 'hop', '꼴찌 배가 온다!', 0.85, 1.6, 'calm'), c('joy', 'note', 'bounceLoop', '물가가 들썩', 0.9, 2.0, 'bright')],
+    cheer: [c('base', 'note', 'hop', '배가 앞질렀다', 0.8, 1.4, 'bright'), c('joy', 'heart', 'hop', '첨벙첨벙 힘내라', 0.8, 1.4, 'loud'), c('base', 'sweat', 'none', '뱃머리 싸움', 0.75, 1.5, 'calm')],
+  },
+  ssireum: {
+    wow: [c('joy', 'sparkle', 'hop', '뒤집었다!', 0.95, 1.8, 'loud'), c('base', 'shock', 'hop', '우와 되밀었어', 0.85, 1.6, 'calm'), c('joy', 'note', 'bounceLoop', '모래판이 들썩', 0.9, 2.0, 'bright')],
+    gasp: [c('agony', 'shock', 'hop', '어머 밀린다', 0.85, 1.6, 'loud'), c('base', 'sweat', 'none', '모래판 끝이야', 0.8, 1.5, 'calm'), c('agony', 'sweat', 'tremble', '아슬아슬해', 0.8, 1.6, 'tear')],
+    cheer: [c('base', 'note', 'hop', '오오 밀어붙인다', 0.8, 1.4, 'bright'), c('joy', 'heart', 'hop', '힘내라 홍청', 0.8, 1.4, 'loud'), c('base', 'sparkle', 'none', '팽팽하다', 0.75, 1.4, 'calm')],
+  },
+  tug: {
+    wow: [c('joy', 'sparkle', 'hop', '줄이 거꾸로 간다!', 0.95, 1.8, 'loud'), c('base', 'shock', 'hop', '역전이다 영차', 0.85, 1.6, 'calm'), c('joy', 'note', 'bounceLoop', '와아아', 0.9, 2.0, 'bright')],
+    gasp: [c('agony', 'shock', 'hop', '선 앞이다!', 0.85, 1.6, 'loud'), c('base', 'sweat', 'none', '넘어간다?', 0.8, 1.5, 'calm'), c('agony', 'sweat', 'tremble', '조마조마', 0.8, 1.6, 'tear')],
+    cheer: [c('base', 'note', 'hop', '영차영차!', 0.8, 1.4, 'bright'), c('joy', 'heart', 'hop', '당겨라 당겨', 0.8, 1.4, 'loud'), c('base', 'sparkle', 'none', '팽팽하네', 0.75, 1.4, 'calm')],
+  },
+  kite: {
+    wow: [c('joy', 'sparkle', 'hop', '마지막 연싸움!', 0.95, 1.8, 'loud'), c('base', 'shock', 'hop', '와 끊었다!', 0.85, 1.6, 'calm'), c('joy', 'note', 'bounceLoop', '하늘이 들썩', 0.9, 2.0, 'bright')],
+    gasp: [c('agony', 'shock', 'hop', '연이 엉켰다!', 0.85, 1.6, 'loud'), c('base', 'sweat', 'none', '끊어질라', 0.8, 1.5, 'calm'), c('agony', 'sweat', 'tremble', '하늘에서 연싸움', 0.8, 1.6, 'tear')],
+    cheer: [c('base', 'note', 'hop', '연 하나 떨어졌다', 0.8, 1.4, 'bright'), c('joy', 'heart', 'hop', '연이 날아간다', 0.8, 1.4, 'loud'), c('base', 'sparkle', 'none', '바람 좋다', 0.75, 1.4, 'calm')],
+  },
+  dig: {
+    wow: [c('joy', 'sparkle', 'hop', '상자가 나왔다!', 0.95, 1.8, 'loud'), c('base', 'shock', 'hop', '반짝반짝 보물', 0.85, 1.6, 'calm'), c('joy', 'note', 'bounceLoop', '우와 보물상자', 0.9, 2.0, 'bright')],
+    gasp: [c('agony', 'shock', 'hop', '저기 있었구나', 0.85, 1.6, 'loud'), c('base', 'sweat', 'none', '할아버지가 찾았다', 0.8, 1.5, 'calm'), c('agony', 'sweat', 'tremble', '아이고 바로 옆', 0.8, 1.6, 'tear')],
+    cheer: [c('base', 'note', 'hop', '뭔가 나왔다', 0.8, 1.4, 'bright'), c('joy', 'heart', 'hop', '동전이 짤랑', 0.8, 1.4, 'loud'), c('base', 'sparkle', 'none', '나도 파 볼까', 0.75, 1.4, 'calm')],
+    laugh: [c('joy', 'note', 'hop', '헌 장화래', 0.8, 1.4, 'bright'), c('base', 'note', 'squash', '킥킥 장화', 0.8, 1.4, 'loud'), c('joy', 'heart', 'none', '장화도 보물이지', 0.75, 1.4, 'calm')],
+  },
+};
+
+/** 진행 중 큰 사건에 근처 구경꾼 반응 (참가하지 않은 손님, 작고 짧게). */
+export function groupBuzzReaction(rng: Rng, booth: GroupBoothId, kind: GroupBuzz, m: Monster): Reaction {
+  const cands = GROUP_BUZZ[booth][kind] ?? BUZZ[kind];
+  const cand = choose(rng, cands, m, kind !== 'gasp');
+  return build(cand, Math.min(1.2, intensityOf(cand, m.traits, m.mood, true, 1)));
 }
 
 /** 경주 중 참가자 응원: lead = 자기 선수가 1등으로 (들썩), behind = 1등을 뺏기거나 꼴찌 (땀). 짧고 작게. */
@@ -346,10 +644,110 @@ const RACE_CHEER: Record<'lead' | 'behind', readonly Cand[]> = {
   ],
 };
 
-export function raceCheerReaction(rng: Rng, kind: 'lead' | 'behind', m: Monster, boost = 1): Reaction {
+/**
+ * 단체 놀이마다 진행 중 참가자 응원 (lead = 자기 쪽이 앞서거나 좋은 일, behind = 뒤처지거나 위태로움).
+ * on = 그 사건 열쇠에만 나오는 말 (뒤집기 '뒤집어라!', 연줄 끊김 '앗, 끊어졌다!' …), on이 없는 후보는 맞는 말이 없을 때.
+ */
+const GROUP_CHEER: Record<GroupBoothId, Record<'lead' | 'behind', readonly Cand[]>> = {
+  race: RACE_CHEER,
+  boat: {
+    lead: [c('joy', 'note', 'hop', '저어라 저어!', 0.85, 1.3, 'main', 'loud'), c('joy', 'heart', 'hop', '선두다 첨벙', 0.85, 1.2, 'bright'), c('base', 'sparkle', 'squash', '그대로 가자', 0.8, 1.2, 'calm')],
+    behind: [c('agony', 'sweat', 'tremble', '힘내 오리배', 0.85, 1.3, 'main'), c('agony', 'shock', 'shake', '앗, 뒤처진다', 0.9, 1.2, 'loud'), c('base', 'sweat', 'squash', '물보라 조마조마', 0.8, 1.3, 'calm', 'tear')],
+  },
+  ssireum: {
+    lead: [
+      ...on(['lead'], [c('joy', 'note', 'hop', '밀어붙여!', 0.85, 1.3, 'main', 'loud'), c('base', 'sparkle', 'squash', '조금만 더', 0.8, 1.2, 'calm')]),
+      ...on(['brink:other'], [c('joy', 'note', 'hop', '한 발만 더!', 0.85, 1.3, 'main', 'loud'), c('joy', 'heart', 'squash', '끝까지 밀어!', 0.85, 1.2, 'bright')]),
+      ...on(['flip'], [c('joy', 'sparkle', 'hop', '뒤집어라!', 0.9, 1.3, 'main', 'loud'), c('joy', 'heart', 'squash', '되밀어!', 0.85, 1.2, 'bright')]),
+      c('joy', 'heart', 'hop', '영차!', 0.85, 1.2, 'bright'),
+    ],
+    behind: [
+      ...on(['lead:other'], [c('agony', 'sweat', 'tremble', '버텨라!', 0.85, 1.3, 'main'), c('agony', 'shock', 'shake', '으으 밀린다', 0.9, 1.2, 'loud')]),
+      ...on(['brink'], [c('agony', 'sweat', 'tremble', '모래판 끝이야!', 0.9, 1.3, 'main'), c('agony', 'shock', 'shake', '발 버텨!', 0.9, 1.2, 'loud')]),
+      ...on(['flip:other'], [c('agony', 'shock', 'shake', '어어 뒤집힌다?!', 0.9, 1.3, 'main', 'loud'), c('agony', 'sweat', 'tremble', '안 돼!', 0.85, 1.2, 'tear')]),
+      c('base', 'sweat', 'squash', '조마조마', 0.8, 1.3, 'calm', 'tear'),
+    ],
+  },
+  kite: {
+    lead: [
+      ...on(['cut:other'], [c('joy', 'sparkle', 'hop', '끊었다!', 0.9, 1.3, 'main', 'loud'), c('joy', 'heart', 'hop', '내 연 최고', 0.85, 1.2, 'bright')]),
+      c('joy', 'note', 'hop', '높이 높이!', 0.85, 1.2, 'bright'),
+      c('base', 'sparkle', 'squash', '바람 좋다', 0.8, 1.2, 'calm'),
+    ],
+    behind: [
+      ...on(['tangle', 'tangle:other'], [c('agony', 'sweat', 'tremble', '실 감아!', 0.85, 1.3, 'main'), c('agony', 'shock', 'shake', '안 돼 엉킨다', 0.9, 1.2, 'loud'), c('base', 'sweat', 'squash', '연싸움이다!', 0.8, 1.3, 'calm', 'tear')]),
+      ...on(['cut'], [c('agony', 'shock', 'shake', '앗, 끊어졌다!', 0.9, 1.3, 'main', 'loud'), c('agony', 'tear', 'tremble', '내 연이…', 0.85, 1.3, 'tear')]),
+      ...on(['brink'], [c('agony', 'sweat', 'tremble', '버텨 내 연아!', 0.9, 1.3, 'main'), c('agony', 'shock', 'shake', '실이 끊어질라', 0.9, 1.2, 'loud')]),
+      c('base', 'sweat', 'squash', '연싸움 조마조마', 0.8, 1.3, 'calm', 'tear'),
+    ],
+  },
+  tug: {
+    lead: [
+      ...on(['lead'], [c('joy', 'note', 'hop', '영차영차', 0.85, 1.3, 'main', 'loud'), c('joy', 'heart', 'hop', '당겨라!', 0.85, 1.2, 'bright')]),
+      ...on(['brink:other'], [c('joy', 'sparkle', 'hop', '조금만 더!', 0.9, 1.3, 'main', 'loud'), c('base', 'sparkle', 'squash', '거의 다 왔다', 0.8, 1.2, 'calm')]),
+      ...on(['flip'], [c('joy', 'sparkle', 'hop', '지금이야, 영차!', 0.9, 1.3, 'main', 'loud'), c('joy', 'heart', 'squash', '다시 당겨!', 0.85, 1.2, 'bright')]),
+      c('base', 'sparkle', 'squash', '우리가 이긴다', 0.8, 1.2, 'calm'),
+    ],
+    behind: [
+      ...on(['lead:other'], [c('agony', 'shock', 'shake', '끌려간다!', 0.9, 1.3, 'main', 'loud'), c('base', 'sweat', 'squash', '발 버텨요', 0.8, 1.3, 'calm')]),
+      ...on(['brink'], [c('agony', 'shock', 'tremble', '선 앞이야!', 0.9, 1.3, 'main'), c('agony', 'sweat', 'tremble', '버텨!', 0.85, 1.3, 'loud')]),
+      ...on(['flip:other'], [c('agony', 'shock', 'shake', '어어어?', 0.9, 1.3, 'main'), c('agony', 'sweat', 'tremble', '줄이 미끄러워', 0.85, 1.3, 'tear')]),
+      c('base', 'sweat', 'squash', '팔이 저려', 0.8, 1.3, 'calm', 'tear'),
+    ],
+  },
+  dig: {
+    lead: [c('joy', 'note', 'hop', '뭔가 나왔다!', 0.85, 1.3, 'main', 'loud'), c('joy', 'heart', 'hop', '반짝인다!', 0.85, 1.2, 'bright'), c('base', 'sparkle', 'squash', '내 보물', 0.8, 1.2, 'calm')],
+    behind: [
+      // 자기 땅에서 나온 것마다 (cheerDetail): 헌 장화, 조약돌, 둘 다.
+      ...on(['find:boot'], [c('agony', 'sweat', 'tremble', '장화네…', 0.85, 1.3, 'main'), c('agony', 'shock', 'shake', '웬 장화?', 0.9, 1.2, 'loud')]),
+      ...on(['find:pebble'], [c('agony', 'sweat', 'tremble', '돌멩이네…', 0.85, 1.3, 'main'), c('agony', 'shock', 'shake', '에이 돌멩이', 0.9, 1.2, 'loud')]),
+      ...on(['find', 'find:boot', 'find:pebble'], [c('base', 'sweat', 'squash', '에이, 꽝이다', 0.8, 1.3, 'calm', 'tear')]),
+      ...on(['find:other', 'reveal:other'], [c('agony', 'shock', 'shake', '옆을 팔걸', 0.9, 1.3, 'main', 'loud'), c('agony', 'shock', 'tremble', '저기였어?!', 0.9, 1.2, 'calm'), c('agony', 'tear', 'tremble', '바로 옆에서…', 0.85, 1.3, 'tear')]),
+    ],
+  },
+};
+
+/**
+ * 응원 사건 열쇠: 사건 종류, 그 사건의 주인공(actor)이 손님이 고른 것이 아니면 뒤에 ':other' (상대 편이 앞섬, 남이 상자를 찾음 …).
+ * 자기 일이고 detail(GroupGame.cheerDetail)이 있으면 뒤에 ':detail' (보물찾기 'find:boot').
+ */
+export function cheerKey(type: string, actor: number, pick: number, detail: string | null = null): string {
+  if (actor !== pick) return `${type}:other`;
+  return detail === null ? type : `${type}:${detail}`;
+}
+
+/** 이 응원 열쇠에 맞는 후보: 열쇠가 꼭 맞는 후보, 없으면 사건 종류만 맞는 후보, 그것도 없으면 on이 없는 후보 (그것도 없으면 모두). */
+function cheerCands(cands: readonly Cand[], key: string | null): readonly Cand[] {
+  if (key !== null) {
+    const exact = cands.filter((x) => x.on?.includes(key) === true);
+    if (exact.length > 0) return exact;
+    const type = key.split(':')[0] ?? key;
+    const loose = cands.filter((x) => x.on?.includes(type) === true);
+    if (loose.length > 0) return loose;
+  }
+  const plain = cands.filter((x) => x.on === undefined);
+  return plain.length > 0 ? plain : cands;
+}
+
+/** 단체 놀이 진행 중 참가자 응원 반응 (짧고 작게). key = 응원 사건 열쇠 (cheerKey, 없으면 사건 말이 없는 후보). */
+export function groupCheerReaction(rng: Rng, booth: GroupBoothId, kind: 'lead' | 'behind', m: Monster, boost = 1, key: string | null = null): Reaction {
   const positive = kind === 'lead';
-  const cand = choose(rng, RACE_CHEER[kind], m, positive);
+  const cand = choose(rng, cheerCands(GROUP_CHEER[booth][kind], key), m, positive);
   return build(cand, Math.min(1.3, intensityOf(cand, m.traits, m.mood, positive, boost)));
+}
+
+export function raceCheerReaction(rng: Rng, kind: 'lead' | 'behind', m: Monster, boost = 1): Reaction {
+  return groupCheerReaction(rng, 'race', kind, m, boost);
+}
+
+/** 이 단체 놀이의 응원·구경(결과 뒤)·들썩임(진행 중) 반응 이름 (시험용). key를 주면 그 응원 열쇠에 나오는 응원만. */
+export function groupReactionLabels(booth: GroupBoothId, key?: { kind: 'lead' | 'behind'; key: string }): { cheer: string[]; spectate: string[]; buzz: string[] } {
+  const cheer = key === undefined ? [...GROUP_CHEER[booth].lead, ...GROUP_CHEER[booth].behind] : cheerCands(GROUP_CHEER[booth][key.kind], key.key);
+  return {
+    cheer: cheer.map((x) => x.label),
+    spectate: (Object.values(GROUP_SPECTATE[booth]) as (readonly Cand[])[]).flat().map((x) => x.label),
+    buzz: (Object.keys(BUZZ) as GroupBuzz[]).flatMap((k) => (GROUP_BUZZ[booth][k] ?? BUZZ[k]).map((x) => x.label)),
+  };
 }
 
 /** 간식을 받았을 때. 빈털터리였으면 웃으며 떠나는 큰 반응. */

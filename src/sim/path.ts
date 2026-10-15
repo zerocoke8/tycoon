@@ -105,9 +105,12 @@ const DIRECT_PX = 180;
 /**
  * 부스 그림이 서 있는 땅 (BOOTH_SPOTS.base = 그림 아래 가운데, 부스 그림 폭 약 400px·높이 약 350px의 안쪽).
  * 그 위를 걷는 손님은 그림 뒤로 숨으므로, 길의 첫 직선(지금 자리 → 첫 노드)과 마지막 직선(노드 → 목적지)이 가로지르지 않게 고른다.
+ * 바닥에 깔리는 부스 그림(BoothSpot.flat: 씨름 모래판·오리배 선착장)은 그 위를 걸어도 되니 뺀다.
  */
 const BOOTH_BODY = { halfW: 175, top: 300, bottom: 12 } as const;
-const BODIES = Object.values(BOOTH_SPOTS).map((s) => ({ x0: s.base.x - BOOTH_BODY.halfW, x1: s.base.x + BOOTH_BODY.halfW, y0: s.base.y - BOOTH_BODY.top, y1: s.base.y - BOOTH_BODY.bottom }));
+const BODIES = Object.values(BOOTH_SPOTS)
+  .filter((s) => s.flat !== true)
+  .map((s) => ({ x0: s.base.x - BOOTH_BODY.halfW, x1: s.base.x + BOOTH_BODY.halfW, y0: s.base.y - BOOTH_BODY.top, y1: s.base.y - BOOTH_BODY.bottom }));
 type Rect = (typeof BODIES)[number];
 
 function inRect(p: Pt, r: Rect): boolean {

@@ -1,11 +1,13 @@
 // 손님 카드: 손님을 누르면 아래에 뜬다. 지금 포즈 그림, 이름, 성격, 지갑, 기분, 이번 방문 기록, [응원하기] [간식 주기 ▾].
 // 열려 있는 동안 카메라가 손님을 따라가고(world.follow), 손님이 떠나면 닫힌다.
 
-import { GOODS, RACE, SPECIES, TRAITS, type GoodId } from '../data/defs.ts';
-import type { ActiveRound, Monster, MonsterId, RacerIndex, RaceState } from '../sim/types.ts';
+import { BOOTHS, GOODS, isGroupBooth, SPECIES, TRAITS, type GoodId } from '../data/defs.ts';
+import { entryOf, livePlay } from '../sim/group/index.ts';
+import type { Monster, MonsterId } from '../sim/types.ts';
 import { btn, fmt, h, setText } from './dom.ts';
+import { outcomeTag, pickInfo, roundWord } from './groupText.ts';
 import { icon } from './icons.ts';
-import { monsterStatus, moodInfo } from './labels.ts';
+import { groupPickName, monsterStatus, moodInfo } from './labels.ts';
 import type { MenuItem } from './menu.ts';
 import type { UiCtx } from './panel.ts';
 import { itemIcon, monsterPic, setMonsterPic } from './pics.ts';
@@ -14,13 +16,25 @@ import { Live, makeBar } from './widgets.ts';
 
 const SNACKS = (Object.keys(GOODS) as GoodId[]).filter((g) => GOODS[g].kind === 'snack');
 
-/** 경주장에서 이 손님이 응원하는 선수 (경주 참가자, 없으면 자리의 한판). 아니면 null. */
-function racerOf(m: Monster, race: RaceState | null, rounds: readonly (ActiveRound | null)[]): RacerIndex | null {
-  if (m.booth !== 'race') return null;
-  const e = race?.participants.find((x) => x.monster === m.id);
-  if (e !== undefined) return e.racer;
-  for (const r of rounds) if (r !== null && r.monster === m.id && r.outcome.detail.kind === 'race') return r.outcome.detail.racer;
-  return null;
+/**
+ * 단체 놀이 손님의 지금 할 일 한 줄 (아니면 null): '몬스터 경주장에서 한판 하는 중 · 달팽이 응원 · 1등!',
+ * 판에 끼지 못하고 자리에서 기다리면 '밀어내기 대결장에서 다음 판 기다리는 중'.
+ */
+function groupStatus(sim: UiCtx['sim'], m: Monster): string | null {
+  const b = m.booth;
+  if (b === null || !isGroupBooth(b)) return null;
+  const g = sim.state.booths[b].group;
+  const e = entryOf(g, m.id);
+  if (e === undefined) {
+    if (m.phase === 'playing' && g !== null && (g.phase === 'running' || g.phase === 'done')) return `${BOOTHS[b].name}에서 다음 ${roundWord(b)} 기다리는 중`;
+    return null;
+  }
+  const pick = b === 'race' || b === 'boat' ? `${pickInfo(b, e.pick).name} 응원` : groupPickName(b, e.pick, e.role);
+  const play = livePlay(g);
+  const i = g?.participants.indexOf(e) ?? -1;
+  const o = g?.phase === 'done' && play !== null ? play.outcomes[i] : undefined;
+  const res = o !== undefined && play !== null ? ` · ${outcomeTag(play, e, o).text}` : '';
+  return `${monsterStatus(m)} · ${pick}${res}`;
 }
 
 export class MonsterCard {
@@ -93,10 +107,8 @@ export class MonsterCard {
       const c = cur();
       if (c === undefined) return;
       setMonsterPic(portrait, c.species, c.pose, sp.name);
-      const rb = sim.state.booths.race;
-      const racer = racerOf(c, rb.race, rb.rounds);
-      const rn = racer === null ? undefined : RACE.racers[racer]?.name;
-      setText(status, rn === undefined ? monsterStatus(c) : `${monsterStatus(c)} · ${rn} 응원`);
+      // 단체 놀이: 고른 것 ('달팽이 응원', '홍 선수', '빨강 연' …)과 끝난 판의 결과, 판에 못 낀 손님은 기다림.
+      setText(status, groupStatus(sim, c) ?? monsterStatus(c));
       setText(wallet, fmt(c.wallet));
       setText(mats, `재료 ×${fmt(c.mats ?? 0)}`);
       matsBox.hidden = (c.mats ?? 0) <= 0;

@@ -212,6 +212,10 @@ interface FloatText {
   life: number;
   max: number;
   big: boolean;
+  /** 나타나기까지 남은 초. */
+  delay: number;
+  /** 더 올린 높이 (글자 px: 지도를 넓게 볼수록 글자와 같이 커진다). */
+  dy: number;
 }
 
 export type FloatKind = 'gain' | 'loss' | 'win';
@@ -388,8 +392,11 @@ export class FxLayer {
     }
   }
 
-  /** 떠오르는 글자 ('+12'). 둥근 굵은 글꼴, 흰 테두리. */
-  floatText(x: number, y: number, text: string, kind: FloatKind, big = false): void {
+  /**
+   * 떠오르는 글자 ('+12'). 둥근 굵은 글꼴, 흰 테두리.
+   * delay = 나타나기까지 초, dy = 더 올릴 높이 (글자 px, 한꺼번에 받는 단체 놀이 승자들의 글자가 겹치지 않게).
+   */
+  floatText(x: number, y: number, text: string, kind: FloatKind, big = false, delay = 0, dy = 0): void {
     let f: FloatText | undefined;
     for (const it of this.texts) {
       if (!it.active) {
@@ -406,7 +413,7 @@ export class FxLayer {
       });
       t.anchor.set(0.5, 1);
       this.textLayer.addChild(t);
-      f = { t, active: false, x: 0, y: 0, life: 0, max: 1, big: false };
+      f = { t, active: false, x: 0, y: 0, life: 0, max: 1, big: false, delay: 0, dy: 0 };
       this.texts.push(f);
     }
     f.active = true;
@@ -419,7 +426,10 @@ export class FxLayer {
     f.life = 0;
     f.max = big ? 1.9 : 1.35;
     f.big = big;
+    f.delay = delay;
+    f.dy = dy;
     f.t.alpha = 0;
+    f.t.visible = delay <= 0;
   }
 
   // ── 매 프레임 ──
@@ -470,6 +480,11 @@ export class FxLayer {
     for (let i = 0; i < this.texts.length; i++) {
       const f = this.texts[i] as FloatText;
       if (!f.active) continue;
+      if (f.delay > 0) {
+        f.delay -= dt;
+        continue;
+      }
+      f.t.visible = true;
       f.life += dt;
       const u = f.life / f.max;
       if (u >= 1) {
@@ -479,7 +494,7 @@ export class FxLayer {
       }
       const pop = u < 0.14 ? backOut(u / 0.14) : 1;
       const rise = 1 - (1 - Math.min(1, u * 1.3)) ** 2;
-      f.t.position.set(f.x, f.y - rise * (f.big ? 80 : 56) * ts);
+      f.t.position.set(f.x, f.y - (f.dy + rise * (f.big ? 80 : 56)) * ts);
       f.t.scale.set(pop * ts);
       f.t.alpha = u < 0.6 ? 1 : 1 - (u - 0.6) / 0.4;
     }

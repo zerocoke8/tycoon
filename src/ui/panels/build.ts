@@ -1,9 +1,8 @@
 // 짓기 탭: 건물 업그레이드와 놀이부스 열기·업그레이드 (부스는 구역마다 묶어서). 그리고 건물 하나만 보는 시트, 닫힌 부스 시트.
 
-import { BOOTH_IDS, BOOTHS, boothDef, BUILDINGS, type BoothId, type BuildingId } from '../../data/defs.ts';
+import { BOOTH_IDS, BOOTHS, boothDef, BUILDINGS, isGroupBooth, type BoothId, type BuildingId } from '../../data/defs.ts';
 import { BUILDING_SPOTS, DISTRICTS } from '../../data/map.ts';
 import type { Cost, Result } from '../../sim/api.ts';
-import { josa } from '../../sim/text.ts';
 import { btn, h } from '../dom.ts';
 import { icon } from '../icons.ts';
 import { boothEffect, boothLockText, boothRolesText, boothRule, boothsIn, BUILDING_IDS, buildingEffect, buildingMaxLevel, DISTRICT_ORDER, hallUnlocks } from '../labels.ts';
@@ -22,6 +21,11 @@ function costAction(ctx: UiCtx, live: Live, cost: Cost | null, label: string, ru
   const b = btn('small', label, () => ctx.act(run()));
   live.add(() => b.classList.toggle('dim', locked || !ctx.sim.canAfford(cost)));
   return h('div', 'mpv-act', costChips(ctx.sim, cost, live), b);
+}
+
+/** 단체 놀이 꼬리표: 손님 여럿이 한 판을 같이 하고, 지도에서도 판이 보인다. */
+function groupTag(): HTMLElement {
+  return h('span', 'mpv-tag group', '여럿이 한판');
 }
 
 /** 열린 부스가 쉬는 까닭: '진행자가 없어 …' / 경주장은 비어 있는 꼭 필요한 자리 ('출발 신호·해설자 자리가 비어 …'). */
@@ -101,7 +105,13 @@ export class BuildPanel extends BasePanel {
       e.stopPropagation();
       this.ctx.showBooth(b);
     });
-    const body = h('div', 'mpv-grow', h('div', 'mpv-title', d.name, bs.unlocked ? h('span', 'mpv-lv', `Lv.${bs.level}/${max}`) : h('span', 'mpv-lv', '닫힘')), h('div', 'mpv-desc', d.desc));
+    const group = isGroupBooth(b);
+    const body = h(
+      'div',
+      'mpv-grow',
+      h('div', 'mpv-title', d.name, bs.unlocked ? h('span', 'mpv-lv', `Lv.${bs.level}/${max}`) : h('span', 'mpv-lv', '닫힘'), group ? groupTag() : null),
+      h('div', 'mpv-desc', d.desc),
+    );
     const roles = boothRolesText(b);
     const rule = boothRule(b);
     let lock: string | null = null;
@@ -110,8 +120,9 @@ export class BuildPanel extends BasePanel {
       if (lock !== null) body.append(h('div', 'mpv-lock', lock));
       const first = boothEffect(b, 1);
       if (first) body.append(effLine('열면', first, true));
+      // 단체 놀이는 진행자 자리와 놀이 규칙을 같이 (어떤 판인지 열기 전에 알게).
       if (roles !== null) body.append(effLine('진행자', roles));
-      else if (rule !== null) body.append(effLine('규칙', rule));
+      if (rule !== null && (roles === null || group)) body.append(effLine(group ? '놀이' : '규칙', rule));
       body.append(costAction(this.ctx, this.live, this.sim.boothUnlockCost(b), '열기', () => this.sim.unlockBooth(b), '열 수 없어요', lock !== null));
     } else {
       const now = boothEffect(b, bs.level);
@@ -205,11 +216,11 @@ export class LockedBoothPanel extends BasePanel {
         h(
           'div',
           'mpv-grow',
-          h('div', 'mpv-title sm', d.desc),
+          h('div', 'mpv-title sm', d.desc, isGroupBooth(b) ? groupTag() : null),
           lock !== null ? h('div', 'mpv-lock', lock) : h('div', 'mpv-desc', roles !== null ? '아직 닫혀 있어요. 열고 진행자 자리를 채우면 손님이 찾아와요.' : '아직 닫혀 있어요. 열고 진행자를 세우면 손님이 찾아와요.'),
           first ? effLine('열면', first, true) : null,
           roles !== null ? effLine('진행자', roles) : null,
-          rule !== null ? effLine('규칙', rule) : null,
+          rule !== null ? effLine(isGroupBooth(b) ? '놀이' : '규칙', rule) : null,
         ),
       ),
       secHead('열기'),

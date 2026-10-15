@@ -18,9 +18,16 @@ export const FLOOR_LINE: Record<BoothId, number> = {
   race: 0.705,
   claw: 0.842,
   pouch: 0.78,
+  // 셋째 묶음 (바깥 옆모습). 씨름 = 짚단 담 아래 끝, 줄다리기 = 풀밭 위 끝, 보물찾기 = 흙 마당 위 끝, 연 = 언덕 마루.
+  // 오리배는 장면(boat.ts)이 bg_boat를 크게 깔고 물을 코드로 그려 이 값을 쓰지 않는다 (항아리 자리만: 그림의 물가 선은 0.446).
+  ssireum: 0.64,
+  boat: 0.62,
+  kite: 0.7,
+  tug: 0.613,
+  dig: 0.518,
 };
 /** 확대 배경 위쪽 차양의 아래 끝 (위에서부터 비율, 0 = 차양 없음). 넓적한 패널에서 배경 위를 자르면 차양 띠를 패널 위에 따로 붙인다. */
-export const AWNING_LINE: Record<BoothId, number> = { slot: 0.118, oddeven: 0.13, cups: 0.108, darts: 0.1, wheel: 0.098, duck: 0.115, ring: 0.105, race: 0, claw: 0.08, pouch: 0.09 };
+export const AWNING_LINE: Record<BoothId, number> = { slot: 0.118, oddeven: 0.13, cups: 0.108, darts: 0.1, wheel: 0.098, duck: 0.115, ring: 0.105, race: 0, claw: 0.08, pouch: 0.09, ssireum: 0, boat: 0, kite: 0, tug: 0, dig: 0 };
 /** 배경 그림이 없을 때 그리는 벽 색. */
 export const WALL_COLOR: Record<BoothId, number> = {
   slot: 0xf6e8cf,
@@ -33,6 +40,11 @@ export const WALL_COLOR: Record<BoothId, number> = {
   race: 0xcfe6f4,
   claw: 0xdfe1f0,
   pouch: 0xf3ddd0,
+  ssireum: 0xf3e3c3,
+  boat: 0xcfe6f4,
+  kite: 0xd6ecfa,
+  tug: 0xe8f0d0,
+  dig: 0xe9dcc4,
 };
 
 /**

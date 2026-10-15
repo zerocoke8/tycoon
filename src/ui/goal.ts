@@ -1,13 +1,16 @@
 // 다음 목표 칩 (HUD 아래)과 아래 탭의 점 배지: 처음 하는 사람이 무엇을 할지 알게.
 // 목표 차례: 손님 응원하기 → 부스 구경하기 → 새로 열린 구역 보러 가기 → 진행자 자리가 비어 쉬는 부스 →
+// 아직 구경하지 않은 단체 놀이의 판이 모이거나 한창이면 지도에서 구경하기 →
 // 지금 살 수 있는 가장 싼 짓기 → 열린 구역의 다음 부스(귀한 물건은 이미 모았을 때) → 다음 마을회관까지 모은 정도 (그 레벨에 열리는 구역).
-// 칩을 누르면 그 화면을 연다. 처음 두 단계를 한 적이 있는지는 이 브라우저에 기억한다 (게임 저장과 따로, 없어도 된다).
+// 칩을 누르면 그 화면을 연다. 처음 두 단계와 구경한 단체 놀이는 이 브라우저에 기억한다 (게임 저장과 따로, 없어도 된다).
 
-import { BOOTH_IDS, BOOTHS, boothDef, BUILDINGS, type BoothId, type BuildingId, type MaterialId, type PreciousId } from '../data/defs.ts';
+import { BOOTH_IDS, BOOTHS, boothDef, BUILDINGS, GROUP_BOOTHS, type BoothId, type BuildingId, type GroupBoothId, type MaterialId, type PreciousId } from '../data/defs.ts';
 import { BOOTH_SPOTS, DISTRICTS, type DistrictId } from '../data/map.ts';
 import type { Cost } from '../sim/api.ts';
 import { josa } from '../sim/text.ts';
 import { fmt, h, setText } from './dom.ts';
+import { groupGame } from '../sim/group/index.ts';
+import { groupWatchBox, groupWatchZoom, roundWord, startWord } from './groupText.ts';
 import { boothShort, boothsIn, boothTiny, BUILDING_IDS, districtAtHall, itemName } from './labels.ts';
 import type { TabId, UiCtx } from './panel.ts';
 import { itemIcon } from './pics.ts';
@@ -19,14 +22,16 @@ const FRESH_MS = 90_000;
 interface Seen {
   cheer: boolean;
   booth: boolean;
+  /** 구경한 단체 놀이 (부스 패널을 열었거나 목표 칩으로 지도에서 보았다). */
+  watched: string[];
 }
 
 function loadSeen(): Seen {
   try {
     const raw = JSON.parse(localStorage.getItem(HINT_KEY) ?? '{}') as Partial<Seen>;
-    return { cheer: raw.cheer === true, booth: raw.booth === true };
+    return { cheer: raw.cheer === true, booth: raw.booth === true, watched: Array.isArray(raw.watched) ? raw.watched.filter((x): x is string => typeof x === 'string') : [] };
   } catch {
-    return { cheer: false, booth: false };
+    return { cheer: false, booth: false, watched: [] };
   }
 }
 
@@ -67,9 +72,20 @@ export class GoalChip {
   }
 
   /** 처음 두 단계를 했다 (응원·부스 구경). */
-  mark(k: keyof Seen): void {
+  mark(k: 'cheer' | 'booth'): void {
     if (this.seen[k]) return;
     this.seen[k] = true;
+    this.store();
+  }
+
+  /** 단체 놀이 하나를 구경했다 (부스 패널을 열었다). */
+  markWatched(b: BoothId): void {
+    if (this.seen.watched.includes(b)) return;
+    this.seen.watched.push(b);
+    this.store();
+  }
+
+  private store(): void {
     try {
       localStorage.setItem(HINT_KEY, JSON.stringify(this.seen));
     } catch {
@@ -132,6 +148,26 @@ export class GoalChip {
       return;
     }
 
+    // 아직 구경하지 않은 단체 놀이의 판이 모이거나 한창이면: 지도에서 구경하기 (밖에서 보는 재미).
+    const watch = this.toWatch();
+    if (watch !== null) {
+      const g = st.booths[watch].group;
+      const ph = g?.phase;
+      const name = BOOTHS[watch].name;
+      const R = roundWord(watch);
+      // '오리배 경주'처럼 이름이 판 말로 끝나면 한 번만 ('오리배 경주가 곧 출발해요!').
+      const what = name.endsWith(R) ? name : `${name} ${R}`;
+      // 곧 시작은 출발 조건이 맞을 때만 (밀어내기 선수가 하나뿐이면 '손님이 모여요').
+      const soon = g !== null && g !== undefined && ph === 'gathering' && groupGame(watch).readiness(g.participants, g.elapsed) === 'soon';
+      const text = ph === 'running' ? `${josa(what, '이', '가')} 한창이에요! 보러 가기` : soon ? `${josa(what, '이', '가')} 곧 ${startWord(watch)}해요! 보러 가기` : `${name}에 손님이 모여요! 보러 가기`;
+      this.show(`watch:${watch}:${ph}:${soon ? 1 : 0}`, text, null, () => {
+        this.markWatched(watch);
+        this.ctx.closeAll();
+        this.ctx.hooks.world.focusOn(groupWatchBox(watch).c, groupWatchZoom(watch, window.innerWidth, window.innerHeight));
+      });
+      return;
+    }
+
     const buy = this.cheapest();
     if (buy !== null) {
       this.show(`buy:${buy.label}`, buy.label, null, () => this.ctx.openTab('build'));
@@ -152,6 +188,21 @@ export class GoalChip {
       return;
     }
     this.hide();
+  }
+
+  /**
+   * 열려 손님을 받는 단체 놀이 가운데 아직 구경하지 않았고 지금 판이 모이거나 한창인 것 (없으면 null).
+   * 경주장은 셋째 묶음 전부터 있던 놀이라 뺀다 (이미 하던 사람에게 다시 권하지 않게).
+   */
+  private toWatch(): GroupBoothId | null {
+    const sim = this.ctx.sim;
+    const st = sim.state;
+    for (const b of GROUP_BOOTHS) {
+      if (b === 'race' || this.seen.watched.includes(b) || !sim.boothOpen(b)) continue;
+      const ph = st.booths[b].group?.phase;
+      if (ph === 'running' || (ph === 'gathering' && (st.booths[b].group?.participants.length ?? 0) > 0)) return b;
+    }
+    return null;
   }
 
   /** 열린 구역에서 아직 닫힌 부스 가운데, 귀한 물건은 다 있는 가장 싼 것 (없으면 null). */

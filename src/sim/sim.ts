@@ -5,21 +5,21 @@
 
 import { Emitter } from '../core/events.ts';
 import { Rng } from '../core/rng.ts';
-import { BOOTHS, BOOTH_IDS, boothDef, MATERIALS, MOOD, PRECIOUS, RACE, RECIPES, SIM, SPECIES, SPECIES_IDS, STAFF_STAT_NAMES, type BoothId, type BuildingId, type GoodId, type MaterialId, type OutcomeTier, type PreciousId, type SpeciesId } from '../data/defs.ts';
-import { BOOTH_SPOTS, BUILDING_SPOTS, DISTRICTS, NODES, RACE_TRACK, REST_SPOTS, trackPoint, type DistrictId, type Pt } from '../data/map.ts';
+import { BOOTHS, BOOTH_IDS, boothDef, GROUP_RULES, isGroupBooth, MATERIALS, MOOD, PRECIOUS, RECIPES, SIM, SPECIES, SPECIES_IDS, STAFF_STAT_NAMES, type BoothId, type BuildingId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type PreciousId, type SpeciesId } from '../data/defs.ts';
+import { BOOTH_SPOTS, BUILDING_SPOTS, DISTRICTS, NODES, REST_SPOTS, type DistrictId, type Pt } from '../data/map.ts';
 import type { Cost, Result, SimApi } from './api.ts';
 import * as B from './booths.ts';
 import { addMaterial, canAfford, costOf, fountainMoodPerMin, gateSpawnSec, goodDef, hallVisitors, missingReason, nextBuildingCost, officeCandidates, pay, warehouseCap, workshopSlots, workshopSpeed } from './economy.ts';
 import { decideOutcome } from './games.ts';
-import { betFraction, createMonster, displayName, faceToward, nameSubject, stepMove } from './monsters.ts';
+import { betFraction, createMonster, displayName, faceToward, nameSubject, speedOf, stepMove } from './monsters.ts';
 import { dist, distancesFrom, nearestNodes, openNodes, pointOpen, route } from './path.ts';
-import { generateRace, idleRace, pickRacer, raceGatherSec, raceOutcome, raceStandings, raceStartSoonSec } from './race.ts';
-import { moodDelta, pickReaction, raceCheerReaction, raceSpectateReaction, snackReaction, spectateReaction } from './reactions.ts';
+import { groupGame, groupGatherSec, groupStartSoonSec, idleGroup } from './group/index.ts';
+import { cheerKey, groupBuzzReaction, groupCheerReaction, groupSpectateReaction, moodDelta, pickReaction, snackReaction, spectateReaction } from './reactions.ts';
 import { clearSave, newGame, saveGame } from './save.ts';
 import { fillCandidates, hirePost, levelUpCost, presetCandidates, presetPost, raiseStat, suits } from './staff.ts';
 import { josa } from './text.ts';
 import { TUNE } from './tuning.ts';
-import type { ActiveRound, GameState, Monster, MonsterId, MonsterPhase, Pose, RaceCheer, RaceResult, RaceState, RacerIndex, Regular, SimBus, SimEvents, Staff, StaffId, StaffPost } from './types.ts';
+import type { ActiveRound, GameState, GroupBuzz, GroupCheer, GroupEntry, GroupPlay, GroupState, Monster, MonsterId, MonsterPhase, Pose, Regular, RoundOutcome, SimBus, SimEvents, Staff, StaffId, StaffPost } from './types.ts';
 
 export { clearSave, loadGame, newGame, saveGame } from './save.ts';
 
@@ -30,7 +30,7 @@ const clampMood = (v: number): number => Math.max(0, Math.min(100, v));
 const CATCHUP_TOAST_SEC = 20;
 
 /** catchUp 동안 내지 않는 연출 이벤트 (끝나고 coinsChanged·itemsChanged·요약 토스트를 한 번씩 낸다). */
-const QUIET_EVENTS: ReadonlySet<string> = new Set(['monsterReact', 'monsterSpectate', 'monsterCheered', 'roundStarted', 'roundFinished', 'potFestival', 'raceStarted', 'raceFinished', 'raceJoined', 'raceProgress', 'coinsChanged', 'itemsChanged', 'toast']);
+const QUIET_EVENTS: ReadonlySet<string> = new Set(['monsterReact', 'monsterSpectate', 'monsterCheered', 'roundStarted', 'roundFinished', 'potFestival', 'groupJoined', 'groupStarted', 'groupEvent', 'groupFinished', 'groupCancelled', 'coinsChanged', 'itemsChanged', 'toast']);
 
 const samePost = (a: StaffPost | null, b: StaffPost | null): boolean => (a === null || b === null ? a === b : a.booth === b.booth && a.role === b.role);
 
@@ -316,8 +316,8 @@ export class Sim implements SimApi {
           this.toast(`${BOOTHS[b].name}의 ${name} 효과가 끝났어요.`, 'info');
         }
       }
-      // 경주장의 한판은 경주 하나가 같이 끝낸다 (tickRace).
-      if (bs.race !== null) continue;
+      // 단체 놀이의 한판은 판 하나가 같이 끝낸다 (tickGroups).
+      if (bs.group !== null) continue;
       for (let i = 0; i < bs.rounds.length; i++) {
         const r = bs.rounds[i];
         if (r === null || r === undefined) continue;
@@ -325,7 +325,7 @@ export class Sim implements SimApi {
         if (r.elapsed >= r.duration) this.finishRound(b, i, r);
       }
     }
-    this.tickRace(dt);
+    this.tickGroups(dt);
   }
 
   // ── 손님 ────────────────────────────────────────────────────────────
@@ -393,9 +393,9 @@ export class Sim implements SimApi {
         this.seatArrive(m);
         break;
       case 'playing': {
-        // 경주장: 참가해 경주를 기다리거나 보는 중, 아니면 다음 경주에 참가할 때를 본다.
-        if (m.booth !== null && st.booths[m.booth].race !== null) {
-          this.raceWait(m);
+        // 단체 놀이: 참가해 판을 기다리거나 보는 중, 아니면 다음 판에 참가할 때를 본다.
+        if (m.booth !== null && st.booths[m.booth].group !== null) {
+          this.groupWait(m);
           break;
         }
         // 안전망: 자리에 한판이 없으면 다시 시작하거나 다른 걸 한다.
@@ -496,12 +496,12 @@ export class Sim implements SimApi {
     const rng = this.rng;
     const busy = BOOTH_IDS.filter((b) => B.boothOpen(st, b) && st.booths[b].seats.some((id) => id !== null && id !== m.id));
     if (busy.length === 0) return false;
-    const b = rng.pick(busy);
+    // 진행 중인 단체 놀이(밖에서 봐도 재미있는 판)를 더 자주 보러 간다.
+    const b = rng.weighted(busy.map((x) => [x, st.booths[x].group?.phase === 'running' || st.booths[x].group?.phase === 'gathering' ? TUNE.groupWatchWeight : 1] as const));
     let at: Pt;
-    if (st.booths[b].race !== null) {
-      // 경주장: 경주로 바깥 울타리 쪽 (아래 직선·오른쪽 굽이)에서 구경.
-      const p = trackPoint(RACE_TRACK.lanes + 1 + rng.range(0, 1), rng.range(0.12, 0.5));
-      at = { x: p.x, y: p.y };
+    if (st.booths[b].group !== null && isGroupBooth(b)) {
+      // 단체 놀이: 놀이마다 구경하는 자리 (경주장은 경주로 바깥 울타리 쪽).
+      at = groupGame(b).watchPoint(rng);
     } else {
       const seat = B.seatPt(b, 0);
       const base = BOOTH_SPOTS[b].base;
@@ -539,7 +539,7 @@ export class Sim implements SimApi {
   private detach(m: Monster): void {
     for (const b of BOOTH_IDS) {
       const bs = this.state.booths[b];
-      if (bs.race !== null) this.leaveRace(b, m);
+      if (bs.group !== null) this.leaveGroup(b, m);
       const qi = bs.queue.indexOf(m.id);
       if (qi >= 0) {
         bs.queue.splice(qi, 1);
@@ -600,12 +600,25 @@ export class Sim implements SimApi {
     }
     B.fitSeats(st, b);
     const n = B.boothSeats(st, b);
+    // 단체 놀이는 놀이 모듈이 자리를 고른다 (씨름 선수·구경, 줄다리기 적은 편 …). 그 밖은 앞자리부터.
+    const game = bs.group !== null && isGroupBooth(b) ? groupGame(b) : null;
     let moved = false;
-    for (let i = 0; i < n; i++) {
-      if ((bs.seats[i] ?? null) !== null) continue;
+    for (;;) {
+      const free: number[] = [];
+      for (let i = 0; i < n; i++) if ((bs.seats[i] ?? null) === null) free.push(i);
+      if (free.length === 0) break;
       let m: Monster | undefined;
       while (m === undefined && bs.queue.length > 0) m = this.monster(bs.queue.shift() as MonsterId);
       if (m === undefined) break;
+      let i = free[0] as number;
+      if (game?.seatFor !== undefined) {
+        const seated = Array.from({ length: n }, (_, k) => {
+          const id = bs.seats[k] ?? null;
+          return id === null ? null : (this.monster(id) ?? null);
+        });
+        const want = game.seatFor(this.rng, m, free, seated);
+        if (free.includes(want)) i = want;
+      }
       bs.seats[i] = m.id;
       m.seat = i;
       m.booth = b;
@@ -630,9 +643,9 @@ export class Sim implements SimApi {
     this.play(b, i, m);
   }
 
-  /** 자리에서 한판: 경주장은 경주에 참가 (또는 다음 경주를 기다림), 그 밖은 바로 한판. */
+  /** 자리에서 한판: 단체 놀이는 판에 참가 (또는 다음 판을 기다림), 그 밖은 바로 한판. */
   private play(b: BoothId, seat: number, m: Monster): void {
-    if (this.state.booths[b].race !== null) this.joinRace(b, seat, m);
+    if (this.state.booths[b].group !== null && isGroupBooth(b)) this.joinGroup(b, seat, m);
     else this.startRound(b, seat, m);
   }
 
@@ -674,8 +687,11 @@ export class Sim implements SimApi {
     this.emit('roundStarted', { booth: b, seat, round });
   }
 
-  /** 한판 끝: 지급·기분·반응. crowd = 근처 손님이 따라 반응 (경주장은 경주 하나에 한 번, raceCrowd). */
-  private finishRound(b: BoothId, seat: number, r: ActiveRound, crowd = true): void {
+  /**
+   * 한판 끝: 지급·기분·반응. crowd = 근처 손님이 따라 반응 (단체 놀이는 판 하나에 한 번, groupCrowd).
+   * settled = 이미 항아리에서 뺀 지급 (단체 놀이는 이긴 손님을 한꺼번에 나눈다: finishGroup).
+   */
+  private finishRound(b: BoothId, seat: number, r: ActiveRound, crowd = true, settled: { payout: number; festival: boolean } | null = null): void {
     const st = this.state;
     const rng = this.rng;
     const bs = st.booths[b];
@@ -684,9 +700,9 @@ export class Sim implements SimApi {
     if (m === undefined) return;
     const tier = r.outcome.tier;
     const won = tier === 'win' || tier === 'jackpot';
-    let payout = 0;
-    let festival = false;
-    if (r.outcome.multiplier > 0) {
+    let payout = settled?.payout ?? 0;
+    let festival = settled?.festival ?? false;
+    if (settled === null && r.outcome.multiplier > 0) {
       // 항아리 축제는 이긴 손님만 (오리 낚시·복주머니의 돌려받기·아까운 판은 보통 지급).
       if (won && bs.pot >= B.boothPotCap(st, b)) {
         // 항아리 축제: 가득 찬 항아리를 통째로. 부스가 새 항아리를 채운다.
@@ -727,7 +743,7 @@ export class Sim implements SimApi {
     if (d.kind === 'pouch' && d.content === 'jackpot') m.surePrecious = true;
     const shown: OutcomeTier = festival ? 'jackpot' : tier;
     // 축제로 받은 대박은 부스 대박 반응('종이다 종!' 등)이 아니라 공용 대박 반응으로.
-    const reaction = pickReaction(rng, broke ? 'broke' : shown, m, cheer?.reactionBoost ?? 1, festival && tier !== 'jackpot' ? null : b);
+    const reaction = pickReaction(rng, broke ? 'broke' : shown, m, cheer?.reactionBoost ?? 1, festival && tier !== 'jackpot' ? null : b, d);
     this.setPhase(m, 'reacting');
     m.pose = reaction.pose;
     m.poseTime = 0;
@@ -759,7 +775,7 @@ export class Sim implements SimApi {
       if (wasAgony) p += pa.afterNearMiss;
       if (st.booths[b].queue.length > 0) p += pa.queue;
       if (m.traits.includes('bold')) p += pa.bold;
-      if (st.booths[b].race !== null) p += pa.race;
+      if (st.booths[b].group !== null) p += pa.group;
       if (this.rng.chance(p)) {
         this.play(b, seat, m);
         return;
@@ -794,254 +810,372 @@ export class Sim implements SimApi {
     }
   }
 
-  // ── 몬스터 경주장 (손님 여럿이 경주 하나) ────────────────────────────
-  // 관중석에 앉은 손님이 선수를 골라 참가 (gathering) → 출발 (running, 결과를 이때 정하고 참가자마다 한판) →
-  // 모든 선수가 들어오면 참가자가 한꺼번에 반응 (done) → idle. 상태는 BoothState.race (types.ts RaceState).
+  // ── 단체 놀이 (손님 여럿이 한 판: 경주장·밀어내기·오리배·연날리기·줄다리기·보물찾기) ─────────
+  // 줄 맨 앞 손님이 자리를 고른다 (GroupGame.seatFor, pump) → 자리에 앉은 손님이 고르고 건다 (gathering, 출발 조건이 안 맞으면 stepIn) →
+  // 출발 (running, 판을 이때 정하고 참가자마다 한판, 근처를 걷던 손님이 구경하러 온다: drawCrowd) → 사건마다 참가자 응원과 근처 구경꾼 들썩임 (groupBuzz) →
+  // 끝나면 참가자가 한꺼번에 반응 (done), 근처 손님 구경 반응 (groupCrowd) → idle.
+  // 상태는 BoothState.group (types.ts GroupState), 놀이마다의 규칙은 sim/group/<booth>.ts.
 
-  /** 관중석 자리에 앉은 손님: 경주가 쉬거나 모이는 중이면 선수를 골라 참가, 달리는 중·결과 중이면 다음 경주를 기다린다. */
-  private joinRace(b: BoothId, seat: number, m: Monster): void {
+  /** 단체 놀이 부스의 상태 (그 밖은 null). */
+  private groupOf(b: BoothId): { g: GroupState; booth: GroupBoothId } | null {
+    const g = this.state.booths[b].group;
+    return g !== null && isGroupBooth(b) ? { g, booth: b } : null;
+  }
+
+  /** 자리에 앉은 손님: 판이 쉬거나 모이는 중이면 골라서 참가, 진행 중·결과 중이면 다음 판을 기다린다. */
+  private joinGroup(b: GroupBoothId, seat: number, m: Monster): void {
     const st = this.state;
     const bs = st.booths[b];
-    const race = (bs.race ??= idleRace());
+    const g = (bs.group ??= idleGroup());
+    const game = groupGame(b);
     if (m.phase !== 'playing') {
       this.setPhase(m, 'playing');
       m.pose = 'base';
       m.poseTime = 0;
     }
     m.path = [];
-    faceToward(m, RACE_TRACK.finish.x);
-    if (race.phase === 'running' || race.phase === 'done') return;
-    if (race.participants.some((e) => e.monster === m.id)) return;
+    faceToward(m, game.face(seat).x);
+    if (g.phase === 'running' || g.phase === 'done') return;
+    if (g.participants.some((e) => e.monster === m.id)) return;
     const fee = B.boothFee(st, b);
-    m.wallet -= fee;
-    this.earn(fee, B.seatPt(b, seat));
+    // 지난 판에 편 맞추기로 빠진 손님은 이미 낸 참가비로 (줄다리기 lineup, startGroup).
+    const pre = g.prepaid?.indexOf(m.id) ?? -1;
+    if (pre >= 0) g.prepaid?.splice(pre, 1);
+    else {
+      m.wallet -= fee;
+      this.earn(fee, B.seatPt(b, seat));
+    }
     const bet = Math.max(1, Math.min(m.wallet, Math.round(m.wallet * betFraction(this.rng, m.traits) * (boothDef(b).betScale ?? 1))));
     m.wallet -= bet;
     bs.pot += bet;
-    m.stats.spent += fee + bet;
+    m.stats.spent += (pre >= 0 ? 0 : fee) + bet;
     m.firstPlay ??= st.time;
-    const racer = pickRacer(this.rng, m.species);
-    race.participants.push({ monster: m.id, seat, racer, bet, fee });
+    const { pick, role } = game.join(this.rng, seat, m, g.participants, (id) => this.monster(id));
+    g.participants.push({ monster: m.id, seat, pick, role, bet, fee });
     const pace = B.boothStat(st, b, 'pace');
-    if (race.phase === 'idle') {
-      race.phase = 'gathering';
-      race.countdown = raceGatherSec(pace);
-      race.elapsed = 0;
-      race.duration = 0;
-      race.result = null;
+    if (g.phase === 'idle') {
+      g.phase = 'gathering';
+      g.countdown = groupGatherSec(b, pace);
+      g.elapsed = 0;
+      g.duration = 0;
+      g.play = null;
     }
-    if (race.participants.length >= RACE.minRunners) race.countdown = Math.min(race.countdown, raceStartSoonSec(pace));
-    if (race.participants.length >= B.boothSeats(st, b)) race.countdown = Math.min(race.countdown, RACE.fullStartSec);
-    this.emit('raceJoined', { booth: b, monster: m.id, seat, racer, bet });
+    if (game.readiness(g.participants, g.elapsed) === 'soon') g.countdown = Math.min(g.countdown, groupStartSoonSec(b, pace));
+    if (g.participants.length >= B.boothSeats(st, b)) g.countdown = Math.min(g.countdown, GROUP_RULES[b].fullStartSec);
+    this.emit('groupJoined', { booth: b, monster: m.id, seat, pick, role, bet });
   }
 
-  /** 자리에 앉아 있는 경주장 손님 (phase 'playing'): 이번 경주의 참가자면 기다리고, 아니면 참가할 수 있을 때 참가. */
-  private raceWait(m: Monster): void {
+  /** 자리에 앉아 있는 단체 놀이 손님 (phase 'playing'): 이번 판의 참가자면 기다리고, 아니면 참가할 수 있을 때 참가. */
+  private groupWait(m: Monster): void {
     const b = m.booth;
-    const race = b === null ? null : this.state.booths[b].race;
-    if (race !== null && race.phase !== 'idle' && race.participants.some((e) => e.monster === m.id)) return;
+    const g = b === null ? null : this.state.booths[b].group;
+    if (g !== null && g.phase !== 'idle' && g.participants.some((e) => e.monster === m.id)) {
+      // 참가자는 자기 자리의 놀이 쪽을 본다 (구경 자리에서 모래판으로 나서 걸어온 손님도).
+      if (b !== null && m.seat !== null && isGroupBooth(b)) faceToward(m, groupGame(b).face(m.seat).x);
+      return;
+    }
+    // 판에 끼지 못하고 (줄다리기 편 맞추기) 너무 오래 기다렸다: 다른 걸 하러 간다.
+    if (g !== null && (g.phase === 'running' || g.phase === 'done') && (m.phaseTime ?? 0) > TUNE.groupBenchGiveUpSec) {
+      m.mood = clampMood(m.mood + TUNE.queueGiveUpMood);
+      this.decide(m);
+      return;
+    }
     this.seatArrive(m);
   }
 
-  /** 모이는 중에 자리를 뜬 참가자: 참가를 무르고 건 코인을 돌려준다 (참가비는 마을에 남는다). 달리는 중이면 결과만 못 받는다. */
-  private leaveRace(b: BoothId, m: Monster): void {
+  /** 건 코인을 항아리에서 돌려준다 (참가비는 마을에 남는다). */
+  private refundBet(b: BoothId, e: GroupEntry): void {
     const bs = this.state.booths[b];
-    const race = bs.race;
-    if (race === null || race.phase !== 'gathering') return;
-    const i = race.participants.findIndex((e) => e.monster === m.id);
-    const e = race.participants[i];
-    if (e === undefined) return;
-    race.participants.splice(i, 1);
+    const m = this.monster(e.monster);
+    if (m === undefined) return;
     const back = Math.min(e.bet, bs.pot);
     bs.pot -= back;
     m.wallet += back;
     m.stats.spent = Math.max(0, m.stats.spent - back);
   }
 
-  /** 출발 전에 경주를 접는다: 참가자마다 건 코인을 돌려준다 (참가비는 마을에 남는다, leaveRace와 같이). */
-  private cancelRace(b: BoothId, race: RaceState): void {
-    const bs = this.state.booths[b];
-    for (const e of race.participants) {
+  /** 모이는 중에 자리를 뜬 참가자: 참가를 무르고 건 코인을 돌려준다. 진행 중이면 결과만 못 받는다. */
+  private leaveGroup(b: BoothId, m: Monster): void {
+    const g = this.state.booths[b].group;
+    if (g === null || g.phase !== 'gathering') return;
+    const i = g.participants.findIndex((e) => e.monster === m.id);
+    const e = g.participants[i];
+    if (e === undefined) return;
+    g.participants.splice(i, 1);
+    this.refundBet(b, e);
+  }
+
+  /** 출발 전에 판을 접는다: 참가자마다 건 코인을 돌려준다 (leaveGroup과 같이). timeout이면 앉아 있던 참가자는 다른 걸 하러 간다. */
+  private cancelGroup(b: GroupBoothId, g: GroupState, reason: 'closed' | 'timeout'): void {
+    const left = g.participants.slice();
+    for (const e of left) this.refundBet(b, e);
+    this.resetGroup(g);
+    this.emit('groupCancelled', { booth: b, reason });
+    if (reason !== 'timeout') return;
+    for (const e of left) {
       const m = this.monster(e.monster);
-      if (m === undefined) continue;
-      const back = Math.min(e.bet, bs.pot);
-      bs.pot -= back;
-      m.wallet += back;
-      m.stats.spent = Math.max(0, m.stats.spent - back);
+      if (m !== undefined && m.booth === b && m.seat === e.seat && m.phase === 'playing') this.decide(m);
     }
-    this.resetRace(race);
   }
 
-  private resetRace(race: RaceState): void {
-    race.phase = 'idle';
-    race.countdown = 0;
-    race.elapsed = 0;
-    race.duration = 0;
-    race.participants = [];
-    race.result = null;
-    delete race.leader;
-    delete race.cheerAt;
+  private resetGroup(g: GroupState): void {
+    g.phase = 'idle';
+    g.countdown = 0;
+    g.elapsed = 0;
+    g.duration = 0;
+    g.participants = [];
+    g.play = null;
+    delete g.mark;
+    delete g.markAt;
+    delete g.cursor;
   }
 
-  private tickRace(dt: number): void {
+  private tickGroups(dt: number): void {
     for (const b of BOOTH_IDS) {
-      const race = this.state.booths[b].race;
-      if (race === null) continue;
-      switch (race.phase) {
+      const gb = this.groupOf(b);
+      if (gb === null) continue;
+      const { g, booth } = gb;
+      switch (g.phase) {
         case 'idle':
-          if (race.participants.length > 0) race.participants = [];
+          if (g.participants.length > 0) g.participants = [];
           break;
-        case 'gathering':
-          if (race.participants.length === 0) {
-            this.resetRace(race);
+        case 'gathering': {
+          if (g.participants.length === 0) {
+            this.resetGroup(g);
             break;
           }
-          // 모이는 중에 출발 신호·해설자가 빠졌다: 건 코인을 돌려주고 경주를 접는다 (앉은 손님은 다른 걸 하러 간다).
+          // 모이는 중에 꼭 있어야 하는 진행자가 빠졌다: 건 코인을 돌려주고 판을 접는다 (앉은 손님은 다른 걸 하러 간다).
           if (!B.boothOpen(this.state, b)) {
-            this.cancelRace(b, race);
+            this.cancelGroup(booth, g, 'closed');
             break;
           }
-          race.elapsed += dt;
-          race.countdown = Math.max(0, race.countdown - dt);
-          // 관중석으로 걸어오는 손님이 있으면 첫 손님이 앉고 raceGatherSec이 될 때까지는 기다려 준다.
-          if (race.countdown <= 0 && !(this.seatComing(b) && race.elapsed < raceGatherSec(B.boothStat(this.state, b, 'pace')))) this.startRace(b, race);
+          g.elapsed += dt;
+          g.countdown = Math.max(0, g.countdown - dt);
+          const game = groupGame(booth);
+          let ready = game.readiness(g.participants, g.elapsed);
+          // 출발 조건이 안 맞으면 참가자가 다른 자리로 나서 본다 (밀어내기 상대가 오지 않으면 구경 손님이 모래판으로).
+          if (ready === 'none' && game.stepIn !== undefined && this.stepInGroup(booth, g)) ready = game.readiness(g.participants, g.elapsed);
+          // 자리로 걸어오는 손님이 있으면 기다려 준다 (첫 손님이 앉고 gatherSec까지는 누구든, 그 뒤 조금 더는 곧 닿는 손님: waitComing).
+          if (g.countdown <= 0 && ready !== 'none' && !this.waitComing(booth, g)) this.startGroup(booth, g);
+          else if (ready === 'none' && g.elapsed > GROUP_RULES[booth].maxWaitSec) this.cancelGroup(booth, g, 'timeout');
           break;
+        }
         case 'running': {
-          race.elapsed += dt;
+          g.elapsed += dt;
           const rounds = this.state.booths[b].rounds;
-          for (const e of race.participants) {
+          for (const e of g.participants) {
             const r = rounds[e.seat];
-            if (r !== null && r !== undefined && r.monster === e.monster) r.elapsed = Math.min(race.elapsed, r.duration);
+            if (r !== null && r !== undefined && r.monster === e.monster) r.elapsed = Math.min(g.elapsed, r.duration);
           }
-          this.raceCheers(b, race);
-          if (race.elapsed >= race.duration) this.finishRace(b, race);
+          this.groupProgress(booth, g);
+          if (g.elapsed >= g.duration) this.finishGroup(booth, g);
           break;
         }
         case 'done':
-          race.countdown -= dt;
-          if (race.countdown <= 0) this.resetRace(race);
+          g.countdown -= dt;
+          if (g.countdown <= 0) this.resetGroup(g);
           break;
       }
     }
   }
 
-  /** 이 부스 자리로 걸어오는 손님이 있나. */
-  private seatComing(b: BoothId): boolean {
+  /** 참가자 하나가 다른 자리로 나선다 (GroupGame.stepIn): 자리를 옮겨 걸어가고, 출발은 조금 기다린다. 옮겼으면 true. */
+  private stepInGroup(b: GroupBoothId, g: GroupState): boolean {
+    const bs = this.state.booths[b];
+    const n = B.boothSeats(this.state, b);
+    const free: number[] = [];
+    for (let i = 0; i < n; i++) if ((bs.seats[i] ?? null) === null) free.push(i);
+    const s = groupGame(b).stepIn?.(g.participants, g.elapsed, free, (id) => this.monster(id)) ?? null;
+    const e = s === null ? undefined : g.participants[s.index];
+    const m = e === undefined ? undefined : this.monster(e.monster);
+    if (s === null || e === undefined || m === undefined || !free.includes(s.seat) || bs.seats[e.seat] !== m.id) return false;
+    bs.seats[e.seat] = null;
+    bs.seats[s.seat] = m.id;
+    m.seat = s.seat;
+    e.seat = s.seat;
+    e.pick = s.pick;
+    e.role = s.role;
+    const to = B.seatPt(b, s.seat);
+    m.path = [{ x: to.x, y: to.y }];
+    g.countdown = Math.max(g.countdown, groupStartSoonSec(b, B.boothStat(this.state, b, 'pace')));
+    this.emit('groupJoined', { booth: b, monster: m.id, seat: s.seat, pick: s.pick, role: s.role, bet: e.bet });
+    this.pump(b);
+    return true;
+  }
+
+  /** 이 부스 자리로 걸어오는 손님 가운데 가장 먼저 닿는 손님까지 남은 초 (없으면 Infinity). */
+  private comingSec(b: BoothId): number {
+    let best = Infinity;
     for (const id of this.state.booths[b].seats) {
       if (id === null) continue;
       const m = this.monster(id);
-      if (m !== undefined && m.phase === 'toSeat' && m.booth === b) return true;
+      if (m === undefined || m.phase !== 'toSeat' || m.booth !== b) continue;
+      let d = 0;
+      let at = m.pos;
+      for (const p of m.path) {
+        d += dist(at, p);
+        at = p;
+      }
+      best = Math.min(best, d / speedOf(m));
     }
-    return false;
+    return best;
   }
 
-  /** 출발: 자리에 남은 참가자로 경주 하나를 정하고 참가자마다 한판을 연다. 행운(행운아·행운 부적)만큼 그 손님의 선수가 1등. */
-  private startRace(b: BoothId, race: RaceState): void {
+  /**
+   * 출발을 미루고 걸어오는 손님을 기다리나: 첫 손님이 앉고 gatherSec까지는 누구든, 그 뒤 TUNE.groupWaitExtraSec까지는
+   * TUNE.groupWaitWalkSec 안에 닿는 손님을 (여럿이 같이 놀게: 큰 지도에서 멀리서 오는 손님이 다음 판으로 밀리지 않게).
+   */
+  private waitComing(b: GroupBoothId, g: GroupState): boolean {
+    const gather = groupGatherSec(b, B.boothStat(this.state, b, 'pace'));
+    if (g.elapsed >= gather + TUNE.groupWaitExtraSec) return false;
+    const sec = this.comingSec(b);
+    return sec < Infinity && (g.elapsed < gather || sec <= TUNE.groupWaitWalkSec);
+  }
+
+  /**
+   * 출발: 자리에 남은 참가자(놀이 모듈 lineup이 고른 손님)로 판 하나를 정하고 참가자마다 한판을 연다.
+   * lineup에서 빠진 손님은 건 코인을 돌려받고 다음 판을 기다린다. 행운(행운아·행운 부적)이 붙은 손님 쪽이 이긴다.
+   */
+  private startGroup(b: GroupBoothId, g: GroupState): void {
     const st = this.state;
     const bs = st.booths[b];
-    race.participants = race.participants.filter((e) => {
+    const game = groupGame(b);
+    g.participants = g.participants.filter((e) => {
       const m = this.monster(e.monster);
       return m !== undefined && m.booth === b && m.seat === e.seat && bs.seats[e.seat] === m.id;
     });
-    if (race.participants.length === 0) {
-      this.resetRace(race);
+    if (g.participants.length === 0) {
+      this.resetGroup(g);
       return;
     }
+    // 자리를 뜬 손님이 있어 출발 조건이 깨졌으면 (씨름 선수가 떠남) 더 기다린다.
+    if (game.readiness(g.participants, g.elapsed) === 'none') return;
+    if (game.lineup !== undefined) {
+      // 오래 기다린 손님부터 (지난 판에 빠진 손님이 이번엔 끼게): 자리에서 기다린 초(phaseTime) 순서로 고르고, 순서는 그대로 둔다.
+      const waited = (e: GroupEntry): number => this.monster(e.monster)?.phaseTime ?? 0;
+      const keep = new Set(game.lineup(g.participants.slice().sort((x, y) => waited(y) - waited(x))));
+      // 빠진 손님: 건 코인은 돌려주고, 낸 참가비는 다음 판 몫으로 (prepaid: 다음 joinGroup에서 참가비를 다시 받지 않는다).
+      // 지난번에 빠졌다가 자리를 뜬 손님은 지운다.
+      const prepaid = (g.prepaid ?? []).filter((id) => bs.seats.includes(id) && !g.participants.some((e) => e.monster === id));
+      for (const e of g.participants) {
+        if (keep.has(e)) continue;
+        this.refundBet(b, e);
+        if (!prepaid.includes(e.monster)) prepaid.push(e.monster);
+      }
+      g.prepaid = prepaid;
+      g.participants = g.participants.filter((e) => keep.has(e));
+    }
     const cheer = B.boothCheer(bs);
-    let winner: RacerIndex | undefined;
-    for (const e of race.participants) {
-      const m = this.monster(e.monster);
+    let lucky = -1;
+    for (let i = 0; i < g.participants.length; i++) {
+      const m = this.monster((g.participants[i] as GroupEntry).monster);
       const luck = (m?.traits.includes('lucky') === true ? TUNE.luckTrait : 0) + (cheer?.luck ?? 0);
       if (luck > 0 && this.rng.chance(luck)) {
-        winner = e.racer;
+        lucky = i;
         break;
       }
     }
-    const duration = B.boothRoundSec(st, b);
-    const result = generateRace(this.rng, duration, winner === undefined ? {} : { winner });
-    race.phase = 'running';
-    race.countdown = 0;
-    race.elapsed = 0;
-    race.duration = duration;
-    race.result = result;
-    race.leader = null;
-    race.cheerAt = 0;
-    // 한판을 먼저 다 열고 (raceStarted를 듣는 쪽이 자리마다 한판을 읽을 수 있게) 알린다.
-    const rounds = race.participants.map((e) => {
-      const round: ActiveRound = { monster: e.monster, bet: e.bet, fee: e.fee, outcome: raceOutcome(result, e.racer), elapsed: 0, duration };
+    // 판 길이: 경주장·오리배는 부스 레벨대로 (진행은 출발 대기만 줄인다), 그 밖은 진행(심판·바람지기·삽 대여)이 높을수록 조금 짧게.
+    const pace = B.boothStat(st, b, 'pace');
+    const base = B.boothRoundSec(st, b);
+    const duration = b === 'race' || b === 'boat' ? base : base / Math.max(0.5, 1 + (pace - 3) * TUNE.groupPacePerPoint);
+    const play = game.generate(this.rng, g.participants, { duration, level: bs.level, pace, lucky, seats: B.boothSeats(st, b) });
+    g.phase = 'running';
+    g.countdown = 0;
+    g.elapsed = 0;
+    g.duration = play.end;
+    g.play = play;
+    g.mark = null;
+    g.markAt = 0;
+    g.cursor = 0;
+    // 한판을 먼저 다 열고 (groupStarted를 듣는 쪽이 자리마다 한판을 읽을 수 있게) 알린다.
+    const rounds = g.participants.map((e, i) => {
+      const outcome = play.outcomes[i] as RoundOutcome;
+      const round: ActiveRound = { monster: e.monster, bet: e.bet, fee: e.fee, outcome, elapsed: 0, duration: play.end };
       bs.rounds[e.seat] = round;
       return { seat: e.seat, round };
     });
-    this.emit('raceStarted', { booth: b, race });
+    this.emit('groupStarted', { booth: b, group: g });
     for (const x of rounds) this.emit('roundStarted', { booth: b, seat: x.seat, round: x.round });
+    this.drawCrowd(b, play);
   }
 
-  /** 경주 중 1등이 바뀌면 raceProgress: 그 선수 손님은 들썩, 1등을 뺏긴 선수·꼴찌 선수 손님은 땀. 해설자 입담만큼 참가자 기분 +. */
-  private raceCheers(b: BoothId, race: RaceState): void {
-    const result = race.result;
-    if (result === null) return;
-    const t = race.elapsed;
-    const first = result.finishOrder[0];
-    if (t < TUNE.raceCheerStartSec || first === undefined || t >= (result.finishAt[first] ?? Infinity)) return;
-    const standings = raceStandings(result, t);
-    const leader = standings[0];
-    if (leader === undefined || race.leader === leader) return;
-    const prev = race.leader ?? null;
-    if (prev !== null && t - (race.cheerAt ?? 0) < TUNE.raceCheerGapSec) return;
-    race.leader = leader;
-    race.cheerAt = t;
-    const last = standings[standings.length - 1];
-    const charm = B.boothStat(this.state, b, 'charm');
-    const boost = B.boothCheer(this.state.booths[b])?.reactionBoost ?? 1;
-    const cheers: RaceCheer[] = [];
-    for (const e of race.participants) {
-      const m = this.monster(e.monster);
-      if (m === undefined || m.booth !== b || m.phase !== 'playing') continue;
-      m.mood = clampMood(m.mood + charm * TUNE.raceCommentMood);
-      const kind = e.racer === leader ? 'lead' : e.racer === prev || e.racer === last ? 'behind' : null;
-      if (kind === null) continue;
-      const reaction = raceCheerReaction(this.rng, kind, m, boost);
-      m.pose = reaction.pose;
-      m.poseTime = reaction.duration;
-      cheers.push({ id: m.id, racer: e.racer, place: standings.indexOf(e.racer) + 1, kind, reaction });
-    }
-    this.emit('raceProgress', { booth: b, race, elapsed: t, standings, leader, cheers });
-  }
-
-  /** 모든 선수가 들어왔다: 참가자마다 한판 끝 (한꺼번에 반응), 경주로 근처 손님은 구경 반응. */
-  private finishRace(b: BoothId, race: RaceState): void {
-    const bs = this.state.booths[b];
-    const result = race.result;
-    race.phase = 'done';
-    race.countdown = RACE.resultSec;
-    race.elapsed = race.duration;
-    this.emit('raceFinished', { booth: b, race });
-    for (const e of race.participants) {
-      const r = bs.rounds[e.seat];
-      if (r === null || r === undefined || r.monster !== e.monster) continue;
-      this.finishRound(b, e.seat, r, false);
-    }
-    if (result !== null) this.raceCrowd(b, race, result);
-  }
-
-  /** 결승 뒤 경주로 근처 손님 (관중석에서 다음 경주를 기다리는 손님, 줄, 지나가던 손님): 역전이면 박수, 사진 판정이면 어머나. */
-  private raceCrowd(b: BoothId, race: RaceState, result: RaceResult): void {
+  /**
+   * 판이 시작했다: 근처를 걷던 손님이 발을 멈추고 구경하러 온다 (놀이마다 구경하는 자리 watchPoint, 결과를 볼 때까지).
+   * 손님맞이가 높을수록 더 잘 모인다. 아직 한판도 안 한 손님은 부스로 가게 둔다. 걸어서 판이 끝나기 전에 닿지 못하면 오지 않는다.
+   */
+  private drawCrowd(b: GroupBoothId, play: GroupPlay): void {
     const st = this.state;
     const rng = this.rng;
-    const tier: OutcomeTier = result.comeback ? 'jackpot' : result.photoFinish ? 'nearMiss' : 'win';
-    const joined = new Set(race.participants.map((e) => e.monster));
-    const winner = result.finishOrder[0];
-    const target = race.participants.find((e) => e.racer === winner)?.monster ?? race.participants[0]?.monster;
-    if (target === undefined) return;
-    const charm = B.boothStat(st, b, 'charm');
+    const game = groupGame(b);
+    const welcome = B.boothStat(st, b, 'welcome', TUNE.emptyWelcome);
+    const k = Math.max(0.3, 1 + (welcome - 3) * TUNE.groupDrawPerWelcome);
+    const stay = play.end + GROUP_RULES[b].resultSec + 0.5;
     for (const o of st.monsters) {
-      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving') continue;
-      // 다른 부스에서 노는 손님은 빼고, 이 경주장 자리에서 기다리던 손님은 넣는다.
-      if ((o.phase === 'playing' || o.phase === 'reacting') && o.booth !== b) continue;
-      if (dist(o.pos, RACE_TRACK.center) > TUNE.raceSpectateRadius) continue;
-      if (!rng.chance(o.traits.includes('watcher') ? TUNE.raceWatcherSpectateChance : TUNE.raceSpectateChance)) continue;
-      const reaction = raceSpectateReaction(rng, tier, o);
-      o.mood = clampMood(o.mood + TUNE.spectateMood[tier] + charm * TUNE.raceCasterSpectate);
+      if (o.phase !== 'wandering' || o.stats.rounds === 0) continue;
+      if (dist(o.pos, game.center) > TUNE.groupDrawRadius) continue;
+      if (!rng.chance((o.traits.includes('watcher') ? TUNE.groupWatcherDrawChance : TUNE.groupDrawChance) * k)) continue;
+      const path = route(o.pos, game.watchPoint(rng), st.districts);
+      let walk = 0;
+      let at = o.pos;
+      for (const p of path) {
+        walk += dist(at, p);
+        at = p;
+      }
+      walk /= speedOf(o);
+      if (walk > play.end * 0.6) continue;
+      this.setPhase(o, 'spectating');
+      o.path = path;
+      o.timer = Math.max(1.5, stay - walk);
+    }
+  }
+
+  /** 진행 중 사건 (놀이 모듈 poll): 참가자 기분 + 입담, 자기 쪽이 앞서면 들썩·뒤처지면 조마조마 (pose도 잠깐). */
+  private groupProgress(b: GroupBoothId, g: GroupState): void {
+    const play = g.play;
+    if (play === null) return;
+    const game = groupGame(b);
+    const t = g.elapsed;
+    const ev = game.poll(play, g, t);
+    if (ev === null) return;
+    if (play.events[g.cursor ?? 0] === ev) g.cursor = (g.cursor ?? 0) + 1;
+    g.mark = ev.actor;
+    g.markAt = t;
+    const charm = B.boothStat(this.state, b, 'charm');
+    const boost = B.boothCheer(this.state.booths[b])?.reactionBoost ?? 1;
+    const mood = game.moodOn?.(ev) ?? true;
+    const cheers: GroupCheer[] = [];
+    for (const e of g.participants) {
+      const m = this.monster(e.monster);
+      if (m === undefined || m.booth !== b || m.phase !== 'playing') continue;
+      if (mood) m.mood = clampMood(m.mood + charm * TUNE.groupCommentMood);
+      const kind = game.cheer(play, e, ev);
+      if (kind === null) continue;
+      const reaction = groupCheerReaction(this.rng, b, kind, m, boost, cheerKey(ev.type, ev.actor, e.pick, game.cheerDetail?.(play, ev) ?? null));
+      m.pose = reaction.pose;
+      m.poseTime = reaction.duration;
+      cheers.push({ id: m.id, pick: e.pick, kind, reaction });
+    }
+    this.emit('groupEvent', { booth: b, group: g, event: ev, cheers });
+    const buzz = game.buzz?.(play, ev, g.participants) ?? null;
+    if (buzz !== null) this.groupBuzz(b, g, buzz.kind, buzz.star, charm);
+  }
+
+  /** 진행 중 큰 사건에 놀이 근처 손님(참가자 말고, 자리에서 다음 판을 기다리는 손님 포함)이 들썩인다 (monsterSpectate, 이미 반응 중이면 넘어간다). */
+  private groupBuzz(b: GroupBoothId, g: GroupState, kind: GroupBuzz, star: number, charm: number): void {
+    const rng = this.rng;
+    const game = groupGame(b);
+    const target = (star >= 0 ? g.participants[star] : undefined)?.monster ?? g.participants[0]?.monster;
+    if (target === undefined) return;
+    const joined = new Set(g.participants.map((e) => e.monster));
+    const look = game.face(-1);
+    for (const o of this.state.monsters) {
+      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving' || o.phase === 'reacting' || (o.poseTime ?? 0) > 0) continue;
+      if (o.phase === 'playing' && o.booth !== b) continue;
+      if (dist(o.pos, game.center) > TUNE.groupSpectateRadius) continue;
+      if (!rng.chance((o.traits.includes('watcher') ? TUNE.groupWatcherBuzzChance : TUNE.groupBuzzChance) + charm * TUNE.groupBuzzPerCharm)) continue;
+      const reaction = groupBuzzReaction(rng, b, kind, o);
+      o.mood = clampMood(o.mood + TUNE.groupBuzzMood[kind]);
       if (o.path.length === 0) {
         if (o.phase === 'wandering') {
           this.setPhase(o, 'spectating');
@@ -1049,7 +1183,93 @@ export class Sim implements SimApi {
         }
         o.pose = reaction.pose;
         o.poseTime = reaction.duration;
-        faceToward(o, RACE_TRACK.finish.x);
+        if (o.phase !== 'playing') faceToward(o, look.x);
+      }
+      this.emit('monsterSpectate', { id: o.id, target, reaction });
+    }
+  }
+
+  /** 판이 끝났다: 참가자마다 한판 끝 (한꺼번에 반응), 근처 손님은 구경 반응. */
+  private finishGroup(b: GroupBoothId, g: GroupState): void {
+    const bs = this.state.booths[b];
+    const play = g.play;
+    g.phase = 'done';
+    g.countdown = GROUP_RULES[b].resultSec;
+    g.elapsed = g.duration;
+    this.emit('groupFinished', { booth: b, group: g });
+    const done: { e: GroupEntry; r: ActiveRound }[] = [];
+    for (const e of g.participants) {
+      const r = bs.rounds[e.seat];
+      if (r !== null && r !== undefined && r.monster === e.monster) done.push({ e, r });
+    }
+    const pays = this.settleGroup(b, done);
+    done.forEach(({ e, r }, i) => this.finishRound(b, e.seat, r, false, pays[i] ?? { payout: 0, festival: false }));
+    if (play !== null) this.groupCrowd(b, g, play);
+  }
+
+  /**
+   * 단체 놀이 지급을 한꺼번에 정한다 (항아리에서 뺀다): 참가 차례대로 주면 먼저 온 손님이 항아리를 비워 늦게 온 승자가 0코인이 된다.
+   * 항아리가 가득 찼으면 (항아리 축제) 이긴 손님 하나(받을 몫이 가장 큰 손님, 같으면 선수)가 다른 손님 몫을 뺀 나머지를 통째로 받는다.
+   * 모자라면 모두 같은 비율로 줄인다.
+   */
+  private settleGroup(b: GroupBoothId, done: readonly { e: GroupEntry; r: ActiveRound }[]): { payout: number; festival: boolean }[] {
+    const st = this.state;
+    const bs = st.booths[b];
+    const want = done.map(({ r }) => (r.outcome.multiplier > 0 ? Math.round(r.bet * r.outcome.multiplier) : 0));
+    const won = done.map(({ r }) => r.outcome.tier === 'win' || r.outcome.tier === 'jackpot');
+    let fest = -1;
+    if (bs.pot >= B.boothPotCap(st, b)) {
+      done.forEach(({ e }, i) => {
+        if (!won[i]) return;
+        const best = fest < 0 ? null : done[fest];
+        const w = want[i] ?? 0;
+        const bw = fest < 0 ? -1 : (want[fest] ?? 0);
+        if (best === null || best === undefined || w > bw || (w === bw && e.role === 'player' && best.e.role !== 'player')) fest = i;
+      });
+    }
+    // 다른 손님 몫을 빼고 남는 것이 제 몫보다 적으면 축제 없이 나눈다.
+    if (fest >= 0 && bs.pot - want.reduce((sum, w, i) => sum + (i === fest ? 0 : w), 0) < (want[fest] ?? 0)) fest = -1;
+    const total = want.reduce((sum, w, i) => sum + (i === fest ? 0 : w), 0);
+    const k = total > bs.pot ? bs.pot / total : 1;
+    const pays = want.map((w, i) => ({ payout: i === fest ? 0 : Math.floor(w * k), festival: false }));
+    bs.pot -= pays.reduce((sum, p) => sum + p.payout, 0);
+    const f = pays[fest];
+    if (f !== undefined) {
+      f.payout = Math.max(0, bs.pot);
+      f.festival = true;
+      bs.pot = BOOTHS[b].potSeed;
+    }
+    return pays;
+  }
+
+  /** 결과 뒤 놀이 근처 손님 (자리에서 다음 판을 기다리는 손님, 줄, 지나가던 손님): 역전이면 박수, 아슬아슬하면 어머나. */
+  private groupCrowd(b: GroupBoothId, g: GroupState, play: GroupPlay): void {
+    const st = this.state;
+    const rng = this.rng;
+    const game = groupGame(b);
+    const { tier, star } = game.crowd(play, g.participants);
+    const joined = new Set(g.participants.map((e) => e.monster));
+    const target = (star >= 0 ? g.participants[star] : undefined)?.monster ?? g.participants[0]?.monster;
+    if (target === undefined) return;
+    const charm = B.boothStat(st, b, 'charm');
+    const center = game.center;
+    const look = game.face(-1);
+    for (const o of st.monsters) {
+      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving') continue;
+      // 다른 부스에서 노는 손님은 빼고, 이 부스 자리에서 기다리던 손님은 넣는다.
+      if ((o.phase === 'playing' || o.phase === 'reacting') && o.booth !== b) continue;
+      if (dist(o.pos, center) > TUNE.groupSpectateRadius) continue;
+      if (!rng.chance(o.traits.includes('watcher') ? TUNE.groupWatcherSpectateChance : TUNE.groupSpectateChance)) continue;
+      const reaction = groupSpectateReaction(rng, b, tier, o);
+      o.mood = clampMood(o.mood + TUNE.spectateMood[tier] + charm * TUNE.groupCasterSpectate);
+      if (o.path.length === 0) {
+        if (o.phase === 'wandering') {
+          this.setPhase(o, 'spectating');
+          o.timer = reaction.duration + 0.5;
+        }
+        o.pose = reaction.pose;
+        o.poseTime = reaction.duration;
+        faceToward(o, look.x);
       }
       this.emit('monsterSpectate', { id: o.id, target, reaction });
     }
