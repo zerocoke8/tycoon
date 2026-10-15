@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#93b468" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="format-detection" content="telephone=no" />
+    <title>몬스터 놀이마을</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Dodum&family=Jua&display=swap" />
+    <script>
+      // 오류 상자: 잡히지 않은 오류를 화면 위 상자로 (헤드리스 스크린숏·--dump-dom에서도 보이게).
+      // 모듈을 불러오기 전에 걸어 두어, import 실패까지 잡는다. main.ts도 window.mpvError로 부른다.
+      // 개발 서버(%DEV%는 Vite가 바꿔 넣는다)에서는 오류 내용을 그대로, 배포판에서는 짧은 안내 한 줄만 (내용은 콘솔에).
+      (function () {
+        var DEV = '%DEV%' === 'true';
+        var box = null;
+        var count = 0;
+        function show(text) {
+          count++;
+          if (!DEV) {
+            console.error(text);
+            if (count > 1) return;
+          }
+          if (count > 12) return;
+          if (box === null) {
+            box = document.createElement('pre');
+            box.id = 'mpv-error';
+            // style.css가 아직 없어도 보이게 모양을 바로 단다.
+            box.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;z-index:9999;max-height:60vh;margin:0;padding:10px 12px;overflow:auto;border:2px solid #7a1010;border-radius:10px;background:rgba(200,30,30,.94);color:#fff;font:12px/1.4 Consolas,monospace;white-space:pre-wrap;word-break:break-all;pointer-events:auto;user-select:text';
+            (document.body || document.documentElement).appendChild(box);
+          }
+          if (DEV) box.textContent += (box.textContent ? '\n\n' : '') + '[오류 ' + count + '] ' + text;
+          else box.textContent = '문제가 생겼어요. 새로고침해 주세요.';
+        }
+        window.mpvError = show;
+        window.addEventListener('error', function (e) {
+          var err = e.error;
+          show((err && err.stack) || e.message + ' (' + e.filename + ':' + e.lineno + ')');
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+          var r = e.reason;
+          show('비동기: ' + ((r && r.stack) || String(r)));
+        });
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="ui"></div>
+    <div id="loading" role="status" aria-live="polite">
+      <div class="loading-card">
+        <div class="loading-title">몬스터 놀이마을</div>
+        <div class="loading-text">마을로 가는 중…</div>
+        <div class="loading-bar"><div class="loading-fill" id="loading-fill"></div></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.vite/
+*.log
+.env
+.env.*
+
+# 공개 저장소(zerocoke8/tycoon)에 올리지 않는 것 — 로컬에만 둔다 (따로 백업).
+# 「용사의 대장간」에서 가져온 아트 키트와 그 참조 그림
+tools/art-kit/
+tools/art-ref/
+# Codex 원본 PNG(수백 MB)와 후보·시험 판. 게임은 public/assets의 다듬은 WebP만 쓴다.
+tools/art-raw/
+tools/art-try/
+# 개발 중 찍은 스크린샷
+docs/screens/
+
+# 스프라이트 도구의 시험 출력과 Seedance 원본 영상
+tools/sprite/test-out/
+tools/anim-raw/

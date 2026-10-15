@@ -1,0 +1,95 @@
+/* 페이지 전체 (캔버스·로딩 화면·오류 상자). UI 오버레이 꾸밈은 ui/ui.css. */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  /* 지도 풀밭색: 캔버스가 늦게 그려지거나 가장자리가 비어도 어색하지 않게 */
+  background: #93b468;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  position: fixed;
+  inset: 0;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  font-family: 'Gowun Dodum', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+}
+
+/* 지도 캔버스: 화면 전체, 브라우저의 끌기·확대를 막고 Pixi가 받는다 */
+#app {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+}
+#app canvas {
+  display: block;
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+  outline: none;
+}
+
+/* ── 로딩 화면 ── */
+
+#loading {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #93b468;
+  transition: opacity 0.4s ease;
+}
+#loading.done {
+  opacity: 0;
+  pointer-events: none;
+}
+.loading-card {
+  width: min(78vw, 300px);
+  padding: 22px 20px 20px;
+  border: 3px solid #3b2a20;
+  border-radius: 18px;
+  background: #f6ebd5;
+  box-shadow: 0 4px 0 #3b2a20;
+  text-align: center;
+  color: #3b2a20;
+}
+.loading-title {
+  font-family: 'Jua', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+  font-size: 26px;
+  line-height: 1.2;
+}
+.loading-text {
+  margin-top: 6px;
+  font-size: 15px;
+  color: #7a6352;
+}
+.loading-bar {
+  margin-top: 14px;
+  height: 14px;
+  border: 2.5px solid #3b2a20;
+  border-radius: 999px;
+  background: #fff8ea;
+  overflow: hidden;
+}
+.loading-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: 999px;
+  background: #f2a65a;
+  transition: width 0.15s linear;
+}
+#loading.failed .loading-fill {
+  background: #e46f5a;
+}

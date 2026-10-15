@@ -1,0 +1,2093 @@
+/* HTML 오버레이 (HUD, 아래 탭, 시트, 손님 카드, 토스트). 색·선·모서리는 art-kit 안내서 1.8의 토큰. */
+
+:root {
+  --dd-ink: #3b2a20;
+  --dd-ink-soft: #7a6352;
+  --dd-paper: #f6ebd5;
+  --dd-paper-2: #eadbbd;
+  --dd-paper-3: #fff8ea;
+  --dd-wood: #876045;
+  --dd-wood-2: #6f4c35;
+  --dd-wood-3: #5a3d2b;
+  --dd-orange: #f2a65a;
+  --dd-sky: #8ec8ee;
+  --dd-butter: #f3d36a;
+  --dd-red: #e46f5a;
+  --dd-green: #8cc47a;
+  --dd-gold: #f6c945;
+  --dd-stroke: 2.5px;
+  --dd-stroke-fat: 3px;
+  --dd-round: 16px;
+  --dd-round-s: 11px;
+  --dd-pop: 0 3px 0 var(--dd-ink);
+  --dd-pop-s: 0 2px 0 var(--dd-ink);
+  --dd-font-round: 'Jua', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+  --dd-font-body: 'Gowun Dodum', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+}
+
+/* ── 바탕: 화면 전체를 덮지만 누르기는 UI 조각만 받는다 (캔버스 끌기는 그대로) ── */
+
+.mpv-ui {
+  --nav-h: 68px;
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  overflow: hidden;
+  pointer-events: none;
+  font-family: var(--dd-font-body);
+  font-size: 15px;
+  line-height: 1.35;
+  /* 한글은 낱말 사이에서만 줄을 바꾼다 (긴 낱말·숫자만 아무 데서나). */
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  color: var(--dd-ink);
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+.mpv-ui *,
+.mpv-ui *::before,
+.mpv-ui *::after {
+  box-sizing: border-box;
+}
+/* 두 번 눌러 확대 막기 (스크롤 판은 아래에서 pan-y로 바꾼다) */
+.mpv-ui * {
+  touch-action: manipulation;
+}
+.mpv-ui button {
+  font: inherit;
+  color: inherit;
+  margin: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.mpv-ui img {
+  -webkit-user-drag: none;
+  pointer-events: none;
+  user-select: none;
+}
+.mpv-ui [hidden] {
+  display: none !important;
+}
+.mpv-safe-probe {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  visibility: hidden;
+  pointer-events: none;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ── 공통 조각 ── */
+
+.mpv-svg {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+}
+.mpv-svg svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.mpv-pic {
+  display: inline-grid;
+  /* 칸을 상자 크기로 정해 두어야 세로로 긴 그림(진행자·방망이)도 img height: 100%로 상자 안에 맞는다 (auto 칸이면 넘친다). */
+  grid-template: 100% / 100%;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+}
+.mpv-pic img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.mpv-ph {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 2px solid var(--dd-ink);
+  background: var(--ph, var(--dd-paper-2));
+  font-family: var(--dd-font-round);
+  font-size: 0.62em;
+  line-height: 1;
+  color: var(--dd-ink);
+  overflow: hidden;
+}
+.mpv-ph.big {
+  border-radius: 30%;
+  font-size: 1.6em;
+}
+.mpv-ph-name {
+  font-family: var(--dd-font-round);
+  font-size: 12px;
+  padding: 0 4px;
+  white-space: nowrap;
+  color: var(--dd-ink-soft);
+}
+.mpv-pic.named {
+  width: auto;
+}
+
+.mpv-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 16px;
+  border-radius: var(--dd-round-s);
+  border: var(--dd-stroke-fat) solid var(--dd-ink);
+  background: var(--dd-orange);
+  box-shadow: var(--dd-pop);
+  font-family: var(--dd-font-round);
+  font-size: 17px;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: auto;
+  transition: transform 0.06s;
+}
+.mpv-btn:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 var(--dd-ink);
+}
+.mpv-btn.sub {
+  background: var(--dd-paper);
+}
+.mpv-btn.sky {
+  background: var(--dd-sky);
+}
+.mpv-btn.green {
+  background: var(--dd-green);
+}
+.mpv-btn.butter {
+  background: var(--dd-butter);
+}
+.mpv-btn.danger {
+  background: var(--dd-red);
+}
+.mpv-btn.small {
+  font-size: 15px;
+  padding: 0 12px;
+}
+.mpv-btn.wide {
+  width: 100%;
+}
+.mpv-btn.dim {
+  background: var(--dd-paper-2);
+  color: var(--dd-ink-soft);
+}
+.mpv-btn .mpv-svg {
+  width: 22px;
+  height: 22px;
+}
+
+.mpv-x {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  padding: 0;
+  border: none;
+  background: transparent;
+  pointer-events: auto;
+}
+.mpv-x .mpv-svg {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--dd-paper-3);
+  border: var(--dd-stroke) solid var(--dd-ink);
+  padding: 5px;
+}
+.mpv-x:active .mpv-svg {
+  transform: scale(0.92);
+}
+
+.mpv-lv {
+  display: inline-block;
+  font-family: var(--dd-font-round);
+  font-size: 13px;
+  line-height: 1.3;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-butter);
+  white-space: nowrap;
+}
+
+.mpv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 30px;
+  padding: 0 9px 0 3px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  font-family: var(--dd-font-round);
+  font-size: 15px;
+  white-space: nowrap;
+}
+.mpv-chip .mpv-pic {
+  width: 23px;
+  height: 23px;
+}
+.mpv-chip.short {
+  background: #f8d9cf;
+  color: #b2402c;
+}
+.mpv-chip.free {
+  padding: 0 10px;
+  color: var(--dd-ink-soft);
+}
+.mpv-cost {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+
+.mpv-bar {
+  position: relative;
+  display: block;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-2);
+  overflow: hidden;
+  flex: 1;
+}
+.mpv-bar > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  background: var(--bar, var(--dd-green));
+  border-right: 2px solid var(--dd-ink);
+  transition: width 0.25s linear, background-color 0.3s;
+}
+.mpv-bar.full > i {
+  border-right: none;
+}
+
+.mpv-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+.mpv-dots i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--dd-ink);
+  background: var(--dd-paper);
+}
+.mpv-dots i.on {
+  background: var(--dd-orange);
+}
+.mpv-stats {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.mpv-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--dd-ink-soft);
+}
+
+/* ── 위 HUD ── */
+
+.mpv-hud {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(var(--sat) + 8px) 10px 0;
+  pointer-events: none;
+}
+.mpv-hud > * {
+  pointer-events: auto;
+}
+.mpv-hud .grow {
+  flex: 1;
+  pointer-events: none;
+}
+.mpv-coins {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 46px;
+  min-width: 112px;
+  padding: 0 16px 0 5px;
+  border-radius: 999px;
+  border: var(--dd-stroke-fat) solid var(--dd-ink);
+  background: var(--dd-paper);
+  box-shadow: var(--dd-pop);
+  font-family: var(--dd-font-round);
+  font-size: 23px;
+  line-height: 1;
+}
+.mpv-coins .mpv-pic {
+  width: 34px;
+  height: 34px;
+}
+.mpv-coins.bump {
+  animation: mpv-bump 0.38s ease-out;
+}
+.mpv-coins.spend {
+  animation: mpv-spend 0.3s ease-out;
+}
+@keyframes mpv-bump {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.12); background: var(--dd-butter); }
+  100% { transform: scale(1); }
+}
+@keyframes mpv-spend {
+  0% { transform: translateY(0); }
+  40% { transform: translateY(2px); background: var(--dd-paper-2); }
+  100% { transform: translateY(0); }
+}
+.mpv-level {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 46px;
+  min-width: 62px;
+  padding: 0 10px;
+  border-radius: 14px;
+  border: var(--dd-stroke-fat) solid var(--dd-ink);
+  background: var(--dd-butter);
+  box-shadow: var(--dd-pop);
+  font-family: var(--dd-font-round);
+  line-height: 1.05;
+}
+.mpv-level small {
+  font-size: 11px;
+  color: var(--dd-wood-3);
+}
+.mpv-level b {
+  font-weight: normal;
+  font-size: 19px;
+}
+.mpv-level:active,
+.mpv-iconbtn:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 var(--dd-ink);
+}
+.mpv-iconbtn {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border-radius: 14px;
+  border: var(--dd-stroke-fat) solid var(--dd-ink);
+  background: var(--dd-paper);
+  box-shadow: var(--dd-pop);
+}
+.mpv-iconbtn .mpv-svg {
+  width: 30px;
+  height: 30px;
+}
+
+/* ── 아래 탭 ── */
+
+.mpv-nav {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 8px calc(var(--sab) + 6px);
+  background: var(--dd-wood-2);
+  border-top: var(--dd-stroke-fat) solid var(--dd-ink);
+  pointer-events: auto;
+}
+.mpv-nav button {
+  flex: 1;
+  max-width: 96px;
+  min-height: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 2px 0 0;
+  border: var(--dd-stroke) solid transparent;
+  border-radius: 13px;
+  background: transparent;
+  color: var(--dd-paper);
+  font-family: var(--dd-font-round);
+  font-size: 13px;
+  line-height: 1.1;
+}
+.mpv-nav button .mpv-svg {
+  width: 28px;
+  height: 28px;
+}
+.mpv-nav button.on {
+  background: var(--dd-paper);
+  color: var(--dd-ink);
+  border-color: var(--dd-ink);
+  box-shadow: var(--dd-pop-s);
+  transform: translateY(-3px);
+}
+.mpv-nav button:active {
+  transform: translateY(1px);
+}
+
+/* ── 시트 (아래에서 올라오는 판) ── */
+
+.mpv-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: rgba(59, 42, 32, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+.mpv-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.mpv-sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--nav-h) + var(--sab));
+  z-index: 25;
+  height: 72%;
+  max-width: 560px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--dd-paper);
+  border: var(--dd-stroke-fat) solid var(--dd-ink);
+  border-bottom: none;
+  border-radius: 22px 22px 0 0;
+  pointer-events: auto;
+  visibility: hidden;
+  transform: translateY(calc(100% + 90px));
+  transition: transform 0.2s ease-in, visibility 0s linear 0.2s;
+}
+.mpv-sheet.fit {
+  height: auto;
+  max-height: 72%;
+}
+.mpv-sheet.open {
+  visibility: visible;
+  transform: none;
+  transition: transform 0.26s cubic-bezier(0.2, 0.8, 0.25, 1), visibility 0s;
+}
+.mpv-sheet.dragging {
+  transition: none;
+}
+.mpv-sheet-drag {
+  flex: none;
+  touch-action: none;
+  cursor: grab;
+}
+.mpv-sheet-grip {
+  display: grid;
+  place-items: center;
+  height: 16px;
+}
+.mpv-sheet-grip span {
+  width: 46px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--dd-ink-soft);
+  opacity: 0.55;
+}
+.mpv-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 6px 16px;
+  border-bottom: 2px dashed rgba(59, 42, 32, 0.25);
+}
+.mpv-sheet-head h2 {
+  margin: 0;
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 22px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-sheet-head .grow {
+  flex: 1;
+}
+.mpv-sheet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  padding: 6px 12px 18px;
+}
+.mpv-sheet.booth {
+  z-index: 36;
+  top: var(--booth-top, 55%);
+  bottom: 0;
+  height: auto;
+  max-height: none;
+  padding-bottom: var(--sab);
+}
+
+/* 부스 확대 화면 둘레 (누르면 닫힘). 누르기는 네 shade가, 어둡게 하기는 둥근 구멍(hole)의 그림자가 맡는다
+   (네모 shade로 어둡게 하면 패널의 둥근 모서리 밖에 밝은 네모가 남는다). */
+.mpv-shade {
+  position: absolute;
+  z-index: 20;
+  display: none;
+  background: transparent;
+  pointer-events: auto;
+}
+.mpv-shade-hole {
+  position: absolute;
+  z-index: 20;
+  display: none;
+  box-shadow: 0 0 0 200vmax rgba(59, 42, 32, 0.32);
+  pointer-events: none;
+}
+.mpv-shade-hole.open {
+  display: block;
+}
+.mpv-shade.open {
+  display: block;
+}
+
+/* ── 시트 안 내용 ── */
+
+.mpv-panel {
+  display: flex;
+  flex-direction: column;
+}
+.mpv-sec {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 12px 4px 6px;
+  font-family: var(--dd-font-round);
+  font-size: 16px;
+  color: var(--dd-wood-2);
+}
+.mpv-sec small {
+  font-family: var(--dd-font-body);
+  font-size: 12px;
+  color: var(--dd-ink-soft);
+}
+.mpv-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px;
+  margin-bottom: 10px;
+  border-radius: var(--dd-round);
+  border: var(--dd-stroke) solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  box-shadow: var(--dd-pop-s);
+}
+.mpv-card.dim {
+  background: var(--dd-paper-2);
+}
+.mpv-card.col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+.mpv-thumb {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 62px;
+  height: 62px;
+  padding: 3px;
+  border-radius: 13px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-2);
+  overflow: hidden;
+  font-size: 22px;
+}
+button.mpv-thumb {
+  pointer-events: auto;
+}
+button.mpv-thumb:active {
+  transform: scale(0.95);
+}
+.mpv-thumb.sm {
+  width: 50px;
+  height: 50px;
+  font-size: 18px;
+}
+.mpv-thumb.lg {
+  width: 110px;
+  height: 110px;
+  font-size: 36px;
+}
+.mpv-thumb .mpv-pic {
+  width: 100%;
+  height: 100%;
+}
+/* 칸을 상자 크기로 (안의 그림이 height: 100%로 맞게) */
+.mpv-thumb {
+  grid-template: 100% / 100%;
+}
+.mpv-grow {
+  flex: 1;
+  min-width: 0;
+}
+.mpv-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-family: var(--dd-font-round);
+  font-size: 18px;
+  line-height: 1.2;
+}
+.mpv-title.sm {
+  font-size: 16px;
+}
+.mpv-desc {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--dd-ink-soft);
+}
+.mpv-eff {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin-top: 4px;
+  font-size: 13.5px;
+}
+.mpv-tag {
+  flex: none;
+  font-family: var(--dd-font-round);
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: var(--dd-paper-2);
+  color: var(--dd-wood-2);
+}
+.mpv-tag.next {
+  background: var(--dd-butter);
+  color: var(--dd-ink);
+}
+.mpv-act {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.mpv-max {
+  font-family: var(--dd-font-round);
+  font-size: 14px;
+  color: var(--dd-ink-soft);
+}
+.mpv-note {
+  font-size: 12.5px;
+  color: var(--dd-ink-soft);
+}
+.mpv-warn {
+  font-size: 14px;
+  color: #b2402c;
+  font-family: var(--dd-font-round);
+}
+.mpv-empty {
+  padding: 14px 8px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--dd-ink-soft);
+  border: 2px dashed rgba(59, 42, 32, 0.3);
+  border-radius: var(--dd-round);
+  margin-bottom: 10px;
+}
+
+/* 진행자 배치 고르기 */
+.mpv-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.mpv-pick button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper);
+  font-family: var(--dd-font-round);
+  font-size: 14px;
+  pointer-events: auto;
+}
+.mpv-pick button.on {
+  background: var(--dd-sky);
+  box-shadow: var(--dd-pop-s);
+}
+.mpv-pick button.taken {
+  color: var(--dd-ink-soft);
+  border-style: dashed;
+}
+
+/* 아이템 칸 (가방·가공품) */
+.mpv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.mpv-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 8px 4px 6px;
+  border-radius: 14px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  text-align: center;
+}
+.mpv-tile.zero {
+  background: var(--dd-paper-2);
+}
+.mpv-tile.zero .mpv-pic {
+  opacity: 0.4;
+}
+.mpv-tile .mpv-pic {
+  width: 44px;
+  height: 44px;
+  font-size: 20px;
+}
+.mpv-tile .name {
+  font-size: 12.5px;
+  line-height: 1.2;
+  min-height: 2.4em;
+  display: flex;
+  align-items: center;
+}
+.mpv-tile .num {
+  font-family: var(--dd-font-round);
+  font-size: 17px;
+  line-height: 1;
+}
+.mpv-tile .num small {
+  font-size: 12px;
+  color: var(--dd-ink-soft);
+}
+
+/* 공방 */
+.mpv-job {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border-radius: 14px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+}
+.mpv-job .mpv-pic {
+  width: 38px;
+  height: 38px;
+  font-size: 16px;
+}
+.mpv-job.empty {
+  border-style: dashed;
+  background: transparent;
+  color: var(--dd-ink-soft);
+  justify-content: center;
+  min-height: 52px;
+}
+.mpv-job .t {
+  font-family: var(--dd-font-round);
+  font-size: 14px;
+  white-space: nowrap;
+  min-width: 44px;
+  text-align: right;
+}
+.mpv-recipe {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.mpv-arrow {
+  font-family: var(--dd-font-round);
+  color: var(--dd-wood);
+  font-size: 18px;
+  padding: 0 2px;
+}
+
+/* 도감 */
+.mpv-totals {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin: 6px 0 4px;
+}
+.mpv-total {
+  padding: 6px 2px;
+  border-radius: 12px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  text-align: center;
+}
+.mpv-total b {
+  display: block;
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 19px;
+  line-height: 1.1;
+}
+.mpv-total small {
+  font-size: 11.5px;
+  color: var(--dd-ink-soft);
+}
+.mpv-dex {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.mpv-dex button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 4px 8px;
+  border-radius: 14px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  pointer-events: auto;
+}
+.mpv-dex button.on {
+  background: var(--dd-butter);
+  box-shadow: var(--dd-pop-s);
+}
+.mpv-dex button.unseen {
+  background: var(--dd-paper-2);
+}
+.mpv-dex .mpv-pic {
+  width: 72px;
+  height: 72px;
+  font-size: 26px;
+}
+.mpv-dex .unseen .mpv-pic img {
+  filter: brightness(0);
+  opacity: 0.3;
+}
+.mpv-dex .unseen .mpv-ph {
+  background: var(--dd-ink-soft);
+  color: var(--dd-paper);
+  opacity: 0.5;
+}
+.mpv-dex .name {
+  font-family: var(--dd-font-round);
+  font-size: 14px;
+  line-height: 1.2;
+}
+.mpv-dex .sub {
+  font-size: 11.5px;
+  color: var(--dd-ink-soft);
+}
+.mpv-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.mpv-label {
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper);
+  font-family: var(--dd-font-round);
+  font-size: 13.5px;
+}
+.mpv-label.sky {
+  background: var(--dd-sky);
+}
+.mpv-label.green {
+  background: var(--dd-green);
+}
+
+/* 설정 */
+.mpv-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 2px;
+}
+
+/* ── 손님 카드 ── */
+
+.mpv-mcard {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: calc(var(--nav-h) + var(--sab) + 10px);
+  z-index: 38;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 10px 12px 12px;
+  border-radius: 20px;
+  border: var(--dd-stroke-fat) solid var(--dd-ink);
+  background: var(--dd-paper);
+  box-shadow: var(--dd-pop);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(24px);
+  transition: transform 0.2s ease-in, opacity 0.2s, visibility 0s linear 0.2s;
+}
+.mpv-mcard.open {
+  pointer-events: auto;
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.25, 1.2), opacity 0.15s, visibility 0s;
+}
+.mpv-ui.booth-open .mpv-mcard {
+  bottom: calc(var(--sab) + 10px);
+}
+.mpv-mcard > .mpv-x {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+}
+.mpv-mcard-top {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding-right: 36px;
+}
+.mpv-mcard-pic {
+  width: 86px;
+  height: 86px;
+  flex: none;
+  padding: 4px;
+  border-radius: 18px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  font-size: 30px;
+}
+.mpv-mcard-name {
+  font-family: var(--dd-font-round);
+  font-size: 21px;
+  line-height: 1.2;
+}
+.mpv-mcard-name small {
+  font-size: 15px;
+  color: var(--dd-ink-soft);
+  margin-left: 4px;
+}
+.mpv-mcard-status {
+  font-size: 13px;
+  color: var(--dd-ink-soft);
+  margin-top: 1px;
+}
+.mpv-mcard-wallet {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 13px;
+}
+.mpv-traits {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 8px;
+}
+.mpv-trait {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+}
+.mpv-trait b {
+  flex: none;
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 13.5px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-sky);
+}
+.mpv-trait span {
+  color: var(--dd-ink-soft);
+}
+.mpv-mood {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-family: var(--dd-font-round);
+  font-size: 14px;
+}
+.mpv-mood .v {
+  min-width: 62px;
+  text-align: right;
+  white-space: nowrap;
+}
+.mpv-record {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  margin-top: 8px;
+}
+.mpv-record div {
+  padding: 3px 0;
+  border-radius: 10px;
+  background: var(--dd-paper-2);
+  text-align: center;
+  font-size: 11px;
+  color: var(--dd-ink-soft);
+  line-height: 1.2;
+}
+.mpv-record b {
+  display: block;
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 16px;
+  color: var(--dd-ink);
+}
+.mpv-mcard-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+.mpv-btn.cool {
+  background: var(--dd-paper-2);
+  color: var(--dd-ink-soft);
+}
+.mpv-btn.pop {
+  animation: mpv-bump 0.35s ease-out;
+}
+
+/* ── 부스 정보 ── */
+
+.mpv-boxes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 4px;
+}
+.mpv-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 5px 2px;
+  border-radius: 12px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+}
+.mpv-box small {
+  font-size: 11.5px;
+  color: var(--dd-ink-soft);
+}
+.mpv-box b {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 19px;
+  line-height: 1.15;
+}
+.mpv-box .mpv-pic {
+  width: 20px;
+  height: 20px;
+}
+.mpv-pot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.mpv-pot .mpv-pic {
+  width: 34px;
+  height: 34px;
+  font-size: 13px;
+}
+.mpv-pot .v {
+  font-family: var(--dd-font-round);
+  font-size: 15px;
+  white-space: nowrap;
+}
+.mpv-pot .mpv-bar {
+  --bar: var(--dd-gold);
+  height: 16px;
+}
+.mpv-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 2px dashed rgba(59, 42, 32, 0.2);
+}
+.mpv-row .mpv-pic.ico {
+  width: 34px;
+  height: 34px;
+  font-size: 14px;
+}
+
+/* ── 위에 뜨는 고르기 판·확인 창 ── */
+
+.mpv-menu-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: none;
+  pointer-events: auto;
+}
+.mpv-menu-layer.open {
+  display: block;
+}
+.mpv-menu {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  border-radius: 18px;
+  border: var(--dd-stroke-fat) solid var(--dd-ink);
+  background: var(--dd-paper);
+  box-shadow: var(--dd-pop);
+  animation: mpv-pop-in 0.16s ease-out;
+}
+@keyframes mpv-pop-in {
+  from { transform: scale(0.94); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+.mpv-menu-title,
+.mpv-menu-item,
+.mpv-menu-empty {
+  /* 줄이 많으면 줄이지 말고 판을 굴린다 */
+  flex: none;
+}
+.mpv-menu-title {
+  font-family: var(--dd-font-round);
+  font-size: 16px;
+  color: var(--dd-wood-2);
+  padding: 0 4px 2px;
+}
+.mpv-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 6px 10px;
+  border-radius: 13px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  text-align: left;
+}
+.mpv-menu-item:active {
+  background: var(--dd-paper-2);
+}
+.mpv-menu-item.on {
+  background: var(--dd-sky);
+}
+.mpv-menu-item .mpv-pic {
+  width: 36px;
+  height: 36px;
+  font-size: 15px;
+}
+.mpv-menu-item .l {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.mpv-menu-item .l b {
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 16px;
+}
+.mpv-menu-item .l small {
+  font-size: 12px;
+  color: var(--dd-ink-soft);
+}
+.mpv-menu-item .r {
+  font-family: var(--dd-font-round);
+  font-size: 15px;
+  white-space: nowrap;
+}
+.mpv-menu-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px 4px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--dd-ink-soft);
+}
+.mpv-dialog-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 80;
+  display: none;
+  place-items: center;
+  padding: 24px;
+  background: rgba(59, 42, 32, 0.4);
+  pointer-events: auto;
+}
+.mpv-dialog-layer.open {
+  display: grid;
+}
+.mpv-dialog {
+  width: min(340px, 100%);
+  padding: 18px 16px 16px;
+  border-radius: 20px;
+  border: var(--dd-stroke-fat) solid var(--dd-ink);
+  background: var(--dd-paper);
+  box-shadow: var(--dd-pop);
+  text-align: center;
+  animation: mpv-pop-in 0.16s ease-out;
+}
+.mpv-dialog p {
+  margin: 0 0 14px;
+  font-size: 16px;
+  white-space: pre-line;
+}
+.mpv-dialog .btns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+/* ── 토스트 ── */
+
+.mpv-toasts {
+  position: absolute;
+  top: var(--toast-top, calc(var(--sat) + 100px));
+  left: 12px;
+  right: 12px;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+/* 고르기 판이 열려 있으면 토스트는 판 아래로, 화면 아래 탭 위에 (판의 줄을 가리지 않게). */
+.mpv-ui:has(.mpv-menu-layer.open) .mpv-toasts {
+  z-index: 55;
+  top: auto;
+  bottom: calc(var(--sab) + var(--nav-h) + 12px);
+}
+/* 부스 패널이 열려 있으면 토스트는 화면 아래에 (위쪽 확대 화면을 가리지 않게). */
+.mpv-ui.booth-open .mpv-toasts {
+  top: auto;
+  bottom: calc(var(--sab) + 14px);
+}
+.mpv-toast {
+  max-width: 100%;
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: var(--dd-stroke) solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  box-shadow: var(--dd-pop-s);
+  font-family: var(--dd-font-round);
+  font-size: 15px;
+  line-height: 1.3;
+  text-align: center;
+  animation: mpv-toast-in 0.22s cubic-bezier(0.2, 0.8, 0.25, 1.3);
+  transition: opacity 0.25s, transform 0.25s;
+}
+.mpv-toast.good {
+  background: #dcefc9;
+}
+.mpv-toast.warn {
+  background: #f8d9cf;
+}
+.mpv-toast.out {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+@keyframes mpv-toast-in {
+  from { opacity: 0; transform: translateY(-10px) scale(0.95); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mpv-ui *,
+  .mpv-ui *::before,
+  .mpv-ui *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.mpv-recipe .mpv-pic.ico,
+.mpv-title .mpv-pic.ico {
+  width: 30px;
+  height: 30px;
+  font-size: 13px;
+}
+
+/* ── 다음 목표 칩 (HUD 아래) ── */
+
+.mpv-goal {
+  position: absolute;
+  top: calc(var(--sat) + 60px);
+  left: 10px;
+  z-index: 45;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  max-width: calc(100% - 20px);
+  min-height: 44px;
+  padding: 6px 12px 6px 6px;
+  border-radius: 16px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  box-shadow: var(--dd-pop-s);
+  font-family: var(--dd-font-round);
+  font-size: 13.5px;
+  line-height: 1.25;
+  text-align: left;
+  color: var(--dd-ink);
+  pointer-events: auto;
+}
+.mpv-goal[hidden],
+.mpv-ui.booth-open .mpv-goal,
+.mpv-ui.sheet-open .mpv-goal {
+  display: none;
+}
+.mpv-goal:active {
+  transform: translateY(1px);
+}
+.mpv-goal .tag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--dd-butter);
+  border: 2px solid var(--dd-ink);
+  font-size: 12px;
+}
+.mpv-goal .items {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.mpv-goal .items:empty {
+  display: none;
+}
+.mpv-goal .it {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px 0 2px;
+  border-radius: 999px;
+  background: #f8d9cf;
+  color: #b2402c;
+  white-space: nowrap;
+}
+.mpv-goal .it.ok {
+  background: #dcefd2;
+  color: #3f6b2e;
+}
+.mpv-goal .it .mpv-pic {
+  width: 20px;
+  height: 20px;
+}
+
+/* 아래 탭 점 배지: 그 탭에서 지금 할 수 있는 일이 있다 */
+.mpv-nav button {
+  position: relative;
+}
+.mpv-nav button.dot::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: calc(50% - 22px);
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-red);
+}
+
+/* 비용 칩의 아이템 이름 (폰에는 hover가 없다) */
+.mpv-chip .nm {
+  font-family: var(--dd-font-body);
+  font-size: 12px;
+  color: var(--dd-ink-soft);
+  margin-right: 2px;
+}
+.mpv-chip.short .nm {
+  color: #b2402c;
+}
+/* 레시피: 화살표와 만든 것은 한 덩어리 */
+.mpv-out {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.mpv-note.src {
+  margin: -4px 2px 8px;
+}
+
+/* 좁은 폰 (320px): HUD가 넘치지 않게 */
+.mpv-level,
+.mpv-iconbtn {
+  flex: none;
+}
+.mpv-level small {
+  white-space: nowrap;
+}
+.mpv-coins {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+@media (max-width: 340px) {
+  .mpv-coins {
+    font-size: 20px;
+    padding-right: 11px;
+  }
+  .mpv-hud {
+    gap: 6px;
+  }
+}
+
+/* 키가 작은 폰: 손님 카드를 줄여 따라가는 손님이 카드 위에 보이게 */
+@media (max-height: 720px) {
+  .mpv-mcard-pic {
+    width: 64px;
+    height: 64px;
+  }
+  .mpv-traits {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    margin-top: 6px;
+  }
+  .mpv-trait span {
+    display: none;
+  }
+  .mpv-record {
+    display: none;
+  }
+  .mpv-mood {
+    margin-top: 6px;
+  }
+  .mpv-mcard-actions {
+    margin-top: 8px;
+  }
+}
+
+/* ── 둘째 묶음 (2026-10-15): 진행자 자리, 부스 규칙, 경주장, 구역 묶음, 도감 인형, 가방 묶음 ── */
+
+/* 맨 위 알림 (열렸는데 쉬는 부스) */
+.mpv-alert {
+  margin: 2px 0 6px;
+  padding: 7px 12px;
+  border-radius: 12px;
+  border: 2px solid #b2402c;
+  background: #f8d9cf;
+  color: #b2402c;
+  font-family: var(--dd-font-round);
+  font-size: 14.5px;
+}
+/* 부스만의 규칙 한 줄 */
+.mpv-rule {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-radius: 12px;
+  background: var(--dd-paper-2);
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--dd-wood-3);
+}
+.mpv-box b.txt {
+  font-size: 15px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+/* 진행자 자리 머리: [역할] 능력치 담당 [꼭 필요] */
+.mpv-role {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 2px;
+}
+.mpv-tag.req {
+  background: #f8d9cf;
+  color: #b2402c;
+}
+.mpv-tag.opt {
+  background: #dcefd2;
+  color: #3f6b2e;
+}
+.mpv-thumb.empty {
+  border-style: dashed;
+  background: transparent;
+  color: var(--dd-ink-soft);
+  font-family: var(--dd-font-round);
+}
+.mpv-note.strong {
+  font-family: var(--dd-font-round);
+  font-size: 14px;
+}
+.mpv-note.good {
+  color: #3f6b2e;
+}
+.mpv-stats.focused .mpv-stat {
+  opacity: 0.55;
+}
+.mpv-stats.focused .mpv-stat.focus {
+  opacity: 1;
+  color: var(--dd-ink);
+  font-family: var(--dd-font-round);
+}
+.mpv-empty.sm {
+  padding: 10px 8px;
+  font-size: 13px;
+}
+
+/* 경주장: 상태 줄, 선수 넷, 관중석 참가자 */
+.mpv-race-st {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 14px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+}
+.mpv-race-st.gathering {
+  background: #fff1c9;
+}
+.mpv-race-st.running {
+  background: #dcefd2;
+}
+.mpv-race-st.done {
+  background: #ffe3a6;
+}
+.mpv-race-st .flag {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 8px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-red);
+  color: var(--dd-paper-3);
+  font-family: var(--dd-font-round);
+  font-size: 13px;
+}
+.mpv-race-st b {
+  display: block;
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 19px;
+  line-height: 1.2;
+}
+.mpv-race-st small {
+  display: block;
+  font-size: 12.5px;
+  color: var(--dd-ink-soft);
+}
+.mpv-racers {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-top: 10px;
+}
+.mpv-racer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  min-width: 0;
+  padding: 4px 2px 9px;
+  border-radius: 12px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  box-shadow: inset 0 -6px 0 var(--bib, var(--dd-paper-2));
+}
+.mpv-racer.first {
+  background: #fff1c9;
+  box-shadow: inset 0 -6px 0 var(--bib, var(--dd-paper-2)), var(--dd-pop-s);
+}
+.mpv-racer .mpv-pic {
+  width: 46px;
+  height: 34px;
+  font-size: 16px;
+}
+.mpv-racer .name {
+  font-family: var(--dd-font-round);
+  font-size: 13px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.mpv-racer .fans {
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--dd-ink-soft);
+}
+.mpv-racer.nofans .fans {
+  opacity: 0.6;
+}
+.mpv-racer .place {
+  position: absolute;
+  top: -7px;
+  left: -5px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper);
+  font-family: var(--dd-font-round);
+  font-size: 13px;
+  line-height: 1;
+}
+.mpv-racer.first .place {
+  background: var(--dd-gold);
+}
+.mpv-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mpv-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 4px 8px 4px 4px;
+  border-radius: 13px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  text-align: left;
+  pointer-events: auto;
+}
+.mpv-entry:active {
+  background: var(--dd-paper-2);
+}
+.mpv-entry > .mpv-pic {
+  width: 38px;
+  height: 38px;
+  font-size: 15px;
+}
+.mpv-entry .who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+.mpv-entry .who b {
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-entry .who small {
+  font-size: 11.5px;
+  color: var(--dd-ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-racer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  height: 30px;
+  padding: 0 8px 0 2px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--bib, var(--dd-paper));
+  font-family: var(--dd-font-round);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.mpv-racer-chip .mpv-pic {
+  width: 32px;
+  height: 24px;
+}
+.mpv-chip.bet {
+  flex: none;
+  height: 28px;
+  font-size: 14px;
+}
+.mpv-res {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-2);
+  font-family: var(--dd-font-round);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.mpv-res.win {
+  background: var(--dd-green);
+}
+.mpv-res.gold {
+  background: var(--dd-gold);
+}
+.mpv-res.near {
+  background: var(--dd-orange);
+}
+.mpv-res.wait {
+  border-style: dashed;
+  background: var(--dd-paper);
+  color: var(--dd-ink-soft);
+}
+
+/* 짓기: 아직 닫힌 구역의 까닭 */
+.mpv-lock {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--dd-paper);
+  border: 1.5px dashed var(--dd-ink-soft);
+  font-family: var(--dd-font-round);
+  font-size: 13px;
+  color: var(--dd-wood-2);
+}
+.mpv-card.locked .mpv-thumb {
+  opacity: 0.6;
+}
+
+/* 주민: 진행자 자리 칸 (두 줄, 누르면 고르기 판) */
+.mpv-posts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.mpv-post {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 54px;
+  min-width: 0;
+  padding: 4px 6px 4px 4px;
+  border-radius: 13px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  text-align: left;
+  pointer-events: auto;
+}
+.mpv-post:active {
+  background: var(--dd-paper-2);
+}
+.mpv-post > .mpv-pic {
+  width: 40px;
+  height: 40px;
+  font-size: 16px;
+}
+.mpv-post .plus {
+  border-radius: 10px;
+  border: 2px dashed var(--dd-ink-soft);
+  font-family: var(--dd-font-round);
+  font-size: 22px;
+  color: var(--dd-ink-soft);
+}
+.mpv-post.empty {
+  border-style: dashed;
+  background: var(--dd-paper);
+}
+.mpv-post.need {
+  border-color: #b2402c;
+  background: #fbe6df;
+}
+.mpv-post.need .plus {
+  border-color: #b2402c;
+  color: #b2402c;
+}
+.mpv-post .l {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.2;
+}
+.mpv-post .l small {
+  font-size: 11.5px;
+  color: var(--dd-ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 능력치 줄 ('손님맞이 · 있으면 좋아요')은 두 줄까지 (꼭 필요·있으면 좋아요가 잘리지 않게). */
+.mpv-post .l small.stat {
+  white-space: normal;
+}
+.mpv-post .l b {
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 14.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-post.need .l b {
+  color: #b2402c;
+}
+.mpv-post .l small.stat {
+  color: var(--dd-wood-2);
+}
+.mpv-card.idle {
+  background: var(--dd-paper);
+  border-style: dashed;
+}
+.mpv-desc.rest {
+  font-family: var(--dd-font-round);
+  color: var(--dd-wood-2);
+}
+.mpv-act.wrap {
+  flex-wrap: wrap;
+}
+.mpv-lvup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  justify-content: flex-end;
+  min-width: 0;
+}
+.mpv-lvup .mpv-cost {
+  flex: 0 1 auto;
+  justify-content: flex-end;
+}
+
+/* 보기 바꾸기 (도감 손님 / 인형) */
+.mpv-seg {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 4px;
+  margin: 10px 0 2px;
+  padding: 3px;
+  border-radius: 14px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-2);
+}
+.mpv-seg button {
+  min-height: 44px;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  font-family: var(--dd-font-round);
+  font-size: 16px;
+  pointer-events: auto;
+}
+.mpv-seg button small {
+  font-family: var(--dd-font-body);
+  font-size: 12px;
+  color: var(--dd-ink-soft);
+}
+.mpv-seg button.on {
+  background: var(--dd-butter);
+  border-color: var(--dd-ink);
+  box-shadow: var(--dd-pop-s);
+}
+
+/* 도감: 고른 종 카드 */
+.mpv-dex-sel {
+  margin-top: 8px;
+  scroll-margin: 12px;
+}
+.mpv-dex-sel-top {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 4px;
+}
+.mpv-chip.none {
+  color: var(--dd-ink-soft);
+}
+.mpv-chip.none .mpv-pic img {
+  filter: brightness(0);
+  opacity: 0.3;
+}
+
+/* 도감: 인형 */
+.mpv-plush {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 6px;
+}
+.mpv-plush-cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 2px;
+  border-radius: 13px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  text-align: center;
+}
+.mpv-plush-cell .mpv-pic {
+  width: 54px;
+  height: 54px;
+  font-size: 22px;
+}
+.mpv-plush-cell .name {
+  font-family: var(--dd-font-round);
+  font-size: 12.5px;
+  line-height: 1.2;
+  min-height: 2.4em;
+  display: flex;
+  align-items: center;
+}
+.mpv-plush-cell .n {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-butter);
+  font-family: var(--dd-font-round);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.mpv-plush-cell.none {
+  background: var(--dd-paper-2);
+}
+.mpv-plush-cell.none .mpv-pic img {
+  filter: brightness(0);
+  opacity: 0.22;
+}
+.mpv-plush-cell.none .mpv-ph {
+  background: var(--dd-ink-soft);
+  opacity: 0.4;
+}
+.mpv-plush-cell.none .name {
+  color: var(--dd-ink-soft);
+}
+
+/* 가방: 구역마다 작은 제목, 촘촘한 재료 칸 */
+.mpv-sub {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 4px 4px;
+  font-family: var(--dd-font-round);
+  font-size: 14px;
+  color: var(--dd-wood-2);
+}
+.mpv-sub small {
+  font-family: var(--dd-font-body);
+  font-size: 12px;
+  color: var(--dd-ink-soft);
+}
+.mpv-grid.compact {
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 6px;
+}
+.mpv-grid.compact .mpv-tile {
+  padding: 6px 2px 5px;
+  gap: 2px;
+}
+.mpv-grid.compact .mpv-tile .mpv-pic {
+  width: 36px;
+  height: 36px;
+  font-size: 16px;
+}
+.mpv-grid.compact .mpv-tile .name {
+  font-size: 12px;
+  min-height: 2.4em;
+}
+.mpv-tile .src {
+  font-size: 11.5px;
+  line-height: 1.2;
+  color: var(--dd-ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.mpv-grid.compact .mpv-tile .num {
+  font-size: 16px;
+  margin-top: 2px;
+}
+.mpv-tile.full {
+  border-color: var(--dd-wood);
+  background: #fff1c9;
+}
+.mpv-tile .num small {
+  font-family: var(--dd-font-body);
+}
+.mpv-grid.later .mpv-tile {
+  background: var(--dd-paper-2);
+  border-style: dashed;
+}
+
+/* 손님 카드: 들고 온 특산 재료 */
+.mpv-mcard-wallet .mats {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
