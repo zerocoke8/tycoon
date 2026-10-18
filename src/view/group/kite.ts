@@ -1,6 +1,8 @@
 // 지도 위 연날리기 대회. 부스 표식(이정표)과 진행자는 buildings.ts. 연 넷(objects/kite_red·blue·yellow·green)과 연줄은 하늘 층(모든 것 위):
-// 하늘에 떠 있어 지도 어디서나 보인다. 바닥층에는 날리는 자리마다 얼레를 꽂은 말뚝 (잠긴 부스라도 구역이 열렸으면 흐리게).
-//   연 k는 날리는 자리 k(map.ts KITE_FIELD.flyers) 위에서 높이 play.tracks[2k](0~1)·좌우 play.tracks[2k+1](sway px 단위)를 목표로
+// 하늘에 떠 있어 지도 어디서나 보인다 (마을 북쪽 건물·구름 위로도). 바닥층에는 날리는 자리를 품은 낮은 풀 언덕(KITE_GEO.hill: 밝은 위,
+// 그늘진 앞 비탈, 풀 포기·작은 꽃)과 날리는 자리마다 얼레를 꽂은 말뚝 (잠긴 부스라도 지도에 놓였으면 언덕은 그대로, 말뚝은 흐리게).
+// 배치형 마을: 모양은 만들 때 놓인 자리 (sim.village().kite()), 옮기면 world.ts가 새로 만든다.
+//   연 k는 날리는 자리 k(catalog.ts KITE_GEO.flyers) 위에서 높이 play.tracks[2k](0~1)·좌우 play.tracks[2k+1](sway px 단위)를 목표로
 //   용수철처럼 따라가며(조금 넘쳤다 돌아온다) 바람에 살랑인다. 움직이는 쪽으로 기울어 꼬리가 흔들린다 (연줄 매는 점이 기준점).
 //   연줄: 손(날리는 손님이 없으면 말뚝)에서 연까지 바람 쪽으로 휘는 가는 선. 연싸움(tangle) 동안 두 연이 떨고 줄이 팽팽해지며,
 //   두 줄이 엇갈린 곳에서 비벼지는 작은 반짝이. 판 중에는 하늘에 바람 자국이 더 지나간다.
@@ -9,18 +11,19 @@
 // 날리는 손님(몸 맡기기): 자기 연 쪽을 보며 뒤로 살짝 버틴다. 줄이 끊기면 뒤로 휘청 + 괴로움 → 슬픔, 이기면 기쁨으로 통통.
 // 구경 손님(자리 4·5)은 건 연 쪽을 본다. 결과 반응(done)은 sim의 반응 그대로.
 
-import { Container, Graphics } from 'pixi.js';
+import { Container, Graphics, Sprite } from 'pixi.js';
 import { KITE } from '../../data/defs.ts';
-import { KITE_FIELD } from '../../data/map.ts';
+import type { KiteGeo, Rect } from '../../data/catalog.ts';
+import { GROUND_STYLE } from '../../data/map.ts';
+import { Rng } from '../../core/rng.ts';
 import { trackAt } from '../../sim/group/core.ts';
 import type { GroupPlay, GroupState, MonsterId } from '../../sim/types.ts';
-import { ArtNode, artMeta, type ArtAnchor } from '../art.ts';
-import { clamp, districtAt, follow, type ViewRect } from '../mapUtil.ts';
+import { ArtNode, artMeta, artTexture, type ArtAnchor } from '../art.ts';
+import { clamp, ellipseK, follow, type ViewRect } from '../mapUtil.ts';
 import { GroupMapBase, type GroupMapCtx } from './base.ts';
 
 type KitePlay = Extract<GroupPlay, { kind: 'kite' }>;
 
-const F = KITE_FIELD;
 const OUTLINE = 0x402c1c;
 const STRING = 0xfffaf0;
 /** 카메라 확대가 이보다 작으면(멀리서 보면) 연을 키우기 시작한다 (폰 기본 확대 0.26이면 약 1.2배, 0.12면 약 1.8배), 가장 크게. */
@@ -53,13 +56,40 @@ const COUNT_FROM = 3;
 const STREAKS = 4;
 /** 잠긴 부스의 말뚝 (buildings.ts 닫힌 부스와 같은 흐림). */
 const LOCKED_ALPHA = 0.35;
-const DISTRICT = districtAt(F.center.x, F.center.y);
+/** 언덕 색: 위(볕 드는 풀빛, 풀밭보다 밝게)·앞 비탈(그늘)·볕 얼룩, 꽃 색. */
+const HILL_TOP = 0xa3c274;
+const HILL_SIDE = 0x7b9a52;
+const HILL_SUN = 0xc4dc92;
+const HILL_FLOWERS = [0xfff6e2, 0xf6d36b, 0xf2b5a8] as const;
+/** 언덕 위 풀 포기·꽃 수와 한 포기 폭 (세계 px, 바닥 풀과 같게). */
+const HILL_TUFTS = 11;
+const HILL_BLOOMS = 7;
+const HILL_TUFT_W = 38;
 
 /** 연 그림의 기준점 (연줄 매는 점, 캔버스 좌표). 그림 정보가 없으면 가운데. */
 function bridleAnchor(key: string): ArtAnchor {
   const m = artMeta('objects', key);
   if (m === undefined) return 'center';
   return { x: m.trim.x + m.trim.w / 2, y: m.trim.y + m.trim.h * (BRIDLE[key] ?? 0.28) };
+}
+
+/** 하늘이 넘지 않는 지도 위 끝 (세계 y: 연줄 매는 점 위로 연 머리가 지도 안에 남는 여유, 카메라는 지도 위 끝까지만 본다). */
+const SKY_TOP = 34;
+
+/**
+ * 연이 나는 높이 (세계 y: low = 높이 0, high = 높이 1)와 바람 자국이 지나는 하늘. 보통은 KITE_GEO 그대로,
+ * 언덕이 지도 위 끝 가까이 놓여 하늘이 지도 밖으로 나가면 날리는 자리에서 SKY_TOP까지로 눌러 담는다 (연은 낮게 난다).
+ */
+function skyOf(F: KiteGeo): { low: number; high: number; rect: Rect } {
+  const base = F.flyers[0]?.y ?? F.center.y;
+  const span = base - F.skyHigh;
+  const room = base - SKY_TOP;
+  const k = span > room ? clamp(room / span, 0.15, 1) : 1;
+  const low = base - (base - F.skyLow) * k;
+  const high = base - span * k;
+  // 바람 자국은 연 높이 위아래로 (KITE_GEO.sky와 같은 여유).
+  const top = high - (F.skyHigh - F.sky.y);
+  return { low, high, rect: { x: F.sky.x, y: top, w: F.sky.w, h: low - top + (F.sky.y + F.sky.h - F.skyLow) } };
 }
 
 /** 0 → 1 → 0 (u 0~1). */
@@ -106,6 +136,12 @@ interface Dropped {
 }
 
 export class KiteMapView extends GroupMapBase {
+  /** 연날리기 언덕 (세계 좌표, 만들 때 놓인 자리). */
+  private readonly F: KiteGeo = this.ctx.sim.village().kite();
+  /** 연이 나는 높이와 하늘 (지도 위 끝에 붙은 언덕이면 지도 안으로 눌러 담는다). */
+  private readonly sky = skyOf(this.F);
+  /** 풀 언덕 (바닥층 맨 아래: 말뚝·손님 그림자가 그 위에). */
+  private readonly hill = new Container();
   private readonly pegs = new Graphics();
   private readonly wind = new Graphics();
   private readonly strings = new Graphics();
@@ -123,9 +159,11 @@ export class KiteMapView extends GroupMapBase {
 
   constructor(ctx: GroupMapCtx) {
     super(ctx);
+    this.own(ctx.layers.floor, this.hill);
     this.own(ctx.layers.floor, this.pegs);
     this.own(ctx.layers.sky, this.wind);
     this.own(ctx.layers.sky, this.strings);
+    this.drawHill();
     this.drawPegs();
     KITE.kites.forEach((k, i) => {
       const node = new Container();
@@ -139,8 +177,8 @@ export class KiteMapView extends GroupMapBase {
       shadow.position.set(16, 26);
       node.addChild(shadow, art);
       this.own(ctx.layers.sky, node);
-      const spot = F.flyers[i] ?? F.center;
-      const y = F.skyLow + (F.skyHigh - F.skyLow) * IDLE_H;
+      const spot = this.F.flyers[i] ?? this.F.center;
+      const y = this.sky.low + (this.sky.high - this.sky.low) * IDLE_H;
       this.kites.push({
         index: i, node, art, seed: i * 2.17 + 0.6, x: spot.x, y, vx: 0, vy: 0, rot: 0, vr: 0,
         hx: spot.x + 24, hy: spot.y - 26, lost: null, lx: 0, ly: 0, lvx: 0, lrot: 0, back: 1,
@@ -148,10 +186,70 @@ export class KiteMapView extends GroupMapBase {
     });
   }
 
+  /**
+   * 풀 언덕: 앞 비탈(위 타원을 rise만큼 내린 그늘진 타원, 진한 테두리) 위에 밝은 위 타원, 볕 드는 왼쪽 위 얼룩.
+   * 풀 포기(바닥 풀 그림)와 작은 꽃은 언덕마다 같은 무작위로, 손님 자리·말뚝·이정표·진행자·항아리를 비켜서.
+   */
+  private drawHill(): void {
+    const H = this.F.hill;
+    const { c, rx, ry, rise } = H;
+    const g = new Graphics();
+    g.ellipse(c.x, c.y + rise, rx, ry).fill(HILL_SIDE).stroke({ width: 5, color: OUTLINE, alpha: 0.55 });
+    g.ellipse(c.x, c.y, rx, ry).fill(HILL_TOP).stroke({ width: 3, color: OUTLINE, alpha: 0.16 });
+    g.ellipse(c.x - rx * 0.3, c.y - ry * 0.32, rx * 0.42, ry * 0.36).fill({ color: HILL_SUN, alpha: 0.4 });
+    this.hill.addChild(g);
+    // 비킬 곳 (세계 px, 반지름).
+    const keep: { x: number; y: number; r: number }[] = [
+      ...this.F.flyers.map((s) => ({ x: s.x + 10, y: s.y - 10, r: 62 })),
+      ...this.F.bettors.map((s) => ({ x: s.x, y: s.y - 10, r: 56 })),
+      ...this.spot.hosts.map((s) => ({ x: s.x, y: s.y - 10, r: 56 })),
+      { x: this.spot.base.x, y: this.spot.base.y, r: 80 },
+      { x: this.spot.pot.x, y: this.spot.pot.y, r: 48 },
+    ];
+    const free = (x: number, y: number): boolean => ellipseK(x, y, c.x, c.y, rx * 0.9, ry * 0.8) < 1 && keep.every((k) => Math.hypot(x - k.x, (y - k.y) * 1.3) > k.r);
+    const rng = new Rng(0x6b17e);
+    const tex = artTexture('map', 'tuft');
+    let tufts = 0;
+    let blooms = 0;
+    for (let n = 0; n < 160 && (tufts < HILL_TUFTS || blooms < HILL_BLOOMS); n++) {
+      const a = rng.next() * Math.PI * 2;
+      const r = Math.sqrt(rng.next());
+      const x = c.x + Math.cos(a) * rx * r;
+      const y = c.y + Math.sin(a) * ry * r;
+      const s = 0.8 + rng.next() * 0.35;
+      const flip = rng.next() < 0.5 ? -1 : 1;
+      const bloom = rng.next() < 0.45;
+      const col = HILL_FLOWERS[Math.floor(rng.next() * HILL_FLOWERS.length)] ?? 0xfff6e2;
+      if (!free(x, y)) continue;
+      if (bloom && blooms < HILL_BLOOMS) {
+        blooms++;
+        // 작은 꽃: 잎 다섯 + 노란 가운데.
+        for (let k = 0; k < 5; k++) {
+          const t = (k / 5) * Math.PI * 2 + a;
+          g.circle(x + Math.cos(t) * 5 * s, y + Math.sin(t) * 4 * s, 4 * s).fill(col);
+        }
+        g.circle(x, y, 3 * s).fill(0xe8a33d);
+      } else if (!bloom && tufts < HILL_TUFTS) {
+        tufts++;
+        if (tex !== undefined) {
+          const sp = new Sprite(tex);
+          sp.anchor.set(0.5, 1);
+          const k = (HILL_TUFT_W * s) / Math.max(1, tex.width);
+          sp.scale.set(k * flip, k);
+          sp.position.set(x, y);
+          this.hill.addChild(sp);
+        } else {
+          g.moveTo(x - 9 * s * flip, y).lineTo(x - 15 * s * flip, y - 14 * s).moveTo(x, y - s).lineTo(x + s * flip, y - 20 * s).moveTo(x + 9 * s * flip, y).lineTo(x + 14 * s * flip, y - 15 * s);
+          g.stroke({ width: 5.5 * s, color: GROUND_STYLE.tuft, cap: 'round' });
+        }
+      }
+    }
+  }
+
   /** 날리는 자리마다 얼레를 꽂은 말뚝 (날리는 손님이 없으면 연줄이 여기 묶인다). */
   private drawPegs(): void {
     const g = this.pegs;
-    for (const s of F.flyers) {
+    for (const s of this.F.flyers) {
       const p = pegTop(s);
       g.ellipse(p.x, s.y + 2, 13, 5).fill({ color: 0x000000, alpha: 0.12 });
       g.roundRect(p.x - 4, p.y, 8, s.y - p.y + 2, 3).fill(0xa0703f).stroke({ color: OUTLINE, width: 3 });
@@ -207,7 +305,7 @@ export class KiteMapView extends GroupMapBase {
     if (g !== null && g.phase === 'gathering') {
       const c = Math.ceil(g.countdown - 1e-6);
       if (c >= 1 && c <= COUNT_FROM && c !== this.lastCount) {
-        this.ctx.fx.floatText(F.center.x, F.center.y - 40, `${c}`, 'win', c === 1);
+        this.ctx.fx.floatText(this.F.center.x, this.F.center.y - 40, `${c}`, 'win', c === 1);
         this.ctx.buildings.hostHop('kite', 1, 0.6);
       }
       this.lastCount = c;
@@ -248,7 +346,7 @@ export class KiteMapView extends GroupMapBase {
 
   /** 연 k의 연줄 끝: 이번 판의 날리는 손님 손 (판 밖이면 그 자리에 와 있는 손님), 없으면 말뚝. */
   private hand(k: Kite, g: GroupState | null, play: KitePlay | null, dt: number): void {
-    const spot = F.flyers[k.index];
+    const spot = this.F.flyers[k.index];
     if (spot === undefined) return;
     let id: MonsterId | null = null;
     if (play !== null && g !== null) id = g.participants.find((e) => e.role === 'player' && e.pick === k.index)?.monster ?? null;
@@ -315,8 +413,8 @@ export class KiteMapView extends GroupMapBase {
     // 바람: 느린 너울과 잔떨림.
     const gx = Math.sin(time * 0.83 + k.seed) * 14 + Math.sin(time * 2.1 + k.seed * 3) * 6;
     const gy = Math.sin(time * 1.13 + k.seed * 2) * 10;
-    const tx = (F.flyers[k.index]?.x ?? F.center.x) + s * F.sway + gx;
-    const ty = F.skyLow + (F.skyHigh - F.skyLow) * h + gy + dip * 80;
+    const tx = (this.F.flyers[k.index]?.x ?? this.F.center.x) + s * this.F.sway + gx;
+    const ty = this.sky.low + (this.sky.high - this.sky.low) * h + gy + dip * 80;
     // 용수철 (작게 나눠 적분: 프레임이 길어도 안정).
     k.back = Math.min(1, k.back + dt / BACK_SEC);
     const K = SPRING_K * (0.3 + 0.7 * k.back);
@@ -423,7 +521,7 @@ export class KiteMapView extends GroupMapBase {
   private drawWind(running: boolean): void {
     const g = this.wind;
     g.clear();
-    const sky = F.sky;
+    const sky = this.sky.rect;
     const span = sky.w + 400;
     const n = running ? STREAKS : 2;
     for (let i = 0; i < n; i++) {
@@ -449,7 +547,7 @@ export class KiteMapView extends GroupMapBase {
     if (play !== null && g !== null) {
       for (const e of g.participants) holders.push({ id: e.monster, kite: e.pick, player: e.role === 'player' });
     } else {
-      for (let i = 0; i < F.flyers.length; i++) {
+      for (let i = 0; i < this.F.flyers.length; i++) {
         const id = this.bs.seats[i] ?? null;
         if (id !== null) holders.push({ id, kite: i, player: true });
       }
@@ -512,16 +610,16 @@ export class KiteMapView extends GroupMapBase {
     const zoom = vw > 0 ? (globalThis.innerWidth || 390) / vw : 1;
     this.far = clamp(Math.sqrt(FAR_ZOOM / zoom), 1, FAR_MAX);
     super.update(dt, view);
-    this.pegs.visible = DISTRICT === null || this.sim.state.districts.includes(DISTRICT);
+    this.hill.visible = this.placed;
+    this.pegs.visible = this.placed;
     this.pegs.alpha = this.shown ? 1 : LOCKED_ALPHA;
   }
 
   override hitTest(wx: number, wy: number): boolean {
     for (const k of this.kites) if (k.node.visible && k.node.alpha > 0.3 && Math.abs(wx - k.x) < 55 * this.far && wy > k.y - 60 * this.far && wy < k.y + 110 * this.far) return true;
-    const f = F.flyers;
-    const a = f[0];
-    const b = f[f.length - 1];
-    return a !== undefined && b !== undefined && wx >= a.x - 60 && wx <= b.x + 60 && wy >= a.y - 130 && wy <= a.y + 110;
+    // 언덕 (위 + 앞 비탈).
+    const H = this.F.hill;
+    return this.placed && ellipseK(wx, wy, H.c.x, H.c.y + H.rise / 2, H.rx, H.ry + H.rise / 2) < 1;
   }
 }
 

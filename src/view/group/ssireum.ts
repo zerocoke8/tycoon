@@ -9,7 +9,8 @@
 
 import { Graphics } from 'pixi.js';
 import { SIDES } from '../../data/defs.ts';
-import { SSIREUM_RING, type Pt } from '../../data/map.ts';
+import type { RingGeo } from '../../data/catalog.ts';
+import type { Pt } from '../../data/map.ts';
 import { ease } from '../../core/tween.ts';
 import { trackAt } from '../../sim/group/core.ts';
 import type { GroupEntry, GroupPlay, GroupState } from '../../sim/types.ts';
@@ -44,6 +45,8 @@ interface Player {
 }
 
 export class SsireumMapView extends GroupMapBase {
+  /** 모래판 (세계 좌표, 만들 때 놓인 자리). */
+  private readonly R: RingGeo = this.ctx.sim.village().ring();
   private readonly bodies: PuppetSet;
   private readonly lie = new LieShadows();
   private readonly lines = new Graphics();
@@ -64,7 +67,7 @@ export class SsireumMapView extends GroupMapBase {
     super(ctx);
     this.bodies = new PuppetSet(ctx.monsters);
     this.own(ctx.layers.floor, this.lines);
-    const c = SSIREUM_RING.center;
+    const c = this.R.center;
     // 가운데 출발선 둘 (세로로 짧게).
     for (const s of [-1, 1]) this.lines.roundRect(c.x + s * 26 - 3, c.y - 10, 6, 30, 3).fill({ color: CHALK, alpha: 0.85 });
     this.rings = [this.ring(0), this.ring(1)];
@@ -82,7 +85,7 @@ export class SsireumMapView extends GroupMapBase {
   }
 
   private seatPt(seat: number): Pt {
-    return this.spot.seats[seat] ?? SSIREUM_RING.center;
+    return this.spot.seats[seat] ?? this.R.center;
   }
 
   protected override onShown(show: boolean): void {
@@ -105,7 +108,7 @@ export class SsireumMapView extends GroupMapBase {
     const prev = this.prevClock;
     this.prevClock = t;
     // 시작 숫자 3·2·1 (모래판 위, 선수 머리 위로).
-    this.startCount(SSIREUM_RING.center.x, SSIREUM_RING.center.y - 150, REFEREE);
+    this.startCount(this.R.center.x, this.R.center.y - 150, REFEREE);
     // 선수 찾기 (자리 0 홍·1 청).
     for (let side = 0; side < 2; side++) {
       const pl = this.players[side] as Player;
@@ -176,8 +179,8 @@ export class SsireumMapView extends GroupMapBase {
   /** 판 중·결과: 맞붙어 밀고 밀리다가 넘어뜨리기. */
   private bout(play: Extract<GroupPlay, { kind: 'ssireum' }>, t: number, prev: number): void {
     const keys = play.tracks[0] ?? NO_KEYS;
-    const c = SSIREUM_RING.center;
-    const R = SSIREUM_RING.reach;
+    const c = this.R.center;
+    const R = this.R.reach;
     const thrown = t >= play.throwAt;
     const p = thrown ? (play.winner === 0 ? 1 : -1) : trackAt(keys, t);
     const pv = thrown ? 0 : (p - trackAt(keys, t - 0.12)) / 0.12;
@@ -308,8 +311,8 @@ export class SsireumMapView extends GroupMapBase {
   }
 
   override hitTest(wx: number, wy: number): boolean {
-    const c = SSIREUM_RING.center;
-    return inEllipse(wx, wy, c.x, c.y, SSIREUM_RING.rx + 20, SSIREUM_RING.ry + 30);
+    const c = this.R.center;
+    return inEllipse(wx, wy, c.x, c.y, this.R.rx + 20, this.R.ry + 30);
   }
 
   override destroy(): void {

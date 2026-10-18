@@ -1,9 +1,8 @@
 // 가방(재료·귀한 물건·가공품)과 설정(저장, 처음부터, 디버그) 시트.
 
 import { GOODS, MATERIALS, PRECIOUS, SIM, SPECIES, type GoodId, type PreciousId } from '../../data/defs.ts';
-import { DISTRICTS } from '../../data/map.ts';
 import { btn, fmt, h, setText } from '../dom.ts';
-import { DISTRICT_ORDER, MAT_IDS, MATERIAL_SPECIES, speciesDistrict } from '../labels.ts';
+import { AREAS, DISTRICT_ORDER, MAT_IDS, MATERIAL_SPECIES, speciesDistrict } from '../labels.ts';
 import { BasePanel } from '../panel.ts';
 import { itemIcon } from '../pics.ts';
 import { secHead } from '../widgets.ts';
@@ -29,7 +28,8 @@ export class BagPanel extends BasePanel {
         return sp !== undefined && speciesDistrict(sp) === d;
       });
       if (mats.length === 0) continue;
-      const D = DISTRICTS[d];
+      const D = AREAS[d];
+      if (D === undefined) continue;
       const later = D.hall > hall;
       this.el.append(h('div', 'mpv-sub', h('span', null, `${D.name} 손님`), h('small', null, later ? `마을회관 Lv.${D.hall}부터 와요` : `${mats.length}종`)));
       const g = this.grid(mats, (k) => this.st.materials[k] ?? 0, (k) => MATERIALS[k].name, true, (k) => {

@@ -4,7 +4,6 @@
 // 아직 짓지 않았으면 무엇을 하는 곳인지와 짓기 칸만.
 
 import { ACCESSORIES, ACCESSORY_IDS, BANK, BOOTHS, BUILDINGS, DEBT_MATCH, LABOR, PAWN, VAULT, WORK_FACILITIES, type AccessoryId, type GroupBoothId, type MaterialId, type WorkFacility } from '../../data/defs.ts';
-import { BUILDING_SPOTS } from '../../data/map.ts';
 import type { SimApi } from '../../sim/api.ts';
 import { bankLoan, debtEligible, laborGauge, laborSecLeft, loanDebt, pawnPrice, redeemCost, workSlots } from '../../sim/debt.ts';
 import { josa } from '../../sim/text.ts';
@@ -16,7 +15,7 @@ import { openSnackMenu } from '../monsterCard.ts';
 import { BasePanel, type UiCtx } from '../panel.ts';
 import { itemIcon, mapPic, monsterPic, staffPic } from '../pics.ts';
 import { makeBar, secHead } from '../widgets.ts';
-import { buildingArt, costAction, effLine } from './build.ts';
+import { buildingArt, costAction, effLine, placeRow, startPlace } from './build.ts';
 
 export type DebtBuildingId = 'pawnshop' | 'bank' | 'workyard';
 
@@ -157,7 +156,7 @@ abstract class DebtSheet extends BasePanel {
         h('span', 'mpv-thumb', mapPic(buildingArt(id), d.name)),
         h('div', 'mpv-grow', h('div', 'mpv-desc', d.desc), lock !== null ? h('div', 'mpv-lock', lock) : h('div', 'mpv-note strong', `아직 빈 부지예요. 지으면 ${josa(npc.name, '이', '가')} 와요.`)),
       ),
-      h('div', 'mpv-card col', first !== null ? effLine('지으면', first, true) : null, costAction(this.ctx, this.live, this.sim.buildingUpgradeCost(id), '짓기', () => this.sim.upgradeBuilding(id), '최고 레벨이에요', lock !== null)),
+      h('div', 'mpv-card col', first !== null ? effLine('지으면', first, true) : null, costAction(this.ctx, this.live, this.sim.buildingUpgradeCost(id), '짓고 놓기', () => startPlace(this.ctx, id), '최고 레벨이에요', lock !== null)),
       secHead('이런 곳이에요'),
       h('ul', 'mpv-how', ...HOW[id].map((t) => h('li', null, t))),
       this.mapButton(),
@@ -185,13 +184,20 @@ abstract class DebtSheet extends BasePanel {
   }
 
   private mapButton(): HTMLElement {
+    const v = this.sim.village();
+    if (v.placed(this.id) === undefined) return placeRow(this.ctx, this.id) ?? h('div');
     return h(
       'div',
-      'mpv-act',
-      btn('sub wide', [icon('pin'), '지도에서 보기'], () => {
-        this.ctx.closeAll();
-        this.ctx.hooks.world.focusOn(BUILDING_SPOTS[this.id]);
-      }),
+      'mpv-col',
+      h(
+        'div',
+        'mpv-act',
+        btn('sub wide', [icon('pin'), '지도에서 보기'], () => {
+          this.ctx.closeAll();
+          this.ctx.hooks.world.focusOn(v.art(this.id));
+        }),
+      ),
+      placeRow(this.ctx, this.id),
     );
   }
 

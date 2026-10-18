@@ -1,29 +1,30 @@
 // 다음 목표 칩 (HUD 아래)과 아래 탭의 점 배지: 처음 하는 사람이 무엇을 할지 알게.
-// 목표 차례: 손님 응원하기 → 부스 구경하기 → 새로 열린 구역 보러 가기 → 진행자 자리가 비어 쉬는 부스 →
+// 목표 차례: 보관함의 부스·건물 놓기 → 길이 이어지지 않은 건물에 길 잇기 (둘 다 촌장이 한 일 뒤에만) → (옛 저장) 짓기 모드 알림 → 손님 응원하기 → 부스 구경하기 → 진행자 자리가 비어 쉬는 부스 →
 // 처음 열린 빚 걸기 판 보러 가기 → 처음 생긴 일터 채무자 응원하러 가기 (넷째 묶음) →
 // 아직 구경하지 않은 단체 놀이의 판이 모이거나 한창이면 지도에서 구경하기 →
 // 전당포(회관 1)·일터·은행(회관 2)을 지을 수 있으면 짓기 (빈털터리 손님을 본 뒤나 밀어내기를 연 뒤에만: 그 전엔 할 일이 없다) → 지금 살 수 있는 가장 싼 짓기 →
-// 열린 구역의 다음 부스(귀한 물건은 이미 모았을 때)·아직 안 지은 전당포·일터·은행 → 다음 마을회관까지 모은 정도 (그 레벨에 열리는 구역).
+// 다음 부스(귀한 물건은 이미 모았을 때)·아직 안 지은 전당포·일터·은행 → 다음 마을회관까지 모은 정도.
 // 칩을 누르면 그 화면을 연다. 처음 두 단계와 구경한 단체 놀이는 이 브라우저에 기억한다 (게임 저장과 따로, 없어도 된다).
 
+import { catalogKind, catalogName, footprint, type CatalogKey } from '../data/catalog.ts';
 import { BOOTH_IDS, BOOTHS, boothDef, BUILDINGS, DEBT_MATCH, GROUP_BOOTHS, type BoothId, type BuildingId, type GroupBoothId, type MaterialId, type PreciousId } from '../data/defs.ts';
-import { BOOTH_SPOTS, DISTRICTS, type DistrictId } from '../data/map.ts';
 import type { Cost } from '../sim/api.ts';
 import { josa } from '../sim/text.ts';
 import { fmt, h, setText } from './dom.ts';
 import { groupGame } from '../sim/group/index.ts';
 import { groupWatchBox, groupWatchZoom, roundWord, startWord } from './groupText.ts';
-import { boothShort, boothsIn, boothTiny, BUILDING_IDS, districtAtHall, itemName } from './labels.ts';
+import { AREAS, boothShort, boothTiny, BUILDING_IDS, districtAtHall, itemName } from './labels.ts';
 import type { TabId, UiCtx } from './panel.ts';
+import { catOf, joinRoad } from './panels/build.ts';
 import { itemIcon } from './pics.ts';
 
 const HINT_KEY = 'mpv-hints-v1';
-/** 새로 열린 구역 목표를 보여 주는 시간 (ms). */
-const FRESH_MS = 90_000;
 
 interface Seen {
   cheer: boolean;
   booth: boolean;
+  /** 짓기 모드를 써 보았다 (옮기기·길 깔기: 옛 저장으로 이어 하는 사람에게 한 번 알린다). */
+  place: boolean;
   /** 일터 시트를 열어 채무자를 보았다 (넷째 묶음). */
   yard: boolean;
   /** 빚 걸기 판을 부스 패널로 보았다. */
@@ -35,7 +36,7 @@ interface Seen {
 }
 
 /** 한 번 보면 끝나는 목표. */
-export type SeenKey = 'cheer' | 'booth' | 'yard' | 'debtMatch';
+export type SeenKey = 'cheer' | 'booth' | 'place' | 'yard' | 'debtMatch';
 
 function loadSeen(): Seen {
   try {
@@ -43,13 +44,14 @@ function loadSeen(): Seen {
     return {
       cheer: raw.cheer === true,
       booth: raw.booth === true,
+      place: raw.place === true,
       yard: raw.yard === true,
       debtMatch: raw.debtMatch === true,
       broke: raw.broke === true,
       watched: Array.isArray(raw.watched) ? raw.watched.filter((x): x is string => typeof x === 'string') : [],
     };
   } catch {
-    return { cheer: false, booth: false, yard: false, debtMatch: false, broke: false, watched: [] };
+    return { cheer: false, booth: false, place: false, yard: false, debtMatch: false, broke: false, watched: [] };
   }
 }
 
@@ -60,10 +62,11 @@ const DEBT_BUILD: readonly { readonly id: BuildingId; readonly why: string }[] =
   { id: 'bank', why: '맡길 장신구도 없는 손님에게 빌려줘요' },
 ];
 
-/** 지금 살 수 있는 것 하나 (가장 싼 것). */
+/** 지금 살 수 있는 것 하나 (가장 싼 것): 짓기 탭의 그 묶음을 연다. */
 interface Buyable {
   readonly label: string;
   readonly coins: number;
+  readonly key: CatalogKey;
 }
 
 export class GoalChip {
@@ -74,8 +77,6 @@ export class GoalChip {
   private readonly seen: Seen = loadSeen();
   private action: () => void = () => {};
   private sig = '';
-  /** 막 열린 구역 (칩을 누르거나 FRESH_MS가 지나면 사라진다). */
-  private fresh: { readonly id: DistrictId; readonly until: number } | null = null;
 
   constructor(ctx: UiCtx, parent: HTMLElement) {
     this.ctx = ctx;
@@ -90,9 +91,6 @@ export class GoalChip {
     parent.append(this.el);
     ctx.sim.bus.on('monsterCheered', (e) => {
       if (e.by === 'tap') this.mark('cheer');
-    });
-    ctx.sim.bus.on('districtOpened', (e) => {
-      if (DISTRICTS[e.district].hall > 1) this.fresh = { id: e.district, until: performance.now() + FRESH_MS };
     });
   }
 
@@ -128,10 +126,41 @@ export class GoalChip {
       this.store();
     }
     setBadge('build', this.cheapest() !== null);
-    const needHost = BOOTH_IDS.some((b) => st.booths[b].unlocked && !sim.boothOpen(b));
+    const village = sim.village();
+    const needHost = BOOTH_IDS.some((b) => st.booths[b].unlocked && village.connected(b) && !sim.boothOpen(b));
     setBadge('staff', needHost && (st.staff.some((s) => s.post === null) || st.candidates.some((c) => c.cost <= st.coins)));
     setBadge('workshop', st.crafting.length < sim.craftSlots() && sim.availableRecipes().some((r) => r.affordable));
 
+    // 이미 마을을 키운 사람 (회관 2 이상이거나 부스가 셋 넘게 열림: 옛 저장으로 이어 하는 사람)에게는 처음 두 단계를 건너뛴다.
+    const veteran = sim.hallLevel() > 1 || BOOTH_IDS.filter((b) => st.booths[b].unlocked).length > 2;
+    if (veteran && (!this.seen.cheer || !this.seen.booth)) {
+      this.seen.cheer = true;
+      this.seen.booth = true;
+      this.store();
+    }
+    if (!this.seen.place && this.ctx.hooks.world.buildState().mode.kind !== 'none') this.mark('place');
+    // 배치형 마을: 보관함에 있는 부스·건물 (열거나 지은 뒤 아직 안 놓음) → 짓기 모드로 놓기. 촌장이 한 일 뒤에만 생겨서 처음 두 단계보다 먼저.
+    const stored = sim.storage().find((x) => catalogKind(x.key) !== 'decor');
+    if (stored !== undefined) {
+      this.show(`store:${stored.key}`, `${josa(catalogName(stored.key), '을', '를')} 지도에 놓아 주세요`, null, () => {
+        this.ctx.startBuild({ kind: 'place', key: stored.key });
+      });
+      return;
+    }
+    // 입구가 길로 이어지지 않은 건물 (손님이 못 온다) → 길 깔기.
+    const cut = village.state.placed.find((p) => catalogKind(p.key) !== 'decor' && footprint(p.key).entry !== undefined && !village.linkedId(p.id));
+    if (cut !== undefined) {
+      this.show(`road:${cut.key}`, `${catalogName(cut.key)} 입구 앞에 길을 이어 주세요`, null, () => joinRoad(this.ctx, cut.key));
+      return;
+    }
+    // 옛 저장으로 이어 하는 사람: 이제 건물을 옮기고 길을 깔 수 있다 (한 번).
+    if (veteran && !this.seen.place) {
+      this.show('place', '이제 짓기 탭에서 건물을 옮기고 길을 깔 수 있어요', null, () => {
+        this.mark('place');
+        this.ctx.openBuild('road');
+      });
+      return;
+    }
     if (!this.seen.cheer) {
       this.show('cheer', '손님을 눌러 응원해 보세요', null, () => {
         const m = st.monsters.find((x) => x.phase !== 'leaving' && x.phase !== 'arriving') ?? st.monsters[0];
@@ -144,23 +173,9 @@ export class GoalChip {
       this.show('booth', '부스를 눌러 한판을 구경해 보세요', null, () => this.ctx.showBooth(b));
       return;
     }
-    // 새로 열린 구역: 보러 가기 (첫 부스 자리로 카메라)
-    const fresh = this.fresh;
-    if (fresh !== null && performance.now() < fresh.until) {
-      const D = DISTRICTS[fresh.id];
-      const first = boothsIn(fresh.id)[0];
-      this.show(`district:${fresh.id}`, `새 구역이 열렸어요: ${D.name} 보러 가기`, null, () => {
-        this.fresh = null;
-        this.ctx.closeAll();
-        this.ctx.hooks.world.focusOn(first !== undefined ? BOOTH_SPOTS[first].base : { x: D.rect.x + D.rect.w / 2, y: D.rect.y + D.rect.h / 2 });
-        this.ctx.markDirty();
-      });
-      return;
-    }
-    if (fresh !== null) this.fresh = null;
 
     // 열렸는데 꼭 있어야 하는 진행자 자리가 빈 부스 (경주장은 출발 신호·해설자 둘)
-    const idle = BOOTH_IDS.find((b) => st.booths[b].unlocked && !sim.boothOpen(b));
+    const idle = BOOTH_IDS.find((b) => st.booths[b].unlocked && village.connected(b) && !sim.boothOpen(b));
     if (idle !== undefined) {
       const roles = boothDef(idle).roles;
       const role = roles.findIndex((r, i) => r.optional !== true && (st.booths[idle].staff[i] ?? null) === null);
@@ -208,7 +223,7 @@ export class GoalChip {
       this.show(`watch:${watch}:${ph}:${soon ? 1 : 0}`, text, null, () => {
         this.markWatched(watch);
         this.ctx.closeAll();
-        this.ctx.hooks.world.focusOn(groupWatchBox(watch).c, groupWatchZoom(watch, window.innerWidth, window.innerHeight));
+        this.ctx.hooks.world.focusOn(groupWatchBox(village, watch).c, groupWatchZoom(village, watch, window.innerWidth, window.innerHeight));
       });
       return;
     }
@@ -224,7 +239,8 @@ export class GoalChip {
 
     const buy = this.cheapest();
     if (buy !== null) {
-      this.show(`buy:${buy.label}`, buy.label, null, () => this.ctx.openTab('build'));
+      // 그 카드가 든 묶음으로 (마지막에 본 묶음이 장식·길·땅이어도).
+      this.show(`buy:${buy.label}`, buy.label, null, () => this.ctx.openBuild(catOf(buy.key)));
       return;
     }
 
@@ -242,7 +258,8 @@ export class GoalChip {
     if (hallCost !== null) {
       const lv = sim.hallLevel() + 1;
       const d = districtAtHall(lv);
-      this.show(`hall:${lv}`, d !== null ? `마을회관 Lv.${lv}: ${josa(DISTRICTS[d].name, '이', '가')} 열려요` : `마을회관 Lv.${lv}까지`, hallCost, () => this.ctx.showBuilding('hall'));
+      const A = d !== null ? AREAS[d] : undefined;
+      this.show(`hall:${lv}`, A !== undefined ? `마을회관 Lv.${lv}: ${A.name} 손님과 놀이부스가 와요` : `마을회관 Lv.${lv}까지`, hallCost, () => this.ctx.showBuilding('hall'));
       return;
     }
     this.hide();
@@ -338,9 +355,9 @@ export class GoalChip {
     const sim = this.ctx.sim;
     const st = sim.state;
     let best: Buyable | null = null;
-    const consider = (cost: Cost | null, label: string): void => {
+    const consider = (cost: Cost | null, label: string, key: CatalogKey): void => {
       if (cost === null || !sim.canAfford(cost)) return;
-      if (best === null || cost.coins < best.coins) best = { label, coins: cost.coins };
+      if (best === null || cost.coins < best.coins) best = { label, coins: cost.coins, key };
     };
     const debtOk = this.debtMatters();
     for (const id of BUILDING_IDS as BuildingId[]) {
@@ -348,11 +365,11 @@ export class GoalChip {
       const lv = st.buildings[id].level;
       // 아직 안 지은 전당포·일터·은행은 권할 때가 되어야 (debtMatters).
       if (lv < 1 && !debtOk && DEBT_BUILD.some((d) => d.id === id)) continue;
-      consider(sim.buildingUpgradeCost(id), lv < 1 ? `지금 지을 수 있어요: ${BUILDINGS[id].name}` : `지금 올릴 수 있어요: ${BUILDINGS[id].name} Lv.${lv + 1}`);
+      consider(sim.buildingUpgradeCost(id), lv < 1 ? `지금 지을 수 있어요: ${BUILDINGS[id].name}` : `지금 올릴 수 있어요: ${BUILDINGS[id].name} Lv.${lv + 1}`, id);
     }
     for (const b of BOOTH_IDS as readonly BoothId[]) {
-      if (st.booths[b].unlocked) consider(sim.boothUpgradeCost(b), `지금 올릴 수 있어요: ${BOOTHS[b].name} Lv.${st.booths[b].level + 1}`);
-      else if (sim.boothLockReason(b) === null) consider(sim.boothUnlockCost(b), `지금 열 수 있어요: ${BOOTHS[b].name}`);
+      if (st.booths[b].unlocked) consider(sim.boothUpgradeCost(b), `지금 올릴 수 있어요: ${BOOTHS[b].name} Lv.${st.booths[b].level + 1}`, b);
+      else if (sim.boothLockReason(b) === null) consider(sim.boothUnlockCost(b), `지금 열 수 있어요: ${BOOTHS[b].name}`, b);
     }
     return best;
   }

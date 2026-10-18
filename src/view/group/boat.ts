@@ -12,15 +12,18 @@
 
 import { Container, Graphics } from 'pixi.js';
 import { BOAT } from '../../data/defs.ts';
-import { BOAT_COURSE, PONDS, boatPoint } from '../../data/map.ts';
+import { BOAT_GEO } from '../../data/catalog.ts';
+import { lanePoint } from '../../data/map.ts';
+import type { BoatGeo } from '../../sim/village.ts';
 import { raceOf } from '../../sim/group/core.ts';
 import { raceProgress, raceStandings } from '../../sim/race.ts';
 import type { GroupPlay, GroupState, MonsterId, RaceResult, RacerIndex } from '../../sim/types.ts';
 import { ArtNode, artMeta } from '../art.ts';
-import { clamp, districtAt, follow, hash2, type ViewRect } from '../mapUtil.ts';
+import { clamp, follow, hash2, type ViewRect } from '../mapUtil.ts';
 import { GroupMapBase, inEllipse, type GroupMapCtx } from './base.ts';
 
-const C = BOAT_COURSE;
+/** 물길 (상대 좌표: 각도·레인처럼 놓인 자리와 상관없는 값만 쓴다. 자리는 BoatMapView.W). */
+const C = BOAT_GEO.course;
 const OUTLINE = 0x402c1c;
 const FOAM = 0xffffff;
 /** 배 그림 배율 (세계 px / 캔버스 px): 오리배 약 95px 폭 (손님 약 105px). */
@@ -59,7 +62,6 @@ const GLINTS = 16;
 const FLAG_COLORS = BOAT.boats.map((b) => b.flag);
 /** 잠긴 부스의 물길·깃대·발판 (buildings.ts 닫힌 부스와 같은 흐림). */
 const LOCKED_ALPHA = 0.35;
-const DISTRICT = districtAt(C.center.x, C.center.y);
 
 /** sim 경주 진행(0 = 출발, 1 = 결승, 넘어도 된다) → 물길 p. */
 function boatP(progress: number): number {
@@ -68,8 +70,8 @@ function boatP(progress: number): number {
 
 /** 레인 lane의 p 자리에서 p 한 단위당 세계 px. */
 function laneSpeed(lane: number, p: number): number {
-  const a = boatPoint(lane, p);
-  const b = boatPoint(lane, p + 0.002);
+  const a = lanePoint(C, lane, p);
+  const b = lanePoint(C, lane, p + 0.002);
   return Math.max(1, Math.hypot(b.x - a.x, b.y - a.y) / 0.002);
 }
 
@@ -135,6 +137,12 @@ interface Boat {
 }
 
 export class BoatMapView extends GroupMapBase {
+  /** 연못·물길 (세계 좌표, 만들 때 놓인 자리). */
+  private readonly W: BoatGeo = this.ctx.sim.village().boat();
+  /** 레인 lane의 물길 p 자리 (세계 좌표). */
+  private bp(lane: number, p: number): { x: number; y: number; dx: number; dy: number } {
+    return lanePoint(this.W.course, lane, p);
+  }
   private readonly course = new Graphics();
   private readonly mats = new Graphics();
   private readonly water = new Graphics();
@@ -179,7 +187,7 @@ export class BoatMapView extends GroupMapBase {
       node.cullable = true;
       node.cullableChildren = false;
       this.own(ctx.layers.objects, node);
-      const start = boatPoint(i, START_P);
+      const start = this.bp(i, START_P);
       this.boats.push({
         index, node, body, art, halfW: w / 2, h, seed: i * 1.9 + 0.4,
         p: START_P, x: start.x, y: start.y, dx: start.dx, dy: start.dy, endV: 0, flip: 1, face: 1,
@@ -197,19 +205,19 @@ export class BoatMapView extends GroupMapBase {
     // 밝은 물빛 띠 (바깥 가장자리를 따라가고 안 가장자리로 돌아온다).
     const band: number[] = [];
     for (let i = 0; i <= N; i++) {
-      const p = boatPoint(OUTER, i / N);
+      const p = this.bp(OUTER, i / N);
       band.push(p.x, p.y);
     }
     for (let i = N; i >= 0; i--) {
-      const p = boatPoint(INNER, i / N);
+      const p = this.bp(INNER, i / N);
       band.push(p.x, p.y);
     }
     g.poly(band).fill({ color: 0xa9dcf5, alpha: 0.42 });
     // 레인 사이 점선 (흰색, 옅게).
     for (let lane = 0.5; lane < C.lanes - 1; lane += 1) {
       for (let i = 0; i < N; i += 2) {
-        const a = boatPoint(lane, i / N);
-        const b = boatPoint(lane, (i + 1) / N);
+        const a = this.bp(lane, i / N);
+        const b = this.bp(lane, (i + 1) / N);
         g.moveTo(a.x, a.y).lineTo(b.x, b.y);
       }
       g.stroke({ width: 3, color: FOAM, alpha: 0.38, cap: 'round' });
@@ -231,8 +239,8 @@ export class BoatMapView extends GroupMapBase {
     }, 9);
     g.stroke({ width: 7, color: FOAM, alpha: 0.9, cap: 'round' });
     // 결승선: 두 줄 체크무늬.
-    const s0 = boatPoint(INNER, 1);
-    const s1 = boatPoint(OUTER, 1);
+    const s0 = this.bp(INNER, 1);
+    const s1 = this.bp(OUTER, 1);
     const ux = s1.x - s0.x;
     const uy = s1.y - s0.y;
     const len = Math.hypot(ux, uy) || 1;
@@ -255,7 +263,7 @@ export class BoatMapView extends GroupMapBase {
     const out: { x: number; y: number }[] = [];
     let p = p0;
     while (p <= p1 + 1e-9) {
-      const pt = boatPoint(lane, p);
+      const pt = this.bp(lane, p);
       out.push({ x: pt.x, y: pt.y });
       p += step / laneSpeed(lane, p);
     }
@@ -264,8 +272,8 @@ export class BoatMapView extends GroupMapBase {
 
   /** 진행 p 자리의 물길을 가로지르는 선을 k조각으로 (안 → 바깥). */
   private lineAcross(p: number, piece: (a: { x: number; y: number }, b: { x: number; y: number }, k: number) => void, n: number): void {
-    const a = boatPoint(INNER, p);
-    const b = boatPoint(OUTER, p);
+    const a = this.bp(INNER, p);
+    const b = this.bp(OUTER, p);
     for (let k = 0; k < n; k++) {
       const u0 = k / n;
       const u1 = (k + 1) / n;
@@ -301,7 +309,7 @@ export class BoatMapView extends GroupMapBase {
     const H = 74;
     ends.forEach((e, i) => {
       const g = this.poles[i] as Graphics;
-      const b = boatPoint(e.lane, e.p);
+      const b = this.bp(e.lane, e.p);
       const finish = e.p === 1;
       // 부표 받침.
       g.ellipse(b.x, b.y + 2, 17, 7).fill({ color: 0x2f6f99, alpha: 0.28 });
@@ -318,8 +326,8 @@ export class BoatMapView extends GroupMapBase {
       g.zIndex = Math.round(b.y);
     });
     // 결승 깃발 줄: 앞 깃대(바깥, y가 큼)에 같이 그린다.
-    const a = boatPoint(INNER - 0.35, 1);
-    const b = boatPoint(OUTER + 0.35, 1);
+    const a = this.bp(INNER - 0.35, 1);
+    const b = this.bp(OUTER + 0.35, 1);
     const g = this.poles[3] as Graphics;
     const ay = a.y - H + 6;
     const by = b.y - H + 6;
@@ -343,7 +351,7 @@ export class BoatMapView extends GroupMapBase {
 
   /** 연못 잔물결 자리 (씨앗으로 늘 같게): 연못 안, 물길 띠와 선착장 쪽은 피한다. */
   private pickGlints(): void {
-    const pond = PONDS[0];
+    const pond = this.W.pond;
     if (pond === undefined) return;
     for (let i = 0, tries = 0; this.glints.length < GLINTS && tries < 400; tries++, i++) {
       const u = (hash2(i, 3, 911) >>> 0) / 4294967296;
@@ -353,8 +361,8 @@ export class BoatMapView extends GroupMapBase {
       const x = pond.c.x + Math.cos(a) * pond.rx * r;
       const y = pond.c.y + Math.sin(a) * pond.ry * r;
       // 물길 띠 안은 피한다 (가운데 섬 쪽과 바깥 가장자리 쪽만).
-      const inBand = inEllipse(x, y, C.center.x, C.center.y, C.rx + 75, C.ry + 55) && !inEllipse(x, y, C.center.x, C.center.y, C.rx - 75, C.ry - 55);
-      if (inBand || y > C.center.y + C.ry * 0.7) continue;
+      const inBand = inEllipse(x, y, this.W.course.center.x, this.W.course.center.y, C.rx + 75, C.ry + 55) && !inEllipse(x, y, this.W.course.center.x, this.W.course.center.y, C.rx - 75, C.ry - 55);
+      if (inBand || y > this.W.course.center.y + C.ry * 0.7) continue;
       this.glints.push({ x, y, w: 9 + (u * 97 % 1) * 8, ph: v * 6.28, sp: 0.6 + (u * 13 % 1) * 0.6 });
     }
   }
@@ -406,7 +414,7 @@ export class BoatMapView extends GroupMapBase {
 
   /** 1등 배가 결승선을 지났다: 색종이, 구조 요원 통통, 1등 배 반짝. */
   private finishedRace(race: RaceResult): void {
-    const f = boatPoint(1.5, 1);
+    const f = this.bp(1.5, 1);
     this.ctx.fx.confetti(f.x, f.y - 30, 34);
     this.ctx.buildings.hostHop('boat', 1, 1.5);
     this.ctx.buildings.hostHop('boat', 0, 1);
@@ -422,7 +430,7 @@ export class BoatMapView extends GroupMapBase {
     if (g !== null && g.phase === 'gathering') {
       const c = Math.ceil(g.countdown - 1e-6);
       if (c >= 1 && c <= COUNT_FROM && c !== this.lastCount) {
-        const s = boatPoint(1.5, 0);
+        const s = this.bp(1.5, 0);
         this.ctx.fx.floatText(s.x, s.y - 110, `${c}`, 'win', c === 1);
         this.ctx.buildings.hostHop('boat', 0, 0.6);
       }
@@ -501,7 +509,7 @@ export class BoatMapView extends GroupMapBase {
     } else {
       b.p = START_P;
     }
-    const pt = boatPoint(lane, b.p);
+    const pt = this.bp(lane, b.p);
     const moved = Math.hypot(pt.x - b.x, pt.y - b.y);
     // 순간이동(돌아오다 판이 시작됨)은 움직임으로 치지 않는다.
     const step = moved > 150 ? 0 : moved;
@@ -680,7 +688,7 @@ export class BoatMapView extends GroupMapBase {
   /** 잠겨 있어도 구역이 열렸으면 물길·깃대·발판은 흐리게 보인다 (경주장 방석처럼, 무엇이 생길지 미리 보이게). */
   override update(dt: number, view: ViewRect): void {
     super.update(dt, view);
-    const open = DISTRICT === null || this.sim.state.districts.includes(DISTRICT);
+    const open = this.placed;
     for (const g of [this.course, this.mats, ...this.poles]) {
       g.visible = open;
       g.alpha = this.shown ? 1 : LOCKED_ALPHA;
@@ -688,7 +696,9 @@ export class BoatMapView extends GroupMapBase {
   }
 
   override hitTest(wx: number, wy: number): boolean {
-    if (inEllipse(wx, wy, C.center.x, C.center.y, C.rx + 110, C.ry + 90)) return true;
+    // 연못 전체 (물길 둘레 물도 오리배 경주).
+    const P = this.W.pond;
+    if (this.placed && inEllipse(wx, wy, P.c.x, P.c.y, P.rx * 1.04, P.ry * 1.04)) return true;
     for (const b of this.boats) if (Math.abs(wx - b.x) < b.halfW + 14 && wy > b.y - b.h - 20 && wy < b.y + 14) return true;
     return false;
   }

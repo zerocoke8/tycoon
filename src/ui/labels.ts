@@ -30,10 +30,10 @@ import {
   type SpeciesId,
   type StaffStats,
   type WorkFacility,
+  HALL_THEME,
+  LAND,
 } from '../data/defs.ts';
-import { BOOTH_SPOTS, DISTRICTS, type DistrictId } from '../data/map.ts';
 import { presetPost } from '../sim/staff.ts';
-import { josa } from '../sim/text.ts';
 import type { Candidate, Errand, GroupRole, Monster, MonsterPhase, Staff } from '../sim/types.ts';
 import { fmt } from './dom.ts';
 
@@ -78,43 +78,43 @@ export function josaRo(word: string): string {
   return jong === 0 || jong === 8 ? `${word}로` : `${word}으로`;
 }
 
-// ── 구역 ──
+// ── 회관 레벨 묶음 (배치형 마을 DESIGN 6.1: 구역은 없어지고, 목록을 묶는 이름표만 남았다 defs.ts HALL_THEME) ──
 
-/** 구역을 열리는 순서로 (중앙 → 연못 동네 → 북쪽 언덕 → 숲 동네). */
-export const DISTRICT_ORDER: readonly DistrictId[] = (Object.keys(DISTRICTS) as DistrictId[]).sort((a, b) => DISTRICTS[a].hall - DISTRICTS[b].hall);
+/** 목록 묶음 = 그것이 열리는 마을회관 레벨 (1~5). */
+export type AreaId = number;
+/** 묶음 이름과 회관 레벨 (옛 구역 이름). */
+export const AREAS: Readonly<Record<AreaId, { readonly name: string; readonly hall: number }>> = Object.fromEntries(Object.entries(HALL_THEME).map(([k, name]) => [Number(k), { name, hall: Number(k) }]));
 
-/** 마을회관 레벨 hall에 열리는 구역 (없으면 null). */
-export function districtAtHall(hall: number): DistrictId | null {
-  return DISTRICT_ORDER.find((d) => DISTRICTS[d].hall === hall) ?? null;
+/** 묶음을 열리는 순서로. */
+export const DISTRICT_ORDER: readonly AreaId[] = Object.keys(AREAS)
+  .map(Number)
+  .sort((a, b) => a - b);
+
+/** 마을회관 레벨 hall의 묶음 (없으면 null). */
+export function districtAtHall(hall: number): AreaId | null {
+  return AREAS[hall] !== undefined ? hall : null;
 }
 
-/** 부스가 놓인 구역 (지도 자리로 찾고, 못 찾으면 해금 레벨로). */
-export function boothDistrict(b: BoothId): DistrictId {
-  const p = BOOTH_SPOTS[b].base;
-  const inRect = DISTRICT_ORDER.find((d) => {
-    const r = DISTRICTS[d].rect;
-    return p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h;
-  });
-  return inRect ?? districtAtHall(boothDef(b).unlock.hall) ?? 'core';
+/** 부스의 묶음 (해금 회관 레벨). */
+export function boothDistrict(b: BoothId): AreaId {
+  return boothDef(b).unlock.hall;
 }
 
-/** 구역마다 부스 (BOOTH_IDS 순서). */
-export function boothsIn(d: DistrictId): BoothId[] {
+/** 묶음마다 부스 (BOOTH_IDS 순서). */
+export function boothsIn(d: AreaId): BoothId[] {
   return BOOTH_IDS.filter((b) => boothDistrict(b) === d);
 }
 
-/** 닫힌 부스의 까닭 (구역이 아직 닫힘): '연못 동네가 열려야 해요 (마을회관 Lv.2)'. 열 수 있으면 null. */
+/** 닫힌 부스의 까닭 (마을회관 레벨이 모자람): '마을회관 Lv.2부터 열 수 있어요'. 열 수 있으면 null. */
 export function boothLockText(b: BoothId, hall: number): string | null {
   const need = boothDef(b).unlock.hall;
   if (hall >= need) return null;
-  const d = DISTRICTS[boothDistrict(b)];
-  const name = d.hall === need ? d.name : (DISTRICTS[districtAtHall(need) ?? 'core'].name);
-  return `${josa(name, '이', '가')} 열려야 해요 (마을회관 Lv.${need})`;
+  return `마을회관 Lv.${need}부터 열 수 있어요`;
 }
 
-/** 종이 찾아오는 구역 이름 (종의 hall = 그 구역이 열리는 레벨). */
-export function speciesDistrict(s: SpeciesId): DistrictId {
-  return districtAtHall(SPECIES[s].hall) ?? 'core';
+/** 종이 찾아오는 묶음 (종의 hall). */
+export function speciesDistrict(s: SpeciesId): AreaId {
+  return districtAtHall(SPECIES[s].hall) ?? 1;
 }
 
 /** 특산 재료 → 가져오는 종 (일터 채소처럼 종의 재료가 아니면 없다). */
@@ -308,8 +308,8 @@ export const buildingMaxLevel = (id: BuildingId): number => BUILDINGS[id].levels
 /** 마을회관이 level이 되면 새로 열리는 것들. */
 export function hallUnlocks(level: number): string[] {
   const out: string[] = [];
-  const ds = DISTRICT_ORDER.filter((d) => DISTRICTS[d].hall === level).map((d) => DISTRICTS[d].name);
-  if (ds.length > 0) out.push(`새 구역: ${ds.join(', ')}`);
+  // 이 레벨에 처음 살 수 있게 되는 땅 고리가 있으면.
+  if (LAND.hall.some((h, ring) => ring > 1 && h === level && (LAND.hall[ring - 1] ?? 0) < level)) out.push('더 먼 땅을 살 수 있어요');
   const bs = BOOTH_IDS.filter((b) => boothDef(b).unlock.hall === level).map((b) => boothShort(b));
   if (bs.length > 0) out.push(`새 놀이부스 자리: ${bs.join(', ')}`);
   const sp = SPECIES_IDS.filter((s) => SPECIES[s].hall === level).map((s) => SPECIES[s].name);

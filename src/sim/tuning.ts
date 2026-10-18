@@ -8,6 +8,8 @@ export const TUNE = {
   luckTrait: 0.03,
   /** 막 열린 종(지금 회관 레벨에 새로 오는 종)이 오는 무게 (다른 종은 1). 새 구역 재료가 너무 늦지 않게. */
   newSpeciesWeight: 2.5,
+  /** 다음 마을회관 레벨에 모자란 재료를 가져오는 종이 오는 무게 배수 (재료 하나 때문에 오래 막히지 않게). */
+  neededSpeciesWeight: 2,
   /** 종 성격 하나에 더해 무작위 성격이 하나 더 붙을 확률. */
   extraTraitChance: 0.3,
   /** 끈기 (한판 수) 범위. */
@@ -38,6 +40,12 @@ export const TUNE = {
   favoriteWeight: 3,
   /** 줄 한 명마다 가중치를 나누는 값 (1 + 줄 × 이 값). */
   queuePenalty: 0.6,
+  /** 배치형 마을: 부스까지 걷는 길 칸 수 d만큼 가중치를 나눈다 (1 + d / 이 값: 이만큼 멀면 반). 가까운 부스를 더 자주 고른다. */
+  boothNearCells: 24,
+  /** 단체 놀이는 boothNearCells × 이 값 (멀어도 덜 줄인다). */
+  groupNearMult: 2,
+  /** 길 칸 위에서는 이만큼 빨리 걷는다 (건물 안 자리로 걸어 들어갈 때는 1). */
+  roadSpeed: 1.2,
 
   /** 흥부자 기쁨, 울보 슬픔 배수. */
   cheerfulJoy: 1.6,

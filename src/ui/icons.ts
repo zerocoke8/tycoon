@@ -25,6 +25,23 @@ const ICONS = {
   cookie: wrap('<circle cx="16" cy="16" r="10.5" fill="#f2b279"/><circle cx="12" cy="13" r="1.4" fill="' + INK + '"/><circle cx="19" cy="12.5" r="1.4" fill="' + INK + '"/><circle cx="17" cy="19.5" r="1.4" fill="' + INK + '"/>'),
   flag: wrap('<path d="M9 28V5"/><path d="M9 6.5h15l-3.5 5 3.5 5H9z" fill="#8cc47a"/>'),
   pin: wrap('<path d="M16 28s-8-8.2-8-14a8 8 0 0 1 16 0c0 5.8-8 14-8 14z" fill="#e46f5a"/><circle cx="16" cy="14" r="3" fill="#f6ebd5"/>'),
+  // 짓기 (ui/panels/build.ts 목록 묶음, ui/buildBar.ts 도구)
+  booth: wrap(
+    '<rect x="6.5" y="14" width="19" height="12.5" rx="1.5" fill="#f6ebd5"/><path d="M4.5 14 7.5 6h17l3 8z" fill="#f2a65a"/><path d="M12.5 6 11 14M19.5 6 21 14"/><path d="M4.5 14a3.8 3.8 0 0 0 7.6 0 3.9 3.9 0 0 0 7.8 0 3.8 3.8 0 0 0 7.6 0" fill="#f6ebd5"/><path d="M13 26.5v-5h6v5"/>',
+  ),
+  facility: wrap('<ellipse cx="15" cy="20.5" rx="11.5" ry="6.5" fill="#f3d36a"/><ellipse cx="15" cy="20.5" rx="5.5" ry="2.6" fill="#8cc47a"/><path d="M23 15V4"/><path d="M23 4.5h6l-2 2.6 2 2.6h-6z" fill="#e46f5a"/>'),
+  shop: wrap('<rect x="6" y="12.5" width="20" height="14" rx="1.5" fill="#f6ebd5"/><path d="M4 13 7 6h18l3 7z" fill="#8ec8ee"/><path d="M13 26.5v-7.5h6v7.5" fill="#876045"/>'),
+  decor: wrap(
+    '<path d="M16 28v-10"/><path d="M16 23c-3.4-.4-5.6-2.6-6-5.8 3.4.3 5.6 2.4 6 5.8z" fill="#8cc47a"/><circle cx="16" cy="5.8" r="3.3" fill="#f2a0b5"/><circle cx="20.4" cy="10.2" r="3.3" fill="#f2a0b5"/><circle cx="16" cy="14.6" r="3.3" fill="#f2a0b5"/><circle cx="11.6" cy="10.2" r="3.3" fill="#f2a0b5"/><circle cx="16" cy="10.2" r="2.6" fill="#f3d36a"/>',
+  ),
+  road: wrap('<path d="M9.5 28 13.5 4h5l4 24z" fill="#ebc68e"/><path d="M16 8v3M16 15v3M16 22v3"/>'),
+  land: wrap('<path d="M3.5 9.5 11 6.5l10 3 7.5-3v17l-7.5 3-10-3-7.5 3z" fill="#8cc47a"/><path d="M11 6.5v17M21 9.5v17"/>'),
+  undo: wrap('<path d="M11 8.5 5.5 14l5.5 5.5" stroke-width="3"/><path d="M6 14h12.5a7 7 0 0 1 0 14H14" stroke-width="3"/>'),
+  eraser: wrap('<path d="M4.5 20.5 16.5 8.5l9 9-7.5 7.5H9z" fill="#f2a0b5"/><path d="M12 13l9 9"/><path d="M9 25h18"/>'),
+  check: wrap('<path d="M6.5 16.5 13 23 25.5 9" stroke-width="4.2"/>'),
+  move: wrap('<path d="M16 5v22M5 16h22"/><path d="M12 9l4-4 4 4M12 23l4 4 4-4M9 12l-4 4 4 4M23 12l4 4-4 4"/>'),
+  box: wrap('<path d="M5.5 12h21v14.5h-21z" fill="#d9a066"/><path d="M4 7h24v5H4z" fill="#ebbd85"/><path d="M13 17h6"/>'),
+  list: wrap('<rect x="5" y="5.5" width="22" height="21" rx="3" fill="#f6ebd5"/><path d="M10 11.5h12M10 16h12M10 20.5h7.5"/>'),
 } as const;
 
 export type IconName = keyof typeof ICONS;

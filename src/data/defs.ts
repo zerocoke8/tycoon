@@ -536,19 +536,20 @@ export const BUILD_HALL: Partial<Record<BuildingId, number>> = { pawnshop: 1, ba
  * 마을회관 재료: 그 레벨 전에 오는 손님의 재료를 적게씩 (손님 종이 27종으로 늘어 한 종이 오는 비율이 낮아졌다).
  * 새 구역 손님의 재료는 하나씩만 (회관 3 = 솜털, 회관 4 = 광석·양털, 회관 5 = 여우 구슬 + 북쪽 언덕 깃털): 손님이 와서 놀고 떠날 때까지 10분쯤 걸린다.
  * 손님 수(visitors)는 열리는 부스 수를 따라 6·9·13·16·22 (단체 놀이는 한 판에 손님이 여럿 모여야 재미있다. 회관 5는 부스가 15개).
- * 목표 (scripts/sim-check.ts --auto --seeds 24 --minutes 120 중간, 2026-10-15 셋째 묶음 다듬기): 밀어내기 ≈ 5분, 회관 2 ≈ 9분, 다트 ≈ 12분,
- * 오리배 ≈ 17분 (회관 2 구역), 회관 3 ≈ 26분, 경주장 ≈ 28분, 연날리기 ≈ 38분 (회관 3 구역), 회관 4 ≈ 48분, 회관 5 (축제 들판) ≈ 69분, 줄다리기 ≈ 73분.
+ * 목표 (scripts/sim-check.ts --auto --seeds 24 --minutes 100 중간, 2026-10-19 배치형 마을 다듬기): 밀어내기 ≈ 4.5분, 회관 2 ≈ 8.5분,
+ * 오리배 ≈ 14분, 회관 3 ≈ 25분, 경주장 ≈ 28분, 연날리기 ≈ 38분, 회관 4 ≈ 50분, 회관 5 ≈ 70분, 줄다리기 ≈ 74분.
+ * 배치형 마을에서 손님이 가까운 부스를 골라 걷는 시간이 줄어 수입이 올라 회관 코인을 올렸다 (200·350·700·900 → 270·330·1000·1300, 땅 값 LAND도 같이).
  */
 export const BUILDINGS = {
   hall: {
-    name: '마을회관', desc: '마을 레벨. 새 손님과 새 부지가 열린다.',
+    name: '마을회관', desc: '마을 레벨. 새 손님이 오고 더 먼 땅을 살 수 있다.',
     levels: [
       { coins: 0, visitors: 6 },
-      { coins: 200, mats: { mat_ember: 2, mat_shell: 2 }, visitors: 9 },
-      { coins: 350, mats: { mat_spoon: 2, mat_fluff: 1 }, precious: { gem: 1 }, visitors: 13 },
-      { coins: 700, mats: { mat_ore: 1, mat_wool: 1, mat_pearl: 1 }, precious: { star_piece: 1, golden_acorn: 1 }, visitors: 16 },
+      { coins: 270, mats: { mat_ember: 2, mat_shell: 2 }, visitors: 9 },
+      { coins: 330, mats: { mat_spoon: 2, mat_fluff: 1 }, precious: { gem: 1 }, visitors: 13 },
+      { coins: 1000, mats: { mat_ore: 1, mat_wool: 1, mat_pearl: 1 }, precious: { star_piece: 1, golden_acorn: 1 }, visitors: 16 },
       // 회관 5 = 축제 들판 (줄다리기·보물찾기). 숲 동네 손님 재료 하나와 북쪽 언덕 손님 재료 하나.
-      { coins: 900, mats: { mat_foxbead: 1, mat_feather: 1 }, precious: { gem: 1, star_piece: 1 }, visitors: 22 },
+      { coins: 1300, mats: { mat_foxbead: 1, mat_feather: 1 }, precious: { gem: 1, star_piece: 1 }, visitors: 22 },
     ],
   },
   gate: {
@@ -711,6 +712,8 @@ export const LABOR = {
   reliefSec: 1.5,
   mood: 8,
   forgiveSec: 480,
+  /** 일터가 보관함에 들어갔거나 길이 끊겨 갈 수 없는 채무자: 길에서 이만큼 기다려도 못 가면 반장이 남은 빚을 덜어 준다 (초). */
+  noYardSec: 90,
   waitMutter: 0.05,
   facilities: {
     farm: { name: '밭', tool: 'hoe', material: 'mat_veggie' },
@@ -792,6 +795,37 @@ export const HOST_PRESETS = [
   { art: 'dig_grandpa', name: '보물 지도 할아버지', booth: 'dig', role: 0, stats: { pace: 2, charm: 3, welcome: 5 }, cost: 240 },
   { art: 'dig_lender', name: '삽 대여 언니', booth: 'dig', role: 1, stats: { pace: 4, charm: 3, welcome: 2 }, cost: 220 },
 ] as const satisfies readonly { art: string; name: string; booth: BoothId; role: number; stats: StaffStats; cost: number }[];
+
+// ── 배치형 마을 (DESIGN 6.1): 장식·땅 조각 ─────────────────────────────────
+
+/** 장식 (그림 map/<key>, 칸 하나). cost = 코인, aura = 둘레(DECOR_AURA.radius 칸 안)를 지나는 손님 기분 +/분. */
+export type DecorId = 'tree_round' | 'tree_pine' | 'bush' | 'flowers' | 'lamp' | 'bench' | 'fence' | 'planter' | 'balloons' | 'rocks' | 'crates' | 'signpost';
+export const DECOR = {
+  tree_round: { name: '둥근 나무', cost: 30, aura: 1 },
+  tree_pine: { name: '뾰족 나무', cost: 30, aura: 1 },
+  bush: { name: '덤불', cost: 15, aura: 0.6 },
+  flowers: { name: '꽃밭', cost: 20, aura: 1 },
+  lamp: { name: '가로등', cost: 25, aura: 0.8 },
+  bench: { name: '벤치', cost: 35, aura: 1.2 },
+  fence: { name: '울타리', cost: 10, aura: 0.3 },
+  planter: { name: '화분', cost: 20, aura: 0.8 },
+  balloons: { name: '풍선', cost: 40, aura: 1.5 },
+  rocks: { name: '바위', cost: 10, aura: 0.4 },
+  crates: { name: '나무 상자', cost: 15, aura: 0.3 },
+  signpost: { name: '이정표', cost: 20, aura: 0.5 },
+} as const satisfies Record<DecorId, { name: string; cost: number; aura: number }>;
+export const DECOR_IDS = Object.keys(DECOR) as DecorId[];
+/** 장식 둘레 기분: 손님이 선 칸에서 radius 칸 안(가로·세로 모두)의 장식 aura를 더한다 (cap/분까지). */
+export const DECOR_AURA = { radius: 2, cap: 4 } as const;
+
+/**
+ * 땅 조각 (map.ts CHUNK × CHUNK 칸): 가진 땅에 이웃한 조각만 산다. 값 = (base + perBought × 산 조각 수) × (1 + ringMult × (고리 - 1)),
+ * 고리 = 처음 땅에서 떨어진 조각 수 (map.ts chunkRing). hall[고리] = 그 고리를 사는 데 필요한 마을회관 레벨 (먼 땅일수록 늦게).
+ */
+export const LAND = { base: 40, perBought: 8, ringMult: 0.3, hall: [1, 1, 2, 3, 4, 5] } as const;
+
+/** 마을회관 레벨마다 새로 오는 손님·부스의 이름표 (옛 구역 이름: 짓기·도감 목록을 묶는 데만 쓴다). */
+export const HALL_THEME: Readonly<Record<number, string>> = { 1: '중앙 광장', 2: '연못 동네', 3: '북쪽 언덕', 4: '숲 동네', 5: '축제 들판' };
 
 // ── 손님 기분 ───────────────────────────────────────────────────────────
 

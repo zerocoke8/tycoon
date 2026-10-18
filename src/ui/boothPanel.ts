@@ -2,8 +2,10 @@
 // 열려 있는 동안 지도 입력을 막고, 확대 화면 둘레(그늘)를 누르면 닫힌다. 확대 화면 자리는 캔버스가 그대로 누르기를 받는다.
 
 import { BOOTHS, boothDef, DEBT_MATCH, GOODS, isGroupBooth, STAFF_STAT_NAMES, type BoothId, type GoodId } from '../data/defs.ts';
+import { boothIdleReason } from '../sim/booths.ts';
 import { josa } from '../sim/text.ts';
 import { closeupRadius, type Rect } from '../view/contracts.ts';
+import { placeRow, roadIssue, roadIssueText } from './panels/build.ts';
 import { btn, fmt, fmtSec, h, revealInSheet, setText } from './dom.ts';
 import { GroupResults, GroupSection } from './groupBoard.ts';
 import { icon } from './icons.ts';
@@ -194,7 +196,8 @@ class BoothInfo extends BasePanel {
     const bs = s.booths[this.booth];
     // 단체 놀이: 단계·참가자(고른 것)·자리가 바뀌면 다시 짓는다 (순위·막대·연·보물은 live로).
     const race = bs.group !== null ? `${bs.group.phase}:${bs.group.mode ?? ''}${bs.group.debtNext === true ? '+' : ''}:${bs.group.participants.map((e) => `${e.monster}.${e.pick}`).join(',')}:${bs.seats.join('/')}` : '-';
-    return [this.booth, bs.unlocked, bs.level, bs.staff.join('/'), bs.cheer?.good ?? '-', race, s.staff.map((st) => `${st.id}:${st.level}:${st.post === null ? '-' : `${st.post.booth}.${st.post.role}`}`).join(',')].join('|');
+    const v = this.sim.village();
+    return [this.booth, bs.unlocked, bs.level, bs.staff.join('/'), bs.cheer?.good ?? '-', race, s.staff.map((st) => `${st.id}:${st.level}:${st.post === null ? '-' : `${st.post.booth}.${st.post.role}`}`).join(','), v.stamp.place, v.stamp.road].join('|');
   }
 
   protected build(): void {
@@ -205,11 +208,18 @@ class BoothInfo extends BasePanel {
 
     this.roleRows.clear();
     const roles = this.buildRoles();
-    // 열렸는데 꼭 있어야 하는 진행자가 없으면 맨 위에 알리고, 진행자 자리를 바로 아래에 (세우기 버튼이 먼저 보이게).
-    const closed = bs.unlocked && !this.sim.boothOpen(b);
+    // 열렸는데 쉬는 부스: 까닭을 맨 위에 (보관함 → 입구 앞 길 → 진행자). 보관함·길은 자리 줄([지도에 놓기]·[길 잇기])을, 진행자는 진행자 자리를 바로 아래에.
+    const why = boothIdleReason(s, b);
+    const closed = why === 'staff';
+    const placeTop = why === 'stored' || why === 'road';
     if (closed) {
       const missing = def.roles.filter((r, i) => r.optional !== true && (bs.staff[i] ?? null) === null).map((r) => r.name);
       this.el.append(h('div', 'mpv-alert', def.roles.length > 1 ? `${missing.join('·')} 자리가 비어 쉬는 중이에요` : '진행자가 없어 쉬는 중이에요'), ...roles);
+    } else if (placeTop) {
+      const issue = roadIssue(this.ctx, b);
+      this.el.append(h('div', 'mpv-alert', why === 'stored' ? '보관함에 있어요. 지도에 놓으면 손님이 와요' : roadIssueText(issue ?? 'none')));
+      const place = placeRow(this.ctx, b, false);
+      if (place !== null) this.el.append(place);
     }
 
     // 단체 놀이: 지금 판(상태 줄·고른 것 판)을 맨 위에 (확대 화면 바로 아래, 짧은 폰에서도 먼저 보이게).
@@ -297,6 +307,11 @@ class BoothInfo extends BasePanel {
       this.el.append(
         h('div', 'mpv-row', h('div', 'mpv-grow', h('div', 'mpv-eff', h('span', 'mpv-tag next', `Lv.${bs.level + 1}`), h('span', null, next ?? '')), h('div', 'mpv-act', costChips(this.sim, cost, this.live), up))),
       );
+    }
+    // 배치형 마을: 옮기기·보관하기 (보관함·길이 끊긴 부스는 맨 위에 두었다).
+    if (!placeTop) {
+      const place = placeRow(this.ctx, b);
+      if (place !== null) this.el.append(place);
     }
   }
 

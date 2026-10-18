@@ -90,7 +90,7 @@ const GUEST_BASE_FACE =
 /** 다른 종의 기본 그림: 두 번째 참조(먼저 그린 손님)는 화풍·선·틀 안 크기와 자리만. */
 const GUEST_STYLE_REF =
   'The second attached image is another guest monster from the same game, drawn in the final style and canvas layout. ' +
-  'Use it ONLY as a reference for the drawing style, the thick dark brown outline weight, the flat coloring, the small amount of detail, ' +
+  'Use it ONLY as a reference for the drawing style, the thick dark brown outline weight (EXACTLY the same thickness: not thinner, not thicker), the flat coloring, the small amount of detail, ' +
   'and EXACTLY how big the monster sits in the canvas and where (the same canvas layout: about half the canvas height, centered, feet on the same invisible line about 15% above the bottom edge). ' +
   'Do NOT copy its species, body, colors, horns, wings, tail or items: draw the new monster described below, in the colors described below.';
 
@@ -126,7 +126,7 @@ const VILLAGER_COMMON =
   "Full body from head to boots, standing, body turned slightly to the left in a front 3/4 view (body and face turned slightly toward the LEFT edge of the image, looking toward the viewer's left). " +
   'Chibi proportions about 2.3-2.5 heads tall (a big round head that is about 40% of the total height, small body). Very simple face: two dot eyes (or very simple line eyes) and a tiny mouth, the personality shown by the silhouette and ONE clear expression. ' +
   'Hair is one or two big simple blob shapes with at most two inner lines, arms and legs are simple tubes, hands are simple mitten shapes, plain clothes made of a few flat color blocks, no patterns, no stitching, no ornaments beyond what is described. ' +
-  'No weapons: a peaceful villager, holding only the item described (if any). Thick outlines, flat colors. ' +
+  'No weapons: a peaceful villager, holding only the item described (if any). The outline is EXACTLY as thick as on the second image: not thinner, not thicker (every villager in the game has the same outline weight). Flat colors. ' +
   'The whole character fits inside the frame with wide empty margin on all sides (the character fills only the middle of the image, like the second reference), nothing cropped. ' +
   'Transparent background with a real alpha channel: no backdrop, no ground, no floor shadow. No text.';
 
@@ -1153,6 +1153,108 @@ const DEBT_STAFF: readonly Entry[] = [
   ),
 ];
 
+// ── 다섯째 묶음 (2026-10-18): 손님이 돈을 쓰는 가게들 (DESIGN 3.8) ─────────────────────
+// 가게 건물은 대장간 세트(building), 회전목마·관람차는 움직이는 부품을 따로 그려 코드로 돌린다.
+
+/** 정면으로 보는 지도 물건 (관람차 받침·사진 배경판): 마을 입구 아치와 같은 시점. */
+const mapFront = (key: string, label: string, body: string): Entry => ({
+  ...building(key, label, body),
+  prompt: para(
+    STYLE_REF_ONLY,
+    'The second attached image is the forge building from the same village map set. Match it exactly: the same thick dark brown outline weight, the same flat fills and palette, the same small amount of detail, and the same scale (a door of the same size, so the buildings line up on one map). Do NOT redraw the forge; draw only the new object described below.',
+    VIEW_FRONT,
+    `${body} Transparent background with a real alpha channel. The object is centered with a comfortable empty margin on every side; nothing is cut off at the edges. Signs carry only simple picture symbols, never letters or numbers.`,
+  ),
+});
+
+const SHOPS: readonly Entry[] = [
+  building('snack_stall', '간식 노점', 'A small open-front wooden snack stall (#a0703f) with a striped awning in cream (#f6ebd5) and soft pink-orange (#f2a68a), a counter with a big fluffy pink cotton candy on a stick, a few skewers in a cup and a stack of waffles. Signs carry only a simple cotton candy picture symbol.'),
+  building('drink_stand', '음료 가판', 'A small round drink kiosk with a striped round canopy in cream (#f6ebd5) and soft lemon yellow (#f3d36a), a counter with a big glass jar of lemonade with lemon slices and a few cups. Signs carry only a simple lemon picture symbol.'),
+  building('bakery', '빵집', 'A cozy small bakery with cream plaster walls (#f6ebd5) and a warm brown roof (#a0703f), a big front window showing round breads and croissants on shelves, a striped awning in cream and soft orange (#f2b279), and a small bread basket by the door. Signs carry only a simple croissant picture symbol.'),
+  building('restaurant', '식당', 'A cozy village restaurant: a one-story cottage with soft green walls (#c9dcae), a red-brown tiled roof (#b5654a), a round-topped door, warm windows with little curtains, a short chimney with one round steam puff, and a flower box. Signs carry only a simple fork-and-spoon picture symbol.'),
+  building('accessory_shop', '장신구 가게', 'A small cute boutique with soft lavender walls (#d8cbea), a dark plum roof (#7a5f78), a big round display window showing a few ribbons, a tiny crown and a flower crown on stands, and a striped awning in cream and lavender. Signs carry only a simple ribbon picture symbol.'),
+  building('beauty_salon', '미용실', 'A small beauty salon with soft mint walls (#cfeadb), a white-and-mint striped awning, a big window with a round mirror and a fluffy chair inside, and a little striped pole by the door. Signs carry only a simple comb-and-scissors picture symbol.'),
+  building('inn', '여관', 'A cozy two-story village inn with cream walls (#f6ebd5), warm brown timber frames (#8a5a3a), a soft blue roof (#5d6f86), several small windows, a wooden bench by the door and a hanging lantern drawn as a flat warm yellow square (no glow). Signs carry only a simple crescent moon picture symbol.'),
+  building('hot_spring', '온천', 'A small open-air hot spring: a round pool of flat pale blue water (#bfe0f5) surrounded by big rounded soft grey stones (#b3aea8), a small wooden changing hut with a short cloth curtain beside it, and three round cream steam puffs rising from the water. No people. Signs carry only a simple steam-cloud picture symbol.'),
+  building('fortune_teller', '점집', 'A small fortune teller tent in soft deep purple (#8a6aa8) and cream stripes with a pointed top and a little star flag, front flaps tied open showing a tiny round table with a crystal ball drawn as a flat pale blue circle (no glow, no shine). Signs carry only a simple star picture symbol.'),
+  building('photo_studio', '사진관', 'A small photo studio with soft sky-blue walls (#cfe3ee), a flat roof with a short railing, a big front window, and an old box camera on a tripod by the door. Signs carry only a simple camera picture symbol.'),
+  building('souvenir_shop', '기념품 가게', 'A small souvenir shop with soft yellow walls (#f6e3a8), a brown roof (#a0703f), a front window full of small plush toys, and a little rack of postcards (blank, no pictures, no writing) by the door. Signs carry only a simple gift-box picture symbol.'),
+  building('flower_shop', '꽃집', 'A small flower shop with cream walls (#f6ebd5), a soft green roof (#8fae6b), and many buckets of colorful round flowers (pink, yellow, orange, white) on wooden steps in front. Signs carry only a simple flower picture symbol.'),
+];
+
+/** 회전목마·관람차: 받침과 도는 부품을 따로 (코드가 돌린다). */
+const RIDES: readonly Entry[] = [
+  building('carousel_base', '회전목마 (받침·지붕)', 'A small cute carousel WITHOUT any horses: a round wooden platform (#a0703f) with a golden center pole (#f3d36a), a round striped canopy roof in cream (#f6ebd5) and soft red (#c9614a) with a little flag on top, and eight thin golden poles hanging down from the canopy edge with NOTHING on them. No animals, no people.'),
+  { ...boat('carousel_horse', '회전목마: 목마', 'A cute chubby carousel pony (cream body #f6ebd5, soft pink mane, a little saddle) pierced by a thin golden pole going straight up and down through its back.'),
+    prompt: para(STYLE, STYLE_REF_ONLY, 'Draw ONE cute chubby carousel pony seen from the SIDE, facing the LEFT edge of the image, with a thin golden pole (#f3d36a) going straight up and down through its back: a round cream body (#f6ebd5), a soft pink mane and tail (#f2b5a8), a little soft red saddle (#c9614a), legs tucked as if galloping, two dot eyes, a tiny smile. Draw it fairly SMALL in the canvas (in the middle half) with the same VERY fat, bold dark brown marker outline as the dwarf. Transparent background with a real alpha channel: no ground, no shadow.') },
+  mapFront('ferris_frame', '관람차 (받침)', 'The support frame of a small Ferris wheel seen straight from the front: two tall slanted wooden legs (#a0703f) on each side meeting at a round wooden hub high up, a small ticket booth hut at the base. NO wheel, NO gondolas (they are drawn separately).'),
+  { ...building('ferris_wheel', '관람차 (바퀴)', ''),
+    refs: ['d_dwarf_idle'],
+    ownStyle: true,
+    prompt: para(STYLE, STYLE_REF_ONLY, 'ONLY the wheel of a small Ferris wheel seen perfectly straight from the front: a perfect circle rim in soft red (#c9614a) with eight straight spokes to a round center hub, a small round knob at the end of each spoke where a cabin would hang. NO cabins, NO legs, NO stand. Thick dark brown outlines, flat colors, no shading. Centered, filling about 80% of the canvas. Transparent background with a real alpha channel.') },
+  { ...boat('ferris_gondola', '관람차: 곤돌라', ''),
+    prompt: para(STYLE, STYLE_REF_ONLY, 'ONE small cute Ferris wheel cabin seen straight from the front: a rounded box cabin in soft sky blue (#8ec8ee) with a round cream roof (#f6ebd5), a big open window (empty, no people), and a short hook on top. Draw it fairly SMALL in the canvas (filling about half) with the same VERY fat, bold dark brown marker outline as the dwarf. Transparent background with a real alpha channel.') },
+  { ...boat('icecream_truck', '아이스크림 트럭', ''),
+    prompt: para(STYLE, STYLE_REF_ONLY, 'Draw ONE cute small ice cream truck seen from the SIDE, driving toward the LEFT edge of the image: a chubby rounded van in soft pink-cream (#f6d8cc) and mint (#bfe6d2) with a big serving window on its side, a giant ice cream cone ornament on the roof, round wheels, a small cute face on the front (two dot eyes, a tiny smile). Draw it fairly SMALL in the canvas (in the middle half) with the same VERY fat, bold dark brown marker outline as the dwarf. No driver visible, no text. Transparent background with a real alpha channel: no road, no shadow.') },
+];
+
+const SHOP_PROPS: readonly Entry[] = [
+  prop('table_set', '식당 바깥 테이블', 'A small round wooden outdoor table (#a0703f) with a cream tablecloth and two round wooden stools on each side, seen a little from above. Nothing on the table.'),
+  mapFront('photo_backdrop', '사진 배경판', 'A photo backdrop board on two wooden legs, seen straight from the front: a big rounded frame with a soft sky-blue painted background (#d6eaf5), a few painted round flowers and a small rainbow arc along its top edge (no letters).'),
+];
+
+const SHOP_ITEMS: readonly Entry[] = [
+  itemIcon('food_cotton_candy', '솜사탕', ITEM('One big fluffy pink cotton candy (#f6c4cc) on a short wooden stick, made of a few round bumps.')),
+  itemIcon('food_skewer', '꼬치', ITEM('One short wooden skewer with three round grilled bites (warm brown #c98a4a) and one small green pepper piece.')),
+  itemIcon('food_waffle', '와플', ITEM('One square waffle (#e6b56a) with a simple grid of square dents and a small dollop of cream on top.')),
+  itemIcon('food_lemonade', '레모네이드', ITEM('One tall glass of pale yellow lemonade (#f6e7a0) with a lemon slice on the rim and a striped straw, no reflections.')),
+  itemIcon('food_cocoa', '코코아', ITEM('One round cream mug of hot cocoa (#8a5a3a) with two small marshmallows on top and one round steam puff.')),
+  itemIcon('food_croissant', '크루아상', ITEM('One plump golden croissant (#e6b56a) with three simple curved segment lines.')),
+  itemIcon('food_cream_bun', '크림빵', ITEM('One round soft bun (#e6b56a) split open with white cream inside.')),
+  itemIcon('food_pasta', '파스타', ITEM('One round plate of tomato pasta: a soft swirl of noodles (#f3d58a) with red sauce (#c9614a) and one green leaf.')),
+  itemIcon('food_stew', '스튜', ITEM('One round bowl of warm stew (#c98a4a) with a carrot slice and a potato chunk and one round steam puff.')),
+  itemIcon('food_pancakes', '팬케이크', ITEM('A stack of three fluffy pancakes (#e6b56a) with a square pat of butter and a drip of syrup.')),
+  itemIcon('food_icecream', '아이스크림', ITEM('One ice cream cone (#e6b56a) with two round scoops: strawberry pink (#f2b5a8) and mint (#bfe6d2).')),
+  itemIcon('bouquet', '꽃다발', ITEM('One small bouquet of round flowers (pink, yellow, white) wrapped in cream paper tied with a soft red ribbon.')),
+  itemIcon('photo', '사진', ITEM('One instant photo print: a cream frame (#f6ebd5) with a thicker bottom edge and a plain soft sky-blue empty picture area (nothing in the picture).')),
+  itemIcon('fortune_slip', '점괘 종이', ITEM('One small rolled-open paper slip (#f6ebd5) with one simple star symbol on it (no letters).')),
+];
+
+const SHOP_FX: readonly Entry[] = [
+  fx('emote_sleep', '이모트: 졸림', FX_LEAD, 'Emote icon for sleeping: one plump soft yellow crescent moon (#f3d36a) with two tiny four-point stars beside it.'),
+  fx('emote_yum', '이모트: 냠냠', FX_LEAD, 'Emote icon for tasty food: one small fork and one small spoon crossed, in soft grey (#b3aea8), with a tiny heart above them.'),
+];
+
+/** 주민 그림이 결에서 벗어났을 때 끝에 더하는 문단 (외곽선이 옅거나 가늘고, 머리가 잔 가닥으로 그려진 판: 사용자가 두 번 지적). */
+const VILLAGER_STYLE_FIX =
+  'IMPORTANT style: use the SAME very thick, bold, dark brown outline as the second image on every shape (a clean solid line, not thin or faded). ' +
+  'The hair is ONE or two big simple smooth blob shapes like the second image with at most two inner lines: NO curls drawn as strands, NO hair texture. ' +
+  'Keep the face as simple as the second image: two dot eyes and a tiny mouth (at most two tiny round blush dots), no wrinkles, no extra face lines. Flat colors only.';
+
+const SHOP_STAFF: readonly Entry[] = [
+  villager('clerk_snack', '간식 노점 주인', 'the owner of the snack stall: a cheerful round young man with a short brown hair blob, a soft pink-orange apron (#f2a68a), holding a fluffy cotton candy on a stick. A big happy grin.'),
+  villager('clerk_drink', '음료 가판 주인', 'the owner of the drink stand: a bright little girl with a short yellow bob, a lemon-yellow dress (#f3d36a) with a cream apron, holding a glass of lemonade. A sunny smile.'),
+  villager('clerk_bakery', '빵집 주인', 'the village baker: a plump kind middle-aged man with a tall white baker hat, a cream apron with a little flour dust drawn as two tiny white dots, holding a tray with two round breads. A warm smile.'),
+  villager('clerk_restaurant', '식당 주인', 'the restaurant cook: a sturdy cheerful woman with a short round dark hair blob under a white bandana, a soft green apron (#8fae6b), holding a wooden ladle. A proud smile.', {
+    note: '둘째 판 (후보 둘 중 A: 선 20px, 매끈한 머리. B는 clerk_restaurant.try1.png). 첫 판(clerk_restaurant.rejected1.png)은 외곽선 17px로 다른 주민(19~21px)보다 가늘다 (전당포 주인·일터 반장 때 사용자 지적과 같은 문제).',
+    extra: VILLAGER_STYLE_FIX,
+  }),
+  villager('clerk_icecream', '아이스크림 트럭 아저씨', 'the ice cream truck driver: a jolly round man with a small round mustache, a pink-and-cream striped cap, a mint shirt (#bfe6d2), holding an ice cream cone up. A big friendly grin.'),
+  villager('clerk_accessory', '장신구 가게 주인', 'the accessory shop owner: a stylish young woman with a neat lavender-tinted bun (#c9b8e0), a long plum cardigan (#7a5f78), holding up a small ribbon. An elegant little smile.'),
+  villager('clerk_salon', '미용사', 'the village hairdresser: a lively young man with a fluffy round mint-colored hair blob (#bfe6d2), a white shirt with a black vest, holding a comb and small scissors. A playful wink.'),
+  villager('clerk_inn', '여관 주인', 'the innkeeper: a gentle sleepy old woman with a grey bun and round glasses, a soft blue shawl (#7fa8d6), holding a big brass key ring. A kind sleepy smile.'),
+  villager('clerk_spring', '온천지기', 'the hot spring keeper: a relaxed middle-aged man with a short round bald head, a small towel folded on top of his head, a soft blue robe (#9db8cc) tied with a sash, holding a wooden bucket. A blissful smile with closed eyes.'),
+  villager('clerk_fortune', '점쟁이', 'the fortune teller: a mysterious but cute young woman with long dark wavy hair blob, a deep purple shawl (#8a6aa8) with a few tiny star dots, holding a small flat pale blue crystal ball (no glow). A knowing little smile.'),
+  villager('clerk_photo', '사진사', 'the village photographer: a skinny cheerful young man with a beret (#7a5f78), round glasses, a cream shirt with a brown vest, holding an old box camera. An excited open smile.'),
+  villager('clerk_souvenir', '기념품 가게 주인', 'the souvenir shop owner: a cheerful round grandma with a short round grey hair blob, a soft yellow cardigan (#f3d36a), hugging a small round plush toy. A cozy smile.', {
+    note: '둘째 판 A (선 23px, 둥근 머리). 사용자가 A를 좋다고 승인 (2026-10-18) → art-qa.mjs APPROVED로 굵기 검수에서 뺀다. B(19px)는 clerk_souvenir.try2.png. 첫 판(clerk_souvenir.rejected1.png)은 외곽선 17px로 가늘고 곱슬머리가 잔 가닥으로 그려졌다 (전당포 주인·일터 반장 때 사용자 지적과 같은 문제).',
+    extra: VILLAGER_STYLE_FIX,
+  }),
+  villager('clerk_flower', '꽃집 주인', 'the florist: a gentle young woman with a long soft brown braid, a flower tucked behind her ear, a soft green apron (#8fae6b), holding a small bouquet. A shy sweet smile.'),
+  villager('ride_carousel', '회전목마 운영자', 'the carousel operator: a cheerful chubby man with a curly mustache, a red-and-cream striped vest (#c9614a), a small round hat, holding a small brass hand bell. A jolly grin.'),
+  villager('ride_ferris', '관람차 운영자', 'the Ferris wheel operator: a calm tall young woman with a short sky-blue cap (#8ec8ee), a cream shirt and blue overalls, holding a small paper ticket. A friendly calm smile.'),
+];
+
 // ── 목록 ─────────────────────────────────────────────────────────────────
 
 /**
@@ -1163,8 +1265,19 @@ const DEBT_STAFF: readonly Entry[] = [
 const LOCKED = new Set(['monsters/dragon_base', 'characters/chief', 'map/ground', 'objects/slot_machine', 'fx/emote_heart', 'icons/sym_apple', 'items/coin']);
 const lockLeads = (list: readonly ArtAsset[]): ArtAsset[] => list.map((a) => (LOCKED.has(`${a.group}/${a.key}`) ? { ...a, copy: true } : a));
 
+/**
+ * 외곽선 검수(tools/art-qa.mjs)가 다시 뽑을 때 붙이는 끝 문단: 환경 변수 ART_RETRY_KEY(그룹/key)가 이 그림이면
+ * ART_RETRY_EXTRA를 프롬프트 끝에 더한다 ('너무 가늘었다/굵었다'를 고치는 IMPORTANT 문단). 그 밖에는 아무것도 바꾸지 않는다.
+ */
+const retryExtra = (list: ArtAsset[]): ArtAsset[] => {
+  const key = typeof process !== 'undefined' ? process.env.ART_RETRY_KEY : undefined;
+  const extra = typeof process !== 'undefined' ? process.env.ART_RETRY_EXTRA : undefined;
+  if (key === undefined || extra === undefined || extra === '') return list;
+  return list.map((a) => (`${a.group}/${a.key}` === key ? { ...a, prompt: `${a.prompt}\n\n${extra}` } : a));
+};
+
 /** 이 프로젝트의 그림. 그룹: characters, monsters, objects, map, ui, icons, items, cards, closeup, fx. */
-export const PROJECT_ASSETS: readonly ArtAsset[] = lockLeads([
+export const PROJECT_ASSETS: readonly ArtAsset[] = retryExtra(lockLeads([
   ...inGroup('characters', ...CHARACTERS),
   ...inGroup('monsters', ...MONSTERS),
   ...inGroup('map', GROUND, ...BUILDINGS),
@@ -1191,7 +1304,14 @@ export const PROJECT_ASSETS: readonly ArtAsset[] = lockLeads([
   ...inGroup('items', ...ACCESSORIES, ...DEBT_ITEMS),
   ...inGroup('map', ...DEBT_MAP),
   ...inGroup('characters', ...DEBT_STAFF),
-]);
+  ...inGroup('map', ...SHOPS, ...SHOP_PROPS),
+  ...inGroup('map', ...RIDES.filter((e) => e.key === 'carousel_base' || e.key === 'ferris_frame')),
+  ...inGroup('objects', ...RIDES.filter((e) => e.key === 'ferris_wheel' || e.key === 'ferris_gondola')),
+  ...inGroup('racers', ...RIDES.filter((e) => e.key === 'carousel_horse' || e.key === 'icecream_truck')),
+  ...inGroup('items', ...SHOP_ITEMS),
+  ...inGroup('fx', ...SHOP_FX),
+  ...inGroup('characters', ...SHOP_STAFF),
+]));
 
 // 쓰지 않는 키트 이름 (빌드 검사에서 지우지 않게): mapSameSet은 놀이부스 다음 판에서 쓸 수 있다.
 void mapSameSet;

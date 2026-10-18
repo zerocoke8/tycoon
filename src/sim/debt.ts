@@ -3,9 +3,12 @@
 
 import type { Rng } from '../core/rng.ts';
 import { ACCESSORIES, ACCESSORY_IDS, ACCESSORY_SPAWN, BANK, DEBT_MATCH, LABOR, PAWN, VAULT, WORK_FACILITIES, type AccessoryId, type SpeciesId, type WantTable, type WorkFacility } from '../data/defs.ts';
-import { SHOP_SPOTS, WORK_YARD, type Pt } from '../data/map.ts';
+import { YARD_GEO } from '../data/catalog.ts';
+import type { Pt } from '../data/map.ts';
 import { isBuilt, pawnRatio, yardPace, yardWorkers } from './economy.ts';
+import { clampInto } from './path.ts';
 import type { Accessory, GameState, Monster, PawnTicket } from './types.ts';
+import { isConnected, villageOf } from './village.ts';
 
 /** 들어오는 손님의 장신구 (ACCESSORY_SPAWN: 없음·하나·둘, 둘이면 자리가 다른 것끼리, 종이 빠진 장신구는 빼고). */
 export function rollAccessories(rng: Rng, species: SpeciesId): Accessory[] {
@@ -60,9 +63,14 @@ export function loanDebt(amount: number): number {
   return Math.round(amount * BANK.interest);
 }
 
+/** 지었고 지도에 놓여 입구가 길로 마을 입구와 이어졌다 (손님이 들를 수 있다: 전당포·은행·일터). */
+export function shopOpen(state: GameState, id: 'pawnshop' | 'bank' | 'workyard'): boolean {
+  return isBuilt(state, id) && isConnected(state, id);
+}
+
 /** 은행이 빌려줄 수 있나: 은행과 일터(못 갚은 빚을 갚을 곳)가 있고, 갚을 빚이 없고 (빚이 있으면 더 빌려주지 않는다), 이번 방문에 BANK.maxLoans번 안. 금고는 따로 (canLend). */
 export function bankOpenFor(state: GameState, m: Monster): boolean {
-  return isBuilt(state, 'bank') && isBuilt(state, 'workyard') && m.debt <= 0 && m.bankrupt !== true && (m.loans ?? 0) < BANK.maxLoans;
+  return shopOpen(state, 'bank') && shopOpen(state, 'workyard') && m.debt <= 0 && m.bankrupt !== true && (m.loans ?? 0) < BANK.maxLoans;
 }
 
 /**
@@ -111,38 +119,43 @@ export function canLend(state: GameState, amount: number): boolean {
   return amount > 0 && state.coins - amount >= VAULT.reserve && amount <= state.coins * VAULT.maxShare;
 }
 
-/** 가게 계산대 자리 i (목록보다 많으면 마지막 자리 둘레로 비켜 선다). */
-export function counterPt(shop: 'pawnshop' | 'bank', i: number): Pt {
-  const c = SHOP_SPOTS[shop].counter;
+/** 가게 계산대 자리 i (세계 좌표, 목록보다 많으면 마지막 자리 둘레로 비켜 선다). */
+export function counterPt(state: GameState, shop: 'pawnshop' | 'bank', i: number): Pt {
+  const g = villageOf(state).shop(shop);
+  const c = g.counter;
   const p = c[i];
   if (p !== undefined) return p;
-  const last = c[c.length - 1] ?? SHOP_SPOTS[shop].npc;
+  const last = c[c.length - 1] ?? g.npc;
   const k = i - c.length + 1;
-  return { x: last.x + (k % 2 === 0 ? -1 : 1) * 46 * Math.ceil(k / 2), y: last.y + 34 * k };
+  // 가게 발자국 밖(옆 건물·풀밭)으로 나가지 않게.
+  return clampInto(state, shop, { x: last.x + (k % 2 === 0 ? -1 : 1) * 46 * Math.ceil(k / 2), y: last.y + 34 * k });
 }
 
 /** 볼일 → 가게. */
 export const errandShop = (e: 'pawn' | 'redeem' | 'loan' | 'repay'): 'pawnshop' | 'bank' => (e === 'pawn' || e === 'redeem' ? 'pawnshop' : 'bank');
 
-/** 일터 시설 f의 일하는 자리 i. */
-export function workPt(f: WorkFacility, i: number): Pt {
-  const s = WORK_YARD.facilities[f].spots;
-  return s[i] ?? s[0] ?? WORK_YARD.center;
+/** 일터 시설 f의 일하는 자리 i (세계 좌표). */
+export function workPt(state: GameState, f: WorkFacility, i: number): Pt {
+  const y = villageOf(state).yard();
+  const s = y.facilities[f].spots;
+  return s[i] ?? s[0] ?? y.center;
 }
 
-/** 일터 시설 f의 기다리는 자리 i (목록보다 많으면 마지막 자리 옆으로). */
-export function waitPt(f: WorkFacility, i: number): Pt {
-  const w = WORK_YARD.facilities[f].wait;
+/** 일터 시설 f의 기다리는 자리 i (세계 좌표, 목록보다 많으면 마지막 자리 옆으로). */
+export function waitPt(state: GameState, f: WorkFacility, i: number): Pt {
+  const y = villageOf(state).yard();
+  const w = y.facilities[f].wait;
   const p = w[i];
   if (p !== undefined) return p;
-  const last = w[w.length - 1] ?? WORK_YARD.center;
+  const last = w[w.length - 1] ?? y.center;
   const k = i - w.length + 1;
-  return { x: last.x + (k % 2 === 0 ? -1 : 1) * 70 * Math.ceil(k / 2), y: last.y + 42 * k };
+  // 일터 발자국 밖으로 나가지 않게 (기다리는 채무자가 아주 많을 때).
+  return clampInto(state, 'workyard', { x: last.x + (k % 2 === 0 ? -1 : 1) * 70 * Math.ceil(k / 2), y: last.y + 42 * k });
 }
 
 /** 시설마다 일하는 자리 수 (일터 레벨, 지도 자리 수까지). */
 export function workSlots(state: GameState, f: WorkFacility): number {
-  return Math.min(yardWorkers(state), WORK_YARD.facilities[f].spots.length);
+  return Math.min(yardWorkers(state), YARD_GEO.facilities[f].spots.length);
 }
 
 /**

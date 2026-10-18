@@ -3319,3 +3319,5 @@ button.mpv-thumb:active {
   font-size: 13.5px;
   line-height: 1.35;
 }
+
+/* 짓기 모드 띠·✓/✕·짓기 탭 목록은 ui/build.css */

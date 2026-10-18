@@ -3,10 +3,9 @@
 // 인형: 인형 뽑기 부스에서 뽑은 인형 (objects/plush_<종>, 모은 수). 못 모은 인형은 그림자.
 
 import { BOOTH_IDS, BOOTHS, isGroupBooth, SPECIES, SPECIES_IDS, TRAITS, type BoothId, type SpeciesId } from '../../data/defs.ts';
-import { DISTRICTS } from '../../data/map.ts';
 import { DEBT_REACT_KINDS, debtReactionLabels, reactionLabels, type ReactTier } from '../../sim/reactions.ts';
 import { btn, fmt, h, revealInSheet, setText } from '../dom.ts';
-import { boothLockText, boothTiny, DISTRICT_ORDER, itemName, speciesDistrict } from '../labels.ts';
+import { boothLockText, boothTiny, AREAS, DISTRICT_ORDER, itemName, speciesDistrict } from '../labels.ts';
 import { BasePanel, type DexView } from '../panel.ts';
 import { itemIcon, monsterPic, plushPic } from '../pics.ts';
 import { secHead, segmented } from '../widgets.ts';
@@ -105,7 +104,8 @@ export class DexPanel extends BasePanel {
     for (const dist of DISTRICT_ORDER) {
       const list = SPECIES_IDS.filter((sp) => speciesDistrict(sp) === dist);
       if (list.length === 0) continue;
-      const D = DISTRICTS[dist];
+      const D = AREAS[dist];
+      if (D === undefined) continue;
       const met = list.filter((sp) => s.dex[sp] !== undefined).length;
       this.el.append(secHead(`${D.name} 손님`, D.hall > hall ? `마을회관 Lv.${D.hall}부터 · ${met} / ${list.length}` : `${met} / ${list.length}종`));
       const grid = h('div', 'mpv-dex');

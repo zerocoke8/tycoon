@@ -10,11 +10,12 @@
 //   ?speed=N        시뮬레이션·연출 배속 (0.25~20, 개발 서버 콘솔에서는 mpv.setSpeed(n))
 //   ?coins=N        시작 코인을 N으로
 //   ?open=<booth>   2초 뒤 그 부스 패널(확대 화면)을 연다 (slot·oddeven·cups·darts·wheel·ssireum·duck·ring·boat·race·kite·claw·pouch·tug·dig)
-//   ?all=1          마을을 다 연다: 모든 구역·부스, 그림 있는 진행자 모두 고용 (새 부스 연출 확인용, 저장하지 않는다)
+//   ?all=1          마을을 다 연다: 모든 땅·부스·건물 (길까지 이어 자동 배치), 그림 있는 진행자 모두 고용 (새 부스 연출 확인용, 저장하지 않는다)
 //   ?unlockAll=1    ?all=1과 같고, 재료를 창고 가득·귀한 물건·간식과 응원 도구도 몇 개씩 준다 (저장하지 않는다)
 //   ?only=<booth>   (?all=1·?unlockAll=1과 같이) 그 부스만 열어 둔다: 손님이 다 그리로 간다 (새 부스 연출 확인용)
 //   ?monster=1      3초 뒤 첫 손님 카드를 연다
-//   ?debug=1        지도 디버그 층 (길 그래프·자리)
+//   ?debug=1        지도 디버그 층 (칸·입구·자리)
+//   ?build=<모드>   처음부터 짓기 모드 (road·erase·land, 부스·건물·장식 key면 그것을 놓기, 1이면 꽃밭 놓기, tab·tab:<묶음>이면 짓기 탭 booth·big·shop·decor·road·land)
 //   ?zoom=Z         처음 카메라 확대 (지도 폭이 다 보이는 확대 ~ 1.6, 폰 기본 약 0.39)
 //   ?at=x,y|<booth> 처음 카메라 가운데 (세계 좌표 또는 부스 이름, pawnshop·bank·workyard, 확대는 ?zoom 없으면 0.5)
 //   ?broke=1        전당포·은행·일터를 레벨 1로 짓고 금고를 넉넉히, 손님 지갑을 거의 비게 (돈이 떨어지는 흐름 보기, 저장하지 않는다)
@@ -26,9 +27,10 @@
 import './style.css';
 import { Application, UPDATE_PRIORITY } from 'pixi.js';
 import { tweens } from './core/tween.ts';
+import { isCatalogKey } from './data/catalog.ts';
 import { BOOTH_IDS, SIM, type BoothId } from './data/defs.ts';
-import { BOOTH_SPOTS, BUILDING_SPOTS, PLAZAS, type Pt } from './data/map.ts';
-import { devAccessories, devBroke, devGiveGoods, devOpenAll, devSeedDebtors } from './sim/dev.ts';
+import type { Pt } from './data/map.ts';
+import { devAccessories, devBroke, devDecorate, devGiveGoods, devOpenAll, devSeedDebtors } from './sim/dev.ts';
 import { Sim, loadGame, newGame } from './sim/sim.ts';
 import type { GameState } from './sim/types.ts';
 import { createUi } from './ui/ui.ts';
@@ -69,15 +71,13 @@ const DEV = {
   acc: params.get('acc') === '1',
   debtors: Math.max(0, Math.min(30, Math.floor(num('debtors') ?? 0))),
 };
-/** ?at= 값 → 세계 좌표 ('x,y' 또는 부스 이름이면 그 부스 그림 자리 위쪽). */
-function atPoint(v: string | null): Pt | null {
+/** ?at= 값 → 세계 좌표 ('x,y' 또는 부스·건물 이름이면 놓인 그림 자리 위쪽). */
+function atPoint(sim: Sim, v: string | null): Pt | null {
   if (v === null || v === '') return null;
-  if ((BOOTH_IDS as readonly string[]).includes(v)) {
-    const b = BOOTH_SPOTS[v as BoothId].base;
-    return { x: b.x, y: b.y - 120 };
-  }
-  if (v === 'pawnshop' || v === 'bank' || v === 'workyard') {
-    const b = BUILDING_SPOTS[v];
+  if (isCatalogKey(v)) {
+    const vil = sim.village();
+    if (vil.placed(v) === undefined) return null;
+    const b = vil.art(v);
     return { x: b.x, y: b.y - 120 };
   }
   const [x, y] = v.split(',').map(Number);
@@ -112,7 +112,9 @@ const FONT_SAMPLE =
   ' 삐익! 당겨! 준비~ 힘내! 끝까지! 뒤집는다! 영차! 승리! 역전승! 최고! 보물이 묻혀 있단다! 파 보거라! 삽 받아요! 여기였지! 바로 옆이었는데! 땅' +
   ' 마지막 물길! 바람 분다! 버텨 냈다! 아이고, 연싸움이다! 툭! 하늘의 주인공! 끊어졌다! 우승! 손님을 보물 안내 곧 출발!' +
   // 넷째 묶음 (빚 게이지·빚 걸기 판·일터 반장·홀가분)
-  ' 빚 다 갚았다! 홀가분! 빚 걸기 판! 빚진 손님을 기다려요 오는 중 반으로! 빚이 사라졌다! 상대 빚만큼 늘었다… 삑! 삐익! 힘내! →';
+  ' 빚 다 갚았다! 홀가분! 빚 걸기 판! 빚진 손님을 기다려요 오는 중 반으로! 빚이 사라졌다! 상대 빚만큼 늘었다… 삑! 삐익! 힘내! →' +
+  // 배치형 마을 (길이 없어요 표시, 땅 값)
+  ' 길이 없어요 길이 끊겼어요 코인 가진 땅에 붙은 땅만 살 수 있어요 마을회관 레벨 부터 이미 Lv.';
 
 // ── 로딩 화면 ──
 
@@ -219,7 +221,10 @@ async function boot(): Promise<void> {
     if (e.id === 'hall') void loadArtForHall(e.level);
   });
   if (DEV.all) devOpenAll(sim);
-  if (DEV.unlockAll) devGiveGoods(sim);
+  if (DEV.unlockAll) {
+    devGiveGoods(sim);
+    devDecorate(sim);
+  }
   if (DEV.broke) devBroke(sim);
   if (DEV.debtors > 0) devSeedDebtors(sim, DEV.debtors);
   const match = params.get('match');
@@ -236,6 +241,10 @@ async function boot(): Promise<void> {
   world.onTapBooth = (b) => ui.showBooth(b);
   world.onTapBuilding = (id) => ui.showBuilding(id);
   world.onTapEmpty = () => ui.closeAll();
+  world.onTapLand = (c) => ui.showLand(c);
+  world.onTapPlaced = (id) => ui.showPlaced(id);
+  world.onBuildChange = (st) => ui.onBuildChange(st);
+  world.onBuildFail = (reason) => ui.toast(reason, 'warn');
   closeup.onTapMonster = (id) => ui.showMonster(id);
   tweens.onError = (e) => guard('tween', () => {
     throw e;
@@ -245,6 +254,8 @@ async function boot(): Promise<void> {
   // UI를 만든 뒤에 불러야 요약 토스트가 보인다. catchUp은 SIM.catchUpMaxSec까지만, 0 이하면 아무것도 안 한다.
   const savedAt = start.state.savedAt;
   if (start.loaded && savedAt > 0) guard('catchUp', () => sim.catchUp((Date.now() - savedAt) / 1000));
+  // 옛 저장을 옮기다 자리를 못 잡은 부스·건물이 보관함에 있으면 알린다.
+  if (start.loaded) sim.announceStorage();
 
   /** 아직 계산하지 않은 sim 시간과 자동 저장까지 쌓인 초. */
   let acc = 0;
@@ -311,9 +322,17 @@ async function boot(): Promise<void> {
   // ── 개발용 옵션 ──
   if (DEV.debug) world.setDebug(true);
   // ?at=x,y (세계 좌표) 또는 ?at=<부스>: 카메라를 그곳에 (확대는 ?zoom, 없으면 0.5).
-  const at = atPoint(params.get('at'));
+  const at = atPoint(sim, params.get('at'));
   if (at !== null) world.focusOn(at, DEV.zoom ?? 0.5);
-  else if (DEV.zoom !== null) world.focusOn(PLAZAS[0]?.c ?? { x: 0, y: 0 }, DEV.zoom);
+  else if (DEV.zoom !== null) world.focusOn(sim.village().placed('fountain') !== undefined ? sim.village().art('fountain') : sim.village().gateSpawn(), DEV.zoom);
+  // ?build=<모드>: 처음부터 짓기 모드 (스크린숏·시험용).
+  const build = params.get('build');
+  if (build !== null && build !== '') {
+    if (build === 'tab' || build.startsWith('tab:')) ui.openBuild(build.slice(4));
+    else if (build === 'road' || build === 'erase' || build === 'land') world.setBuildMode({ kind: build });
+    else if (isCatalogKey(build)) world.setBuildMode({ kind: 'place', key: build });
+    else world.setBuildMode({ kind: 'place', key: 'flowers' });
+  }
   const openBooth = DEV.open;
   if (openBooth !== null) {
     if ((BOOTH_IDS as readonly string[]).includes(openBooth)) window.setTimeout(() => ui.showBooth(openBooth as BoothId), 2000);

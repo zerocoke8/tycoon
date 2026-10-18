@@ -5,8 +5,8 @@
 
 import type { Rng } from '../../core/rng.ts';
 import { BOAT, RACE } from '../../data/defs.ts';
-import { BOAT_COURSE, BOOTH_SPOTS } from '../../data/map.ts';
 import { RACERS, raceOutcome } from '../race.ts';
+import { villageOf } from '../village.ts';
 import type { GroupEntry, GroupPlay, Monster, RacerIndex } from '../types.ts';
 import { crowdPick, type GroupGame } from './core.ts';
 import { makeRace, raceBuzz, raceCheer, raceCrowd, racePoll } from './race.ts';
@@ -19,15 +19,16 @@ export function pickBoat(rng: Rng, species: string, m?: Monster, entries: readon
   return crowdPick(rng, m, entries, RACERS, () => undefined) as RacerIndex;
 }
 
-const DOCK = BOOTH_SPOTS.boat.base;
-
 export const BOAT_GAME: GroupGame = {
   booth: 'boat',
   picks: BOAT.boats.length,
-  center: BOAT_COURSE.center,
-  face: () => BOAT_COURSE.center,
-  // 선착장 양옆 물가.
-  watchPoint: (rng) => ({ x: rng.chance(0.5) ? rng.range(DOCK.x - 430, DOCK.x - 260) : rng.range(DOCK.x + 260, DOCK.x + 430), y: rng.range(DOCK.y - 170, DOCK.y - 60) }),
+  center: (st) => villageOf(st).boat().course.center,
+  face: (st) => villageOf(st).boat().course.center,
+  // 선착장 양옆 물가 (catalog.ts BOAT_GEO.watch).
+  watchPoint: (st, rng) => {
+    const w = rng.pick(villageOf(st).boat().watch);
+    return { x: w.x + rng.next() * w.w, y: w.y + rng.next() * w.h };
+  },
   join: (rng, _seat, m, entries) => ({ pick: pickBoat(rng, m.species, m, entries), role: 'bettor' }),
   readiness: (es) => (es.length >= RACE.minRunners ? 'soon' : es.length > 0 ? 'ok' : 'none'),
   generate: (rng, entries, ctx) => {

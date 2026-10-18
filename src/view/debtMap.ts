@@ -9,7 +9,7 @@
 
 import { Container, Graphics, Sprite, Text } from 'pixi.js';
 import { ACCESSORIES, type AccessoryId, type AccessorySlot, type GroupBoothId, type MaterialId, type WorkFacility } from '../data/defs.ts';
-import { BOOTH_SPOTS, SHOP_SPOTS, SSIREUM_RING, TUG_FIELD } from '../data/map.ts';
+import { SHOP_GEO } from '../data/catalog.ts';
 import type { SimApi } from '../sim/api.ts';
 import { counterPt, laborGauge } from '../sim/debt.ts';
 import type { MonsterId } from '../sim/types.ts';
@@ -438,7 +438,7 @@ export class DebtMapView {
   private matchCalled(booth: GroupBoothId, debtors: readonly MonsterId[]): void {
     this.buildings.foremanWhistle(true);
     for (const id of debtors) this.liveView(id)?.showEmote(this.monsters.emoteTexture('shock'), 1.4);
-    const b = BOOTH_SPOTS[booth].base;
+    const b = this.sim.village().booth(booth).base;
     this.fx.floatText(b.x, b.y - 280, '빚 걸기 판!', 'debt', true);
   }
 
@@ -568,7 +568,8 @@ export class DebtMapView {
   /** 빚 걸기 판 자리에 선 선수의 바깥쪽 (-1 = 왼쪽·홍, 1 = 오른쪽·청), 아직 걸어가는 중이거나 판 밖이면 0. */
   private matchSide(phase: string, booth: string | null, match: GroupBoothId | null, x: number): -1 | 0 | 1 {
     if (match === null || booth !== match || (phase !== 'playing' && phase !== 'reacting')) return 0;
-    const cx = match === 'ssireum' ? SSIREUM_RING.center.x : match === 'tug' ? TUG_FIELD.center.x : x;
+    const v = this.sim.village();
+    const cx = match === 'ssireum' ? v.ring().center.x : match === 'tug' ? v.tug().center.x : x;
     return x < cx ? -1 : x > cx ? 1 : 0;
   }
 
@@ -718,8 +719,8 @@ export class DebtMapView {
    */
   shopAbove(at: { readonly x: number; readonly y: number }, out: { x: number; y: number }): boolean {
     for (const shop of ['pawnshop', 'bank'] as const) {
-      for (let i = 0; i < SHOP_SPOTS[shop].counter.length + 2; i++) {
-        const c = counterPt(shop, i);
+      for (let i = 0; i < SHOP_GEO[shop].counter.length + 2; i++) {
+        const c = counterPt(this.sim.state, shop, i);
         if (Math.abs(c.x - at.x) < 2 && Math.abs(c.y - at.y) < 2) {
           this.buildings.shopPort(shop, out);
           out.y -= 90;

@@ -6,6 +6,7 @@ import type { Cost } from './api.ts';
 import { boothRoles } from './booths.ts';
 import { TUNE } from './tuning.ts';
 import type { Candidate, GameState, Staff, StaffPost } from './types.ts';
+import { isPlaced } from './village.ts';
 
 /** 그림 없는 후보에게 붙이는 이름 (그림은 보통 부스 진행자 그림을 돌려 쓴다). TODO: defs.ts로 옮기기. */
 const HOST_NAMES = ['푸근 아주머니', '깔깔 소년', '느긋 할아버지', '반짝 누나', '씩씩 아저씨', '방실 아가씨', '뚝딱 삼촌', '소곤 언니', '껄껄 영감님', '총총 꼬마'] as const;
@@ -41,14 +42,15 @@ export interface HirePost {
  * 쉬는 진행자 who가 맡을 자리 (sim hire와 고용 후보 카드가 같이 쓴다).
  * 그림 있는 진행자는 자기 자리 (열린 부스면 다른 사람이 서 있어도 바꿔 선다) → 꼭 있어야 하는 빈 자리 → 있으면 좋은 빈 자리.
  * 자기 부스가 아직 잠겼으면 있으면 좋은 자리는 맡지 않고 쉰다 (부스를 열 때 바로 자기 자리로 가게).
+ * 보관함에 있는 부스(지도에 놓지 않은 부스)는 잠긴 부스처럼 본다 (놓으면 sim이 자리를 채운다).
  */
 export function hirePost(state: GameState, who: Pick<Staff, 'name' | 'art'>): HirePost | null {
   const own = presetPost(who);
-  if (own !== null && state.booths[own.booth].unlocked) return { post: own, take: (state.booths[own.booth].staff[own.role] ?? null) !== null };
+  if (own !== null && state.booths[own.booth].unlocked && isPlaced(state, own.booth)) return { post: own, take: (state.booths[own.booth].staff[own.role] ?? null) !== null };
   const empty: { booth: BoothId; role: number; optional: boolean }[] = [];
   for (const b of BOOTH_IDS) {
     const bs = state.booths[b];
-    if (!bs.unlocked) continue;
+    if (!bs.unlocked || !isPlaced(state, b)) continue;
     boothRoles(b).forEach((r, role) => {
       if ((bs.staff[role] ?? null) === null) empty.push({ booth: b, role, optional: r.optional === true });
     });

@@ -6,12 +6,10 @@
 // 구경꾼 들썩임: 질 뻔함(brink) = 어머나, 뒤집기(flip) = 환호, 앞선 편이 바뀜 = 박수.
 
 import { SPECIES, SSIREUM } from '../../data/defs.ts';
-import { BOOTH_SPOTS, SSIREUM_RING } from '../../data/map.ts';
 import type { GroupEntry, GroupPlay, GroupSide, Monster } from '../types.ts';
+import { villageOf } from '../village.ts';
 import { crowdPick, eagerness, groupOutcome, pollTimeline, type GroupGame } from './core.ts';
 import { duelCheer, duelTimeline } from './duel.ts';
-
-const SEATS = BOOTH_SPOTS.ssireum.seats;
 
 /** 선수 둘이 다 왔나. */
 const hasPlayers = (es: readonly GroupEntry[]): boolean => es.some((e) => e.role === 'player' && e.pick === 0) && es.some((e) => e.role === 'player' && e.pick === 1);
@@ -22,14 +20,19 @@ const playerOf = (es: readonly GroupEntry[], side: number): GroupEntry | undefin
 export const SSIREUM_GAME: GroupGame = {
   booth: 'ssireum',
   picks: 2,
-  center: SSIREUM_RING.center,
+  center: (st) => villageOf(st).ring().center,
   // 선수는 서로 마주 보고, 구경 손님은 모래판 가운데를 본다.
-  face: (seat) => (seat === 0 ? (SEATS[1] ?? SSIREUM_RING.center) : seat === 1 ? (SEATS[0] ?? SSIREUM_RING.center) : SSIREUM_RING.center),
+  face: (st, seat) => {
+    const v = villageOf(st);
+    const c = v.ring().center;
+    const seats = v.booth('ssireum').seats;
+    return seat === 0 ? (seats[1] ?? c) : seat === 1 ? (seats[0] ?? c) : c;
+  },
   // 모래판 둘레 앞쪽.
-  watchPoint: (rng) => {
+  watchPoint: (st, rng) => {
+    const R = villageOf(st).ring();
     const a = rng.range(0.12, 0.88) * Math.PI;
-    const c = SSIREUM_RING.center;
-    return { x: c.x + Math.cos(a) * (SSIREUM_RING.rx + 170), y: c.y + Math.sin(a) * (SSIREUM_RING.ry + 120) };
+    return { x: R.center.x + Math.cos(a) * (R.rx + 170), y: R.center.y + Math.sin(a) * (R.ry + 120) };
   },
   seatFor: (rng, m, free, seated) => {
     const ring = free.filter((s) => s <= 1);

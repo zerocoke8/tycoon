@@ -5,8 +5,8 @@
 // 구경꾼 들썩임: 선 바로 앞(brink) = 어머나, 역전(flip) = 환호, 앞선 편이 바뀜 = 박수.
 
 import { TUG } from '../../data/defs.ts';
-import { TUG_FIELD } from '../../data/map.ts';
 import type { GroupEntry, GroupPlay, GroupSide, Monster } from '../types.ts';
+import { villageOf } from '../village.ts';
 import { groupOutcome, pollTimeline, type GroupGame } from './core.ts';
 import { duelCheer, duelTimeline } from './duel.ts';
 
@@ -43,10 +43,16 @@ export function tugSeat(pickSide: () => GroupSide, m: Monster, free: readonly nu
 export const TUG_GAME: GroupGame = {
   booth: 'tug',
   picks: 2,
-  center: TUG_FIELD.center,
+  center: (st) => villageOf(st).tug().center,
   // 홍은 오른쪽(밧줄 가운데)을, 청은 왼쪽을 본다.
-  face: (seat) => (seat < 0 ? TUG_FIELD.center : seat % 2 === 0 ? { x: TUG_FIELD.center.x + 400, y: TUG_FIELD.center.y } : { x: TUG_FIELD.center.x - 400, y: TUG_FIELD.center.y }),
-  watchPoint: (rng) => ({ x: rng.range(6960, 7740), y: rng.range(5400, 5490) }),
+  face: (st, seat) => {
+    const c = villageOf(st).tug().center;
+    return seat < 0 ? c : seat % 2 === 0 ? { x: c.x + 400, y: c.y } : { x: c.x - 400, y: c.y };
+  },
+  watchPoint: (st, rng) => {
+    const w = villageOf(st).tug().watch;
+    return { x: w.x + rng.next() * w.w, y: w.y + rng.next() * w.h };
+  },
   seatFor: (rng, m, free, seated) => tugSeat(() => (rng.chance(0.5) ? 0 : 1), m, free, seated),
   join: (_rng, seat) => ({ pick: seat % 2, role: 'player' }),
   // 편마다 둘이면 곧. 한참(TUG.soloAfterSec) 기다려도 안 차면 한 명씩이라도.

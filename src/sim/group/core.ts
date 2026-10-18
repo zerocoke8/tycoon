@@ -7,7 +7,7 @@
 import type { Rng } from '../../core/rng.ts';
 import { GROUP_RULES, ODDS, type GroupBoothId, type OutcomeTier } from '../../data/defs.ts';
 import type { Pt } from '../../data/map.ts';
-import type { GroupBuzz, GroupEntry, GroupEvent, GroupKey, GroupPlay, GroupRole, GroupState, Monster, RaceResult, RoundDetail, RoundOutcome } from '../types.ts';
+import type { GameState, GroupBuzz, GroupEntry, GroupEvent, GroupKey, GroupPlay, GroupRole, GroupState, Monster, RaceResult, RoundDetail, RoundOutcome } from '../types.ts';
 
 /** 손님 하나가 자리에 앉으며 고르는 것. */
 export interface GroupJoin {
@@ -46,12 +46,12 @@ export interface GroupGame {
   readonly booth: GroupBoothId;
   /** pick의 가짓수 (경주·오리배 4, 씨름·줄다리기 2, 연 4, 보물찾기 6). */
   readonly picks: number;
-  /** 결과 뒤 구경 반응을 재는 가운데 (지도 좌표, 반경 TUNE.groupSpectateRadius). */
-  readonly center: Pt;
-  /** 자리 seat에 앉은 손님이 바라보는 점 (-1 = 근처에서 구경하는 손님). */
-  face(seat: number): Pt;
-  /** 구경꾼 성격 손님이 서서 보는 곳. */
-  watchPoint(rng: Rng): Pt;
+  /** 결과 뒤 구경 반응을 재는 가운데 (세계 좌표: 놓인 자리, 반경 TUNE.groupSpectateRadius). */
+  center(state: GameState): Pt;
+  /** 자리 seat에 앉은 손님이 바라보는 점 (세계 좌표, -1 = 근처에서 구경하는 손님). */
+  face(state: GameState, seat: number): Pt;
+  /** 구경 손님이 서서 보는 곳 (세계 좌표, 시설 발자국 안: 입구로 들어가 선다). */
+  watchPoint(state: GameState, rng: Rng): Pt;
   /**
    * 줄 맨 앞 손님이 앉을 자리 (free = 빈 자리, 오름차순, 하나 이상). seated[자리] = 그 자리 손님 (걸어오는 손님 포함, 빈 자리 null).
    * 씨름 선수·구경, 연 날리기·구경, 줄다리기 적은 편, 보물찾기 판 자리. 없으면 free[0] (앞자리부터). free 밖의 값이면 free[0].

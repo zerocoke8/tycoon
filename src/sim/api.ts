@@ -1,8 +1,11 @@
 // 시뮬레이션의 바깥 약속 (화면·UI가 쓰는 것). 구현은 sim.ts의 Sim 클래스.
 // 행동은 모두 Result를 돌려준다: 안 되면 ok=false와 한국어 이유 (UI가 그대로 토스트로 띄운다).
 
+import type { CatalogKey, CatalogKind } from '../data/catalog.ts';
 import type { BoothId, BuildingId, GoodId, MaterialId, PreciousId } from '../data/defs.ts';
+import type { Cell } from '../data/map.ts';
 import type { GameState, Monster, MonsterId, SimBus, StaffId } from './types.ts';
+import type { ChunkInfo, PlaceCheck, Village } from './village.ts';
 
 export interface Cost {
   readonly coins: number;
@@ -11,6 +14,37 @@ export interface Cost {
 }
 
 export type Result = { readonly ok: true } | { readonly ok: false; readonly reason: string };
+
+/** 보관함 한 줄 (가졌는데 지도에 놓지 않은 것). */
+export interface StorageItem {
+  readonly key: CatalogKey;
+  readonly count: number;
+}
+
+/** 짓기 목록 한 줄 (SimApi.catalog). */
+export interface CatalogEntry {
+  readonly key: CatalogKey;
+  readonly kind: CatalogKind;
+  /** 가진 수 (부스·건물 0·1, 장식 = 놓인 것 + 보관함). */
+  readonly owned: number;
+  /** 보관함에 있는 수. */
+  readonly stored: number;
+  /** 지도에 놓인 수. */
+  readonly placed: number;
+  /** 사는 비용 (부스 = 열기, 처음엔 없는 건물 = 짓기, 장식 = 값). 이미 가진 부스·건물은 null. */
+  readonly cost: Cost | null;
+  /** 비용 말고 아직 못 사는 이유 (마을회관 레벨). */
+  readonly lock: string | null;
+  /** 차지하는 칸. */
+  readonly w: number;
+  readonly h: number;
+  /** 손님이 들르는 곳이라 입구 앞이 길과 이어져야 한다. */
+  readonly needsRoad: boolean;
+  /** 옮기거나 보관할 수 없다 (마을 입구). */
+  readonly fixed: boolean;
+  /** 보관함에 넣을 수 있다 (마을 입구·마을회관·공방·사무소·창고·분수는 안 된다: catalog.ts storable). */
+  readonly storable: boolean;
+}
 
 export interface SimApi {
   readonly state: GameState;
@@ -29,6 +63,8 @@ export interface SimApi {
   /** 한판에 내는 손님 특산 재료 수 (복주머니 1, 그 밖 0). 이런 부스는 코인 참가비(boothFee)가 0. */
   boothMatFee(booth: BoothId): number;
   canAfford(cost: Cost): boolean;
+  /** 모자란 것 한 줄 ('무 잎이 1개 모자라요.' …, 넉넉하면 null). */
+  missingReason(cost: Cost): string | null;
   /** 다음 레벨 비용 (최고 레벨이면 null). 처음에 없는 건물(전당포·은행·일터, defs.ts BUILD_HALL)은 레벨 0이고 이것이 짓는 비용. */
   buildingUpgradeCost(id: BuildingId): Cost | null;
   /** 지었나 (레벨 1 이상). */
@@ -47,6 +83,42 @@ export interface SimApi {
   boothOpen(booth: BoothId): boolean;
   /** 공방에서 한꺼번에 만들 수 있는 개수 (state.crafting.length와 비교). */
   craftSlots(): number;
+
+  // ── 배치형 마을 (DESIGN 6.1, sim/village.ts) ──
+  /** 칸 지도·길 이어짐·세계 좌표 모양 (그때그때 부른다: 바뀌면 새 객체). */
+  village(): Village;
+  /** 가진 수 (부스·건물 0·1, 장식 = 놓인 것 + 보관함). */
+  owned(key: CatalogKey): number;
+  /** 보관함에 있는 수. */
+  stored(key: CatalogKey): number;
+  storage(): StorageItem[];
+  /** 짓기 목록 (부스 → 건물 → 장식). */
+  catalog(): CatalogEntry[];
+  /** 사는 비용 (가진 부스·건물은 null). */
+  buyCost(key: CatalogKey): Cost | null;
+  buyLockReason(key: CatalogKey): string | null;
+  /** key를 칸 cell(왼쪽 위 칸)에 놓을 수 있나. moving = 옮기는 중인 자기 id (Placed.id). */
+  canPlace(key: CatalogKey, cell: Cell, moving?: number): PlaceCheck;
+  /** 땅 조각 하나 (map.ts chunkIndex). */
+  chunk(index: number): ChunkInfo;
+  chunkLockReason(index: number): string | null;
+
+  // ── 배치형 마을 행동 ──
+  /** 사서 보관함에 (부스 열기·건물 짓기·장식 사기). */
+  buy(key: CatalogKey): Result;
+  /** 지도에 놓는다 (보관함에서, 없으면 먼저 산다). */
+  place(key: CatalogKey, cell: Cell): Result;
+  /** 놓인 것(Placed.id)을 옮긴다 (안의 손님도 같이). */
+  move(id: number, cell: Cell): Result;
+  /** 놓인 것을 보관함으로 (마을 입구는 안 된다). */
+  store(id: number): Result;
+  /** 길 칸 깔기·지우기 (가진 땅의 빈 칸만). */
+  paintRoad(cells: readonly Cell[]): Result;
+  eraseRoad(cells: readonly Cell[]): Result;
+  /** 땅 조각 사기 (가진 땅에 이웃한 조각, 값·회관 레벨). */
+  buyChunk(index: number): Result;
+  /** 보관함의 것을 알맞은 자리에 길까지 이어 놓는다 (자리가 없으면 실패). spread = 다른 건물에 위아래로 붙이지 않게 (village.ts findSpot). */
+  autoPlace(key: CatalogKey, spread?: boolean): Result;
 
   // ── 촌장의 행동 ──
   /** 손님을 톡 눌러 응원 (쿨타임). */

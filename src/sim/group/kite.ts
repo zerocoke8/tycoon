@@ -3,21 +3,22 @@
 // 자리 고르기: 대개 연을 날리러 나서고, 겁쟁이·구경꾼은 구경 자리로 (KITE.fly). 구경 손님의 연: 같은 종이 날리는 연, 구경꾼은 사람 많은 연, 대담이는 적은 연.
 // 구경꾼 들썩임: 연싸움(tangle)·끊길 뻔함(brink) = 어머나, 끊김(cut) = 박수, 마지막 연싸움에서 끊김 = 환호.
 // 등급: 이긴 연 win ×3.2 (끊길 뻔했다 살아남으면 jackpot ×5), 끝나기 직전에 끊긴 마지막에서 두 번째 연 nearMiss, 나머지 lose. 배당 ODDS.kite.
-// tracks[2k] = 연 k 높이 (0~1), tracks[2k+1] = 좌우 (KITE_FIELD.sway px 단위: 보통 -1~1, 연싸움 때는 상대 연 쪽으로 더 간다). 끊긴 연의 키는 cutAt에서 끝난다.
+// tracks[2k] = 연 k 높이 (0~1), tracks[2k+1] = 좌우 (KITE_GEO.sway px 단위: 보통 -1~1, 연싸움 때는 상대 연 쪽으로 더 간다). 끊긴 연의 키는 cutAt에서 끝난다.
 
 import type { Rng } from '../../core/rng.ts';
 import { KITE, SPECIES } from '../../data/defs.ts';
-import { KITE_FIELD } from '../../data/map.ts';
+import { KITE_GEO } from '../../data/catalog.ts';
 import type { GroupEntry, GroupEvent, GroupKey, GroupPlay, Monster } from '../types.ts';
+import { villageOf } from '../village.ts';
 import { crowdPick, eagerness, groupOutcome, pollTimeline, type GroupGame } from './core.ts';
 
 const N = KITE.kites.length;
 /** 날리는 자리 사이 (세계 px)를 sway 단위로: 연싸움 때 두 연이 가운데에서 만나게. */
 const SPOT_GAP = (() => {
-  const f = KITE_FIELD.flyers;
+  const f = KITE_GEO.flyers;
   const a = f[0];
   const b = f[1];
-  return a !== undefined && b !== undefined ? Math.abs(b.x - a.x) / KITE_FIELD.sway : 1.4;
+  return a !== undefined && b !== undefined ? Math.abs(b.x - a.x) / KITE_GEO.sway : 1.4;
 })();
 /** 연싸움이 끊기기 전 몇 초 동안. */
 const TANGLE_SEC: readonly [number, number] = [1.0, 1.4];
@@ -73,9 +74,12 @@ function nearest(rng: Rng, k: number, alive: readonly number[]): number {
 export const KITE_GAME: GroupGame = {
   booth: 'kite',
   picks: N,
-  center: KITE_FIELD.center,
-  face: () => KITE_FIELD.center,
-  watchPoint: (rng) => ({ x: rng.range(4400, 5060), y: rng.range(1390, 1480) }),
+  center: (st) => villageOf(st).kite().center,
+  face: (st) => villageOf(st).kite().center,
+  watchPoint: (st, rng) => {
+    const w = villageOf(st).kite().watch;
+    return { x: w.x + rng.next() * w.w, y: w.y + rng.next() * w.h };
+  },
   seatFor: (rng, m, free) => {
     const fly = free.filter((s) => s < KITE.flyers);
     const watch = free.filter((s) => s >= KITE.flyers);

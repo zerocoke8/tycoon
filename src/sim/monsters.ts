@@ -1,7 +1,7 @@
 // 손님 만들기, 걷기, 성격에 따른 건 코인.
 
 import type { Rng } from '../core/rng.ts';
-import { GUEST_MATS, LABOR, MOOD, NICKNAMES, SIM, SPECIES, SPECIES_IDS, TRAITS, type SpeciesId, type TraitId } from '../data/defs.ts';
+import { BUILDINGS, GUEST_MATS, LABOR, MOOD, NICKNAMES, SIM, SPECIES, SPECIES_IDS, TRAITS, type MaterialId, type SpeciesId, type TraitId } from '../data/defs.ts';
 import type { Pt } from '../data/map.ts';
 import { rollAccessories } from './debt.ts';
 import { josa } from './text.ts';
@@ -29,9 +29,9 @@ export function faceToward(m: Monster, x: number): void {
   if (Math.abs(x - m.pos.x) > 1) m.facing = x > m.pos.x ? 1 : -1;
 }
 
-/** path를 따라 dt초만큼 걷는다. 바라보는 쪽은 가로로 움직이는 쪽. */
-export function stepMove(m: Monster, dt: number): void {
-  let budget = speedOf(m) * dt;
+/** path를 따라 dt초만큼 걷는다 (mult = 빠르기 배수: 길 칸 위 TUNE.roadSpeed). 바라보는 쪽은 가로로 움직이는 쪽. */
+export function stepMove(m: Monster, dt: number, mult = 1): void {
+  let budget = speedOf(m) * mult * dt;
   let x = m.pos.x;
   let y = m.pos.y;
   while (budget > 0 && m.path.length > 0) {
@@ -67,9 +67,23 @@ export function allowedSpecies(hall: number): SpeciesId[] {
   return SPECIES_IDS.filter((s) => SPECIES[s].hall <= hall);
 }
 
-function pickSpecies(rng: Rng, hall: number): SpeciesId {
+/**
+ * 다음 마을회관 레벨에 모자란 재료를 가져오는 종 (그 종이 TUNE.neededSpeciesWeight배 자주 온다: 손님 종이 많아져 한 종이 드물게 오면
+ * 재료 하나를 기다리느라 한참 막히는 일이 없게).
+ */
+function neededSpecies(state: GameState): Set<SpeciesId> {
+  const next = (BUILDINGS.hall.levels as readonly { mats?: Partial<Record<MaterialId, number>> }[])[state.buildings.hall.level];
+  const out = new Set<SpeciesId>();
+  for (const [k, n] of Object.entries(next?.mats ?? {}) as [MaterialId, number][]) {
+    if ((state.materials[k] ?? 0) >= n) continue;
+    for (const s of SPECIES_IDS) if (SPECIES[s].material === k) out.add(s);
+  }
+  return out;
+}
+
+function pickSpecies(rng: Rng, hall: number, need: ReadonlySet<SpeciesId>): SpeciesId {
   const list = allowedSpecies(hall);
-  return rng.weighted(list.map((s) => [s, SPECIES[s].hall === hall && hall > 1 ? TUNE.newSpeciesWeight : 1] as const));
+  return rng.weighted(list.map((s) => [s, (SPECIES[s].hall === hall && hall > 1 ? TUNE.newSpeciesWeight : 1) * (need.has(s) ? TUNE.neededSpeciesWeight : 1)] as const));
 }
 
 function pickTraits(rng: Rng, species: SpeciesId): TraitId[] {
@@ -92,7 +106,7 @@ function pickNickname(rng: Rng, state: GameState, species: SpeciesId): string {
 /** 새 손님 (입구에 선다). 단골이면 그 이름·성격 그대로. */
 export function createMonster(rng: Rng, state: GameState, id: MonsterId, at: Pt, regular: Regular | null): Monster {
   const hall = state.buildings.hall.level;
-  const species = regular?.species ?? pickSpecies(rng, hall);
+  const species = regular?.species ?? pickSpecies(rng, hall, neededSpecies(state));
   const def = SPECIES[species];
   const [w0, w1] = def.wallet;
   const [m0, m1] = MOOD.start;

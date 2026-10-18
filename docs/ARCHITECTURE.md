@@ -8,7 +8,7 @@
   덕분에 `src/sim/`과 `src/data/`, `src/core/`는 Node 24로 바로 돌릴 수 있다 (`node scripts/sim-check.ts`). 이 세 폴더는 pixi.js·DOM을 import하지 않는다.
 - 게임 안 낱말: '놀이', '놀이부스', '한판', '손님', '촌장', '진행자'. '도박·겜블·베팅'은 화면 글자에 쓰지 않는다 ('판돈' 대신 '건 코인').
 - 숫자는 그림이 아니라 코드 글자로 그린다.
-- 밸런스 숫자는 `src/data/defs.ts`에만. 지도 배치는 `src/data/map.ts`에만.
+- 밸런스 숫자는 `src/data/defs.ts`에만 (땅 값 `LAND`·장식 `DECOR` 포함). 칸·땅·처음 마을은 `src/data/map.ts`, 건물·부스·장식의 모양(차지하는 칸·입구·안쪽 자리, 건물 기준 상대 좌표)은 `src/data/catalog.ts`.
 - 모든 무작위는 `core/rng.ts`의 `Rng` (상태 `GameState.rng`)로. 화면 연출용 무작위(파티클 흩뿌리기 등)만 `Math.random` 허용.
 
 ## 폴더
@@ -16,9 +16,9 @@
 ```text
 src/
   core/      rng.ts, events.ts (+ tween.ts 등 공용 도구)
-  data/      defs.ts (밸런스), map.ts (배치)
-  sim/       types.ts (상태·이벤트), api.ts (SimApi 약속), sim.ts (Sim 클래스) 그리고 path.ts, monsters.ts, booths.ts, games.ts, reactions.ts, economy.ts, save.ts
-  view/      art.ts (그림 불러오기, 배율), world.ts (VillageView: 카메라·층), ground.ts, monsterView.ts, buildings.ts, fx.ts
+  data/      defs.ts (밸런스), map.ts (칸·땅·처음 마을), catalog.ts (건물·부스·장식 모양: 상대 좌표)
+  sim/       types.ts (상태·이벤트), api.ts (SimApi 약속), sim.ts (Sim 클래스) 그리고 village.ts (배치형 마을), path.ts (길 칸 길찾기), monsters.ts, booths.ts, games.ts, reactions.ts, economy.ts, save.ts
+  view/      art.ts (그림 불러오기, 배율), world.ts (VillageView: 카메라·층·입력), buildMode.ts (짓기 모드: 유령·길 칠하기·땅 고르기), ground.ts (바닥), roads.ts (길 모양), land.ts (사지 않은 땅의 구름), monsterView.ts, buildings.ts, fx.ts
   view/closeup/  CloseupView (부스 확대 화면)
   ui/        HTML 오버레이 (HUD, 아래 탭, 시트, 손님 카드, 토스트), ui.css
   main.ts    부팅, 루프, 연결
@@ -49,8 +49,8 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
 - `Sim implements SimApi` (`api.ts`). 생성자 `new Sim(state: GameState)`; `newGame(seed?)`, `loadGame(): GameState | null`(localStorage 키 `mpv-save-v1`, 버전 확인).
   저장 버전 4 (넷째 묶음). 버전 2·3 저장은 `save.ts migrate2`(경주장 `BoothState.race` → `group`) → `migrate3`(손님 장신구·맡긴 장신구·빚 칸)으로 그대로 잇는다 (새 부스·건물·재료 칸, 새 진행자 후보는 채운다).
 - 손님 상태 기계 (`MonsterPhase`): arriving → wandering → toBooth → queued → toSeat → playing → reacting → (다시 한판 | wandering | resting | leaving).
-  - 걷기: `path.ts`가 `data/map.ts`의 NODES/EDGES로 최단 경로 → `Monster.path`(세계 좌표 점들). 속도 SIM.walkSpeed (떠다니는 종은 floatSpeed).
-    길의 첫 직선(지금 자리 → 첫 노드)·마지막 직선(노드 → 목적지)·곧장 걷기는 부스 그림이 서 있는 땅(BOOTH_SPOTS.base 위 사각형, `crossesBooth`)을 가로지르지 않게 고른다 (그림 뒤로 숨지 않게).
+  - 걷기 (배치형 마을, 아래 '배치형 마을'): `path.ts route(state, from, to, via, lane)`가 길 칸으로만 → `Monster.path`(세계 좌표 점들). 속도 SIM.walkSpeed (떠다니는 종은 floatSpeed).
+    건물 안 자리(줄·자리·계산대·일터·쉼터·구경 자리)는 그 건물의 입구 앞 길 칸 → 문(door) → 자리로 들어간다. `Sim.walk(m, to, via)`가 손님마다 비켜 걷기(laneOffset)를 붙인다.
   - 부스 고르기: 좋아하는 부스 가중치 + 열린 부스(진행자 있음) + 줄 길이. 줄이 가득이면 다른 부스나 쉬기.
   - 건 코인: 지갑 × 성격(겁쟁이 0.08~0.12, 보통 0.15~0.25, 대담이 0.3~0.45), 최소 1. 참가비(fee)는 마을 코인으로, 건 코인은 부스 항아리로.
   - 한판 시작 때 `games.ts`가 결과(RoundOutcome)를 정한다 (ODDS 표, 응원 도구·행운아의 luck 반영). 세부(detail)는 등급과 맞아야 한다:
@@ -72,7 +72,7 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   고용하면 `hirePost`: 자기 자리 (열린 부스면 서 있던 진행자와 바꿔 서고 그 진행자는 다른 빈 자리로, 없으면 쉰다) → 꼭 있어야 하는 빈 자리 → 있으면 좋은 빈 자리.
   자기 부스가 아직 잠긴 그림 있는 진행자는 있으면 좋은 자리를 맡지 않고 쉰다. 부스를 열면 `autoAssign`: 자리마다 어울리는 진행자(쉬는 중이거나 다른 부스의 있으면 좋은 자리) 먼저,
   남은 자리는 쉬는 진행자 가운데 이 부스의 다른 빈 자리에 어울리지 않는 사람 (그림 없는 진행자 먼저).
-  부스 해금에는 회관 레벨 조건(`unlock.hall` = 그 구역이 열리는 레벨)이 있다 (`boothLockReason`).
+  부스 해금에는 회관 레벨 조건(`unlock.hall`)이 있다 (`boothLockReason`). 열림(`boothOpen`)은 진행자에 더해 지도에 놓였고 입구가 길로 마을 입구와 이어져야 한다 (`booths.ts boothIdleReason`: stored·road·staff).
 - 둘째 묶음 부스: 결과 세부는 `games.ts` (wheel·duck·ring·claw·pouch). 오리 낚시는 잃어도 ×0.5, 한판마다 기분 +2(`moodPerRound`), 지면 기분 하락 반(`moodLossScale`),
   복주머니는 참가비가 손님의 특산 재료 1개(`matFee`, 손님은 `Monster.mats` 1~2개를 들고 온다, 없으면 고르지 않는다, 창고가 가득이어도 놀고 토스트)이고 건 코인 ×0.4(`betScale`), 대박이면 떠날 때 귀한 물건 확정(`Monster.surePrecious`).
   인형 뽑기에서 뽑은 인형은 도감 `dex[종].plush`에 모인다 (그 종 인형이 처음이면 토스트). 반응은 둘째 묶음 부스마다 자기 표(`reactions.ts BOOTH_TABLE`, 등급마다 3~5개).
@@ -103,7 +103,7 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   - 판이 시작되면 근처를 걷던 손님이 멈춰 구경한다 (`TUNE.groupDraw*`, 진행자 손님맞이만큼 더). 반응 표: `reactions.ts groupCheerReaction`·`groupBuzzReaction`·`groupReactionLabels(booth)` (응원·구경·들썩 이름표).
     진행자 능력치: 진행 = 모이는 시간·판 길이 (`TUNE.groupPacePerPoint`), 입담 = 사건마다 기분·구경 반응 확률, 손님맞이 = 끌어오기·멈춰 구경.
 - 넷째 묶음 (DESIGN 3.7: 장신구·전당포·은행·파산·일터·빚 걸기 판). 숫자는 `defs.ts` (ACCESSORIES·ACCESSORY_SPAWN·VAULT·PAWN·BANK·LABOR·DEBT_MATCH, 건물 pawnshop·bank·workyard + `BUILD_HALL`),
-  배치는 `map.ts` (`BUILDING_SPOTS`·`BUILDING_K`·`SHOP_SPOTS`·`WORK_YARD`, 노드 pawn_front·bank_front·yard_turn·yard_front), 순수 도구는 `sim/debt.ts` (값·자리·게이지, UI도 쓴다), 흐름은 `sim.ts` '넷째 묶음' 묶음.
+  모양은 `catalog.ts` (`SHOP_GEO`·`YARD_GEO`, 배율 `BUILDING_LAYOUT.k`), 세계 좌표는 `village.ts` (`shop(s)`·`yard()`), 순수 도구는 `sim/debt.ts` (값·자리·게이지 `counterPt(state, …)`·`workPt`·`waitPt`, 손님이 들를 수 있나 `shopOpen`), 흐름은 `sim.ts` '넷째 묶음' 묶음.
   - 손님: `Monster.accessories: Accessory[]` (key·slot·value, 올 때 `debt.ts rollAccessories`), `pawned: PawnTicket[]` (이번 방문에 맡김, price = 빌린 코인), `debt` (갚을 빚),
     `loans?`, `errand?` ('pawn'|'redeem'|'loan'|'repay'), `homeward?`, `counter?`, `bankrupt?`, `wasBankrupt?`, `declined?` ('low'|'broke': 더 놀기 싫다고 한 단계), `chased?` (빚 쫓기 판 수),
     `labor?: LaborState` (facility·spot·wait·progress·made·total·boostSec·boostMult·match·since·matches). 단골 `Regular.recovered` = 파산했다가 다 갚은 손님.
@@ -125,12 +125,12 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   - API: `buildingBuilt(id)`, `buildingLockReason(id)` (회관 레벨), `upgradeBuilding`은 레벨 0이면 짓기. 개발용 `Sim.devBankrupt(id, debt)`.
   - sim-check: `--auto --seeds N --debt` (일터를 지은 뒤 30분마다 맡김·컬렉션·대출·파산·빚 걸기 판, 일한 시간, 채무자 수, 금고, 장부, 돈이 떨어진 손님 깔때기),
     `--debt-build` (지을 수 있으면 바로), `--no-debt` (짓지 않음), `--open-all` (다 열린 마을). selftest 6g: 장신구·마음·짝·전당포·싫다·금고·은행·빚 쫓기·파산·일터·반장·빚 걸기 판(1:1·2:2)·저장·반응 표·45분 장부.
-- 개발용: `sim/dev.ts devOpenAll(sim)` = 모든 구역·부스를 열고 그림 있는 진행자를 다 고용, 전당포·은행·일터도 끝까지, 재료는 창고 반 (주소 `?all=1`, sim-check). `devGiveGoods(sim)` = 간식·응원 도구 몇 개씩.
+- 개발용: `sim/dev.ts devOpenAll(sim)` = 모든 땅·부스를 열고 (큰 것부터 길까지 이어 자동 배치 `devPlaceAll`), 그림 있는 진행자를 다 고용, 전당포·은행·일터도 끝까지, 재료는 창고 반 (주소 `?all=1`, sim-check). `devAllLand(sim)` = 땅을 다. `devGiveGoods(sim)` = 간식·응원 도구 몇 개씩.
   `devBroke` (주소 `?broke=1`: 넷째 묶음 건물 레벨 1·금고 2000·손님 지갑을 거의 비게), `devSeedDebtors(sim, n)` (`?debtors=N`: 일터에 채무자 n), `devAccessories` (`?acc=1`: 모든 손님에게 장신구 셋).
   주소 `?unlockAll=1` = `?all=1` + `devGiveGoods` (저장하지 않는다). 개발 서버 콘솔 `mpv.setSpeed(n)`으로 배속을 바꾼다 (스크린숏: 빠르게 손님을 모았다가 천천히 찍기).
 - 촌장의 행동은 `SimApi`의 메서드 (응원 톡, 간식, 응원 도구, 짓기·업그레이드, 고용·배치, 가공).
-- 처음 상태: 코인 SIM.startCoins, 슬롯·홀짝 부스 열림, 진행자 둘(HOST_PRESETS의 slot·oddeven)이 각 부스에, 후보에 cups·darts·wheel 진행자 (그림 있는 진행자는 그 부스를 열 수 있는 회관 레벨이 되면 후보로 온다), 건물 레벨 1, 중앙 구역만 열림.
-- 회관 레벨이 오르면 `DISTRICTS`의 hall 조건에 맞는 구역이 열린다 (districtOpened). 종은 SPECIES.hall 조건으로 손님에 나온다.
+- 처음 상태: 코인 SIM.startCoins, 슬롯·홀짝 부스 열림, 진행자 둘(HOST_PRESETS의 slot·oddeven)이 각 부스에, 후보에 cups·darts·wheel 진행자 (그림 있는 진행자는 그 부스를 열 수 있는 회관 레벨이 되면 후보로 온다), 건물 레벨 1, 처음 마을 (`map.ts DEFAULT_*`, 처음 땅 3×3 조각).
+- 회관 레벨이 오르면 더 먼 땅 고리를 살 수 있다 (`defs.ts LAND.hall`). 종은 SPECIES.hall 조건으로 손님에 나온다.
 - `scripts/sim-check.ts`: 새 게임을 화면 없이 30분(게임 시간) 돌리며 1분마다 코인·손님 수·한판 수·대박·떠난 손님의 평균 기분·팁을 찍는다. 밸런스 확인용.
   `--auto --seeds 24 --minutes 120`: 욕심쟁이 촌장(회관 먼저, 단체 놀이는 회관 1부터·지금 구역 부스는 회관 2부터 다음 회관보다 먼저)의 이정표 표 (분위수), 부스마다 연 뒤 1분 한판 수,
   경주 평균 참가자, 단체 놀이마다 한 판 평균 참가자·접힌 판 비율 (`--detail`: 다음 회관 비용 항목마다 모인 때, `--first N`: N번 시드부터).
@@ -140,16 +140,22 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
 
 ## 화면 (src/view)
 
-- 좌표: 세계 8000×7800 (`data/map.ts WORLD`, 가운데 중앙 구역 + 둘레 세 구역 + 맨 오른쪽 축제 들판). 화면 논리 폭 720 기준이 아니라, 카메라가 세계를 화면에 맞춘다:
+- 좌표: 세계 = 칸 72×64 × 96px (`data/map.ts WORLD`, 땅 조각 9×8, 처음 땅은 아래 가운데 3×3). 화면 논리 폭 720 기준이 아니라, 카메라가 세계를 화면에 맞춘다:
   확대 0.06~0.35(좁은 화면은 지도 폭 6400이 다 들어올 때까지, 390px 폰 약 0.06) ~ 1.6. 처음에는 열린 놀이부스(건물·자리·진행자·항아리)가 HUD와 아래 탭 사이에 다 들어오게 맞춘다 (폰 약 0.26, 넓은 화면 최대 0.8).
   UI가 위·아래를 덮은 높이를 `setViewInset`으로 알리면 카메라는 그 사이 띠의 가운데를 맞춘다 (손님 카드가 열리면 따라가는 손님이 카드 위에).
 - 지도가 커져도 걷는 시간에 묶인 규칙은 지도를 따른다: 손님이 머무는 시간(TUNE.maxVisitSec)은 첫 한판부터, 손님 수 한도에는 걸어 들어오는 손님을 세지 않고,
   첫 손님 자리·입구에서 걸어 들어오는 거리는 노드 수·비율로 (픽셀 상수가 아니다). sim-check의 '멈춤' 한도도 길 그래프의 가장 먼 거리에서 정한다.
 - 조작: 한 손가락 끌기 = 이동(관성), 두 손가락 = 확대·축소, 휠 = 확대·축소. 짧게 누르기(움직임 < 8px) = 누르기: 손님 → 손님 카드, 부스·건물 → 패널.
-- 층: ground(코드로 그린 바닥) → floor(바닥에 깔리는 그림: 씨름 모래판·흙더미, 단체 놀이의 바닥 표시) → 그림자 → 물체층(건물·소품·주민·손님, **y로 정렬**, 닫힌 구역 구름도 여기)
+- 층: ground(코드로 그린 바닥) → floor(바닥에 깔리는 그림: 씨름 모래판·흙더미, 단체 놀이의 바닥 표시) → 그림자 → 물체층(건물·소품·주민·손님, **y로 정렬**, 사지 않은 땅의 구름 띠(land.ts)·'길이 없어요' 표시도 여기)
   → 효과층(이모트·파티클·숫자) → sky(연과 연줄, 모든 것 위) → 디버그층(D 키: 노드·간선·자리·물길·놀이 마당).
 - 바닥(`ground.ts`): `GROUND_STYLE` 색. 모든 길·광장 테두리를 먼저, 속을 나중에 (둥근 끝). 연못은 씨앗 난수로 울퉁불퉁한 덩어리. 길 위 조약돌 점, 풀밭에 풀 한 포기(`map/tuft` 그림이 있으면 그림, 없으면 짧은 획 셋)를 씨앗 난수로 흩뿌린다. 한 번 그려서 RenderTexture 여러 장(타일)로 굽는다 (큰 Graphics를 매 프레임 그리지 않게).
-  경주로(`data/map.ts RACE_TRACK`)도 바닥에 굽는다: 길과 같은 모래·테두리의 타원 띠, 안쪽 풀밭, 레인 사이 크림색 선, 출발선(출발대 바로 앞, `mapUtil.ts RACE_START_P`), 결승선 바둑판.
+  길 모양은 `view/roads.ts`: 길 칸마다 바깥 모서리만 둥근 사각형(`roundShape`), 꺾임·갈림길 안쪽 모서리(꼭짓점 둘레 네 칸 중 셋이 길)는 빈 칸 쪽으로 휘어 들어가고(`ROAD_FILLET`),
+  2×2 넘게 뭉친 길은 광장 (넓은 모래 + 안쪽 꼭짓점에 납작한 돌 드문드문), 길 칸마다 조약돌. 마을 입구 아치 밑 길 띠(FLOORS road)도 길 칸처럼 그린다.
+  시설 바닥 모양은 `catalog.ts FLOORS` (분수 광장·줄다리기·보물찾기 마당·오리배 연못·경주로).
+  경주로(`catalog.ts RACE_GEO`, 세계 좌표 `village.race()`)도 바닥에 굽는다: 길과 같은 모래·테두리의 타원 띠, 안쪽 풀밭, 레인 사이 크림색 선, 출발선(출발대 바로 앞, `mapUtil.ts RACE_START_P`), 결승선 바둑판.
+  땅 조각마다 바닥 그림(Graphics + 풀 스프라이트, 둘레 한 칸까지 같이 그려 조각 사이 이음매가 맞는다)을 따로 만들고, 타일(조각의 1/3, 256px, 이웃과 2px 겹침)로 굽는다.
+  길·시설 자리가 바뀌면 (`sim.village().stamp`) 바뀐 칸 둘레 조각 그림만 다시 만들고 그 타일만 다시 굽는다 (그동안은 옛 타일). 짙은 구름에 덮인 타일(`land.ts underFog`)은 굽지 않는다.
+  덧그림 (타일 위, 건물 아래): `setGrid(on)` 짓기 모드 칸 금 (world.ts가 놓기·옮기기·길 모드에서 켠다), `setTint(GroundTint[])` 칸 물들이기 (유령 발자국 등), `previewRoads(add, erase)` 칠하는 길 미리보기 (진짜 길 모양).
 - 그림 놓기: `view/art.ts`의 `artSprite(group, key, { k, anchor })`. 배율 `ART_SCALE` (건물 0.7, 놀이부스 0.5), 손님 발 기준점 `monsterFoot(종, 포즈)` = 그 포즈 그림의 아래 끝
   (떠다니는 종은 기본 그림의 아래 끝, 그림이 없으면 `MONSTER_FOOT` 캔버스 512, 870). 포즈를 바꿀 때 `setArt(group, key, anchor)`로 기준점도 바꾼다. 건물·소품·주민은 'bottom'.
   그림이 없으면 자리 표시가 나온다 (게임은 그림 없이도 돈다).
@@ -162,19 +168,23 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   바탕 `view/group/base.ts GroupMapBase` (보이기·화면 시계 `clock`·판 `play`·참가자·`own(층, 그릇)`·손님 몸 맡기기 `puppet(id, MonsterPuppet)`·시작 숫자 3·2·1 `startCount(x, y, 진행자)`: 출발 조건이 맞을 때만). 손님을 그리기 전에 불린다.
   씨름 `group/ssireum.ts`, 오리배 `group/boat.ts`, 연날리기 `group/kite.ts`, 줄다리기 `group/tug.ts`, 보물찾기 `group/dig.ts`, 경주장은 `racetrack.ts`.
   손님 몸 맡기기: `MonstersView.puppet(id, { dx, dy, lift, rot, sx, sy, pose, facing, still, alpha })` (그 프레임만, sim 좌표는 그대로).
-  지도 배치: 씨름 `SSIREUM_RING`, 오리배 `BOAT_COURSE`(`boatPoint(레인, p)`, 고리 길 `LoopCourse`·`lanePoint`), 연 `KITE_FIELD`, 줄다리기 `TUG_FIELD`, 보물찾기 `DIG_FIELD` (`data/map.ts`).
+  모양: 씨름 `SSIREUM_GEO`, 오리배 `BOAT_GEO`(물길 course·연못 pond·구경 자리 watch, 고리 길 `LoopCourse`·`map.ts lanePoint`), 연 `KITE_GEO`, 줄다리기 `TUG_GEO`, 보물찾기 `DIG_GEO` (`data/catalog.ts`, 상대 좌표).
+  화면은 만들 때 세계 좌표 모양을 읽는다 (`this.ctx.sim.village().ring()·boat()·kite()·tug()·dig()`, 바탕 `this.spot` = `village().booth(b)`, 놓였나 `this.placed`). 놓인 자리가 바뀌면 world.ts가 단체 놀이 화면을 새로 만든다.
   바닥에 깔리는 부스 그림·소품은 `BoothSpot.flat`·`props[].flat` (buildings.ts가 floor층에, path.ts는 그 위를 걸어도 된다).
   씨름·줄다리기·보물찾기는 손님 몸 맡기기를 `group/ssireumPuppets.ts PuppetSet`(부드럽게 맡기고 놓기 = 일어나기, 누운 몸 그림자 `LieShadows`)으로 한다.
   보물찾기의 할아버지는 상자를 아무도 못 찾으면 `buildings.hostNode('dig', 0)`을 직접 옮겨 걸어가 판다 (buildings.ts는 매 프레임 y·scale만 다시 잡는다).
   연은 하늘 층에 그림자(같은 그림을 어둡게, 아래로)를 달고 뜨고, 보이는 세계 폭이 넓을수록 조금 커진다 (`kite.ts FAR_FROM`: 지도를 넓게 봐도 연이 보이게).
   오리배 물길은 왼쪽 아래(출발) → 위 → 오른쪽 끝(결승): 출발·결승·결승 뒤 미끄러지기가 선착장 차양 밖이다. 판이 끝나면 아래 물길(선착장 앞)을 레인 안쪽(`RETURN_LANE`)으로 지나 출발선까지 돌아간다.
-  잠긴 부스(구역은 열림)의 물길·말뚝·방석은 흐리게. 씨름 진 손님은 몸 가운데를 축으로 눕힌다 (머리가 모래판 밧줄 기둥·옆 구경 자리까지 가지 않게).
+  잠긴 부스의 물길·말뚝·방석은 흐리게. 씨름 진 손님은 몸 가운데를 축으로 눕힌다 (머리가 모래판 밧줄 기둥·옆 구경 자리까지 가지 않게).
   단체 놀이 승자의 받은 코인 글자는 바싹 붙어 선 승자끼리 단(0~2)을 엇갈리고 조금씩 늦게 띄운다 (`world.ts groupFinished`, `fx.floatText(…, delay, dy)`).
 - 경주장(`racetrack.ts`): 선수 넷(`racers/<key>`, 레인 = 선수 번호)이 `BoothState.group`(play.race)을 매 프레임 따라간다. idle·gathering = 출발선에 서서 들썩 (출발 3초 전 웅크리고 3·2·1),
   running = `sim/race.ts raceProgress`로 레인을 달린다 (화면 시계가 sim 시계를 부드럽게 따라감, 오른쪽으로 달리면 뒤집기, 선수마다 걸음), 결승 뒤 미끄러져 서고 1등이 통통,
   다음 경주를 받으면 남은 반 바퀴를 돌아 출발선으로. 관중석 자리마다 방석 (그림자층). 참가자 응원은 sim `groupEvent` 이벤트를 구경꾼처럼 작게 (모든 단체 놀이 같이). 경주로·선수를 누르면 경주장.
 - WebGL 문맥을 잃었다 되찾으면 코드로 구운 텍스처(바닥 타일·효과·구름)를 다시 굽는다 (`webglcontextrestored`).
-  구름(`map/cloud_puff`)이 닫힌 구역을 덮고, 열리면 흩어지며 사라진다.
+  사지 않은 땅의 구름 (`view/land.ts LandView`, 물체층): 가진 땅에서 떨어진 거리로 짙어지는 안개 (작은 텍스처, 32px 텍셀, `FOG_RAMP` 160px 동안 부드럽게, 지도 밖도 구름)를
+  땅 조각 한 줄(띠)마다 스프라이트로 깔고 zIndex = 띠 아래 변 (바로 아래 가진 땅의 키 큰 건물이 구름 앞에 선다). 가진 땅과 맞닿은 변·모서리를 따라 구름(`map/cloud_puff`)이 줄지어 일렁이고
+  (남쪽 변은 아래 끝을 변에 맞추고, 북·동·서 변은 가진 땅 쪽으로 조금 삐져나온다), 띠마다 떠도는 구름이 바람 따라 흐르다 안개가 옅은 곳에서 흐려진다.
+  땅을 사면 그 조각 안개가 가운데부터 걷히고 덮던 구름이 양옆으로 갈라져 흩어진다 (+ 반짝이), 새 가장자리 구름은 조금 뒤 피어난다.
 - 효과(`fx.ts`): 코인 튀기기(`items/coin`), 색종이(`fx/fx_confetti` 여러 색으로 tint), 반짝이(`fx/emote_sparkle` 작게), 먼지(`fx/fx_puff`), 떠오르는 숫자(+12, 둥근 굵은 글꼴, 흰 테두리). 대박이면 크게.
 - 넷째 묶음 화면: 장신구 `view/accessory.ts` — `AccessoryLayer` (몸 그릇의 자식, (0,0) = 발 기준점, `setAccessories(list)`·`setPose(species, pose)`·`setScaleK(k)`, 뒤에 그릴 것은 `back` 그릇),
   `accessoryAnchors(species, pose)` = 자리마다 캔버스 점과 자리 기준 폭 (`data/accessoryAnchors.ts`: `MEASURED` = `tools/accessory-anchors.ts`가 원본 그림 알파에서 잰 27종 × 4포즈 (`@generated` 사이만 다시 쓴다),
@@ -226,8 +236,8 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
 ## UI (src/ui)
 
 - HTML 오버레이(`#ui`, 캔버스 위). 모바일 세로 기준, 엄지가 닿는 아래쪽에 조작. 글꼴: 'Jua'(제목·숫자), 'Gowun Dodum'(본문). 색은 art-kit 안내서 1.8의 CSS 토큰.
-- 위: 코인, 재료 가방(누르면 재료·귀한 물건·가공품 목록과 얻는 곳, 재료는 그 종이 오는 구역별로 묶음), 마을 레벨. 그 아래 '다음 목표' 칩 (`ui/goal.ts`: 손님 응원 → 부스 구경 → 새 구역이 열렸으면 보러 가기 → 열린 부스의 꼭 필요한 빈 자리 → 아직 구경하지 않은 새 단체 놀이(경주장 빼고)의 판이 모이거나 한창이면 지도에서 보러 가기 (구경한 놀이는 `mpv-hints-v1`의 `watched`) → 지금 살 수 있는 가장 싼 짓기 → 다음 부스와 다음 마을회관 중 코인이 덜 드는 쪽, 누르면 그 화면).
-- 아래 탭: 마을(지도) / 짓기(건물·부스 업그레이드, 해금, 구역별 묶음과 잠긴 이유) / 주민(진행자 자리 칸: 열린 부스의 자리마다 한 칸, 고용·배치·레벨) / 공방(가공 레시피와 진행) / 도감(손님 | 인형 바꾸기: 종·본 반응, 인형 뽑기로 모은 인형). 그 탭에서 지금 할 수 있는 일이 있으면 작은 점.
+- 위: 코인, 재료 가방(누르면 재료·귀한 물건·가공품 목록과 얻는 곳, 재료는 그 종이 오는 회관 레벨별로 묶음 `labels.ts AREAS`), 마을 레벨. 그 아래 '다음 목표' 칩 (`ui/goal.ts`: 보관함의 부스·건물 놓기 → 길이 끊긴 건물에 길 잇기 → (회관 2 이상인데 짓기 모드를 안 써 본 사람) 짓기 모드 알림 → 손님 응원 → 부스 구경 → 열린 부스의 꼭 필요한 빈 자리 → 아직 구경하지 않은 새 단체 놀이(경주장 빼고)의 판이 모이거나 한창이면 지도에서 보러 가기 (구경한 놀이는 `mpv-hints-v1`의 `watched`) → 지금 살 수 있는 가장 싼 짓기 (짓기 탭의 그 묶음으로) → 다음 부스와 다음 마을회관 중 코인이 덜 드는 쪽, 누르면 그 화면).
+- 아래 탭: 마을(지도) / 짓기(마을 꾸미기 [길 깔기]·[길 지우기]·[땅 넓히기], 보관함, 건물·부스 업그레이드, 열고 놓기, 장식, 놓인 것의 [옮기기]·[보관하기]) / 주민(진행자 자리 칸: 열린 부스의 자리마다 한 칸, 고용·배치·레벨) / 공방(가공 레시피와 진행) / 도감(손님 | 인형 바꾸기: 종·본 반응, 인형 뽑기로 모은 인형). 그 탭에서 지금 할 수 있는 일이 있으면 작은 점.
 - 비용 칩은 아이템 그림과 이름을 같이 (폰에는 hover가 없다).
 - 손님 카드(손님을 누르면): 그림, 이름(별명 + 종), 성격, 지갑, 기분 막대, 이번 방문 기록, [응원하기] [간식 주기 ▾].
 - 부스 패널(부스를 누르면): 확대 화면 + 이름, 레벨, 참가비(복주머니는 특산 재료 1개), 항아리, 진행자 자리마다 한 줄(자리 이름·쓰는 능력치·꼭 필요/있으면 좋아요, [바꾸기 ▾] = `ui/staffMenu.ts`), 줄, [업그레이드] [응원 도구 걸기 ▾].
@@ -245,3 +255,58 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   손님 카드: 장신구·맡긴 장신구(되찾는 값)·빚 칩, 그림 위에 장신구 (`pics.ts dressPic`: `accessoryPortrait` 비율로 <img> 겹치기, 몸 뒤 장신구는 뺀다), 파산하면 카드가 어둡게 가라앉고 먹구름·혼잣말·빚 게이지.
   줄다리기·씨름 판(`groupBoard.ts`·`groupText.ts`): 빚 걸기 판 띠·채무자마다 건 빚 → 결과 '52→26'. 짓기 탭에 '전당포 · 은행 · 일터' 묶음, 목표 칩은 전당포 → 일터 → 은행, 첫 빚 걸기 판·첫 채무자 안내.
   토스트: sim `toast.topic = 'debt'`(파산·다 갚음)는 20초(`ui.ts DEBT_TOAST_GAP`) 안에 또 오면 건너뛴다 (큰 마을에서 1분에 한두 번 오니, 지도 연출·일터 시트에는 그대로).
+
+## 배치형 마을 (DESIGN 6.1)
+
+- 칸·땅: `data/map.ts` CELL 96px, 땅 조각 CHUNK 8칸, 지도 CHUNKS 9×8 조각 (GRID 72×64 칸), 처음 땅 `LAND_START` (아래 가운데 3×3), 고리 `chunkRing`, 처음 마을 `DEFAULT_PLACED`·`DEFAULT_ROADS`·`DEFAULT_DECOR`·`DEFAULT_LOTS`.
+  땅 값·회관 레벨 `defs.ts LAND` (값 = (base + perBought × 산 조각 수) × (1 + ringMult × (고리 - 1)), 고리마다 회관 레벨 hall[고리]), 장식 값·기분 `DECOR`·`DECOR_AURA`.
+- 모양: `data/catalog.ts` (모두 건물 왼쪽 위 모서리 기준 px). `CatalogKey` = 부스·건물·장식, `footprint(key)` = 칸 w×h·입구 칸 `entry`(발자국 바로 바깥 한 칸)·문 `door`·`fixed`(마을 입구),
+  `BOOTH_LAYOUT[b].spot` (BoothSpot: base·seats·queue·pot·hosts·props), `BUILDING_LAYOUT[id]` (base·k), `SHOP_GEO`·`YARD_GEO`·`FOUNTAIN_REST`·`GATE_SPAWN`·`CHIEF_AT`,
+  큰 시설 `RACE_GEO`(17×11, 입구 오른쪽)·`BOAT_GEO`(12×10)·`KITE_GEO`(9×5)·`TUG_GEO`(12×6)·`DIG_GEO`(10×8)·`SSIREUM_GEO`(9×6)·일터(12×8), 바닥 모양 `FLOORS`, `catalogKind`·`catalogName`·`artBase`·`needsRoad`.
+- 상태: `GameState.village` (`types.ts VillageState`): placed (`Placed` id·key·x·y), roads (칸 번호), chunks (조각 번호), decor (보관함 장식 개수), nextId, rev (place·road·land).
+  부스·건물의 보관함은 따로 적지 않는다 (가졌는데 placed에 없으면 보관함). 저장 5 (`save.ts migrate4`: 옛 저장 4는 처음 마을 + 가진 것 자동 배치, 땅은 놓을 만큼만
+  (그 회관 레벨로 살 수 있는 조각 가운데 한 조각으로 놓이는 것부터 공짜로 주고, 다 놓은 뒤 빈 조각은 돌려놓는다), 손님은 마을 입구에서 다시, 하던 판·한판의 건 코인은 돌려주고 결과가 난 판(done)은 그대로).
+- `sim/village.ts`: `villageOf(state)` = `Village` (rev가 같으면 같은 객체, 화면은 `stamp.place·road·land`로 다시 그릴 때를 안다):
+  칸 지도 (`owned`·`occ`·`road`·`entryOf`·`comp`), `placed(key)`·`byId`·`at(x, y)`·`connected(key)`·`linkedId(id)`·`entryPt`·`door`·`isRoad`·`isOwned`·`isWalkable`·`walkable`(걸을 수 있는 길 칸),
+  세계 좌표 모양 `booth(b)`·`race()`·`boat()`·`kite()`·`tug()`·`dig()`·`ring()`·`shop(s)`·`yard()`·`rest()`·`gateSpawn()`·`chief()`·`art(key)`·`artOf(placed)` (놓이지 않았으면 지도 밖 `OFF`),
+  장식 둘레 기분 `auraAt(칸)`, 길찾기 바탕 `fieldTo`·`cellPath`·`nearestWalkable`, 되돌아가기 `hopField()`(걸을 수 있는 길에서 거꾸로 번지는 가장 싼 길: 길 칸 1, 빈 가진 땅 4, 건물은 못 지난다)·`rescueCells(칸)`
+  (그 칸에서 걸을 수 있는 길까지: 끊긴 길 조각은 따라 걷고 풀밭은 짧게, 건물 안이면 입구 칸에서). 검사 `checkPlace`·`roadPaintable`·`chunkInfo`, 바꾸기 `addPlaced`·`movePlaced`·`removePlaced`·`setRoads`·`addChunk` (rev를 올린다),
+  자동 배치 `findSpot`·`roadTo` (장식은 `findDecorSpot`: 걸을 수 있는 길 옆 빈 칸 가운데 둘레 길 칸 기분을 가장 많이 더하는 칸).
+- `sim/path.ts`: `route(state, from, to, via, lane)` (길 칸으로만, 건물 안은 입구 → 문 → 자리, 같은 건물 안은 곧장, 길 밖에 선 손님은 `rescueCells`로 먼저 길로,
+  이어지지 않은 목적지는 그 가까운 걸을 수 있는 길 칸까지만: 길 밖으로 나가지 않는다). 큰 시설 안에서 곧장 가면 경주로·연못을 가로지르는 길은 발자국 안쪽 둘레로 돌아간다 (`innerWay`).
+  `laneOffset(id)`, `roadPoint`, `gateDistance`, `pathLength(from, pts)`, `roadAnchor(state, p)` (걸어 나설 길 칸 + 더 걷는 칸 수), `walkCells(state, p, key)` (그 건물 입구까지 길 칸 수, 못 가면 -1),
+  `onRoad(state, p)` (걸을 수 있는 길 칸이나 입구가 있는 건물 안: 길로만 걷기 검사), `clampInto(state, key, p)` (줄·계산대·기다리는 자리가 목록보다 많을 때 발자국 안으로).
+- 걷기 (sim.ts): `go(m, to, via)`가 길과 목적지 `Monster.dest`를 함께 적는다. 길을 다 걸었는데 목적지에 못 닿았으면 (`shortArrival`: 걷는 동안 길이 끊김) 다시 길을 찾고, 그래도 못 가면 줄·자리로 가던 손님은 다른 걸 하러 간다.
+  서 있는 손님이 길 밖이면 (지운 길·치우거나 옮긴 건물 자리) `backToRoad`가 phase·timer는 그대로 두고 길로 걷게 한다 (`decideSoon`도). 길 칸 위에서는 `TUNE.roadSpeed`배로 걷는다.
+  부스 고르기(`booths.ts chooseBooth`)·구경하러 가기는 길 칸 거리 d만큼 무게를 나눈다 (1 + d / `TUNE.boothNearCells`, 단체 놀이는 × `TUNE.groupNearMult`).
+  마을 입구 앞 길 칸은 지울 수 없다 (`eraseRoad`). 가게·일터에 닿았는데 문을 닫았으면 볼일을 접는다. 일터에 갈 수 없는 채무자는 길에서 기다리다 `LABOR.noYardSec` 뒤 반장이 빚을 덜어 준다 (`relieve(…, 'noYard')`).
+  다음 마을회관에 모자란 재료를 가져오는 종은 `TUNE.neededSpeciesWeight`배 자주 온다 (`monsters.ts createMonster`).
+- Sim (SimApi): 묻기 `village()`·`owned`·`stored`·`storage()`·`catalog()`·`buyCost`·`buyLockReason`·`canPlace(key, cell, moving)`·`chunk(i)`·`chunkLockReason(i)`,
+  행동 `buy(key)` (보관함으로)·`place(key, cell)` (보관함에서, 없으면 사서: 알림은 한 줄)·`move(id, cell)` (안의 손님도 같이, 그리로 오던 손님은 적어 둔 목적지 `Monster.dest`를 새 자리로)·
+  `store(id)` (안의 손님·그리로 오던 손님은 다른 걸 하러, 부스 진행자는 쉰다, 모이거나 하던 판·보통 부스의 한판은 접고 건 코인을 돌려준다, 결과가 난 판은 그대로 치운다.
+  마을 입구(`fixed`)와 바탕 건물 마을회관·공방·사무소·창고·분수(`keep`, `catalog.ts storable`)는 보관할 수 없다)·
+  `paintRoad(cells)` (마을 입구와 이어진 건물이 생기면 알림)·`eraseRoad(cells)` (걷던 손님은 길을 다시)·`buyChunk(i)`·`autoPlace(key)`, `announceStorage()`. 이벤트 `villageChanged {what, key?}`·`landBought {chunk}`.
+  안전망: 길을 다 걸었는데 목적지가 그 건물 발자국 밖에 남았으면 (옮긴 옛 자리) `resend`가 하던 일에 맞게 다시 보낸다. 일터 입구 길만 끊기면 일터 안 채무자는 그대로 일하고, 밖에서 못 오는 채무자만 `LABOR.noYardSec`를 잰다.
+  단체 놀이를 접은 까닭 `GroupCancelReason` (closed = 진행자, road, stored, timeout).
+  부스 열기·건물 짓기는 보관함으로 간다 (게임). `Sim.autoPlaceDefault`·`sim.autoPlaceOnBuy` = 사면 바로 자동 배치 (sim-check·개발용).
+  놓인 부스를 놓으면 진행자를 세운다 (`autoAssign`), 보관함 부스엔 진행자를 세울 수 없다 (`assign`·`staff.ts hirePost`). 손님이 들르는 가게·일터·분수는 놓이고 이어져야 쓴다 (`debt.ts shopOpen`).
+- 화면: `view/buildMode.ts BuildModeView` (world.ts가 가진다) — 모드 `BuildMode` none·place(key)·move(id)·road·erase·land(chunk?),
+  VillageView `setBuildMode(mode)`·`buildState()`·`confirmBuild()`·`cancelBuild()`·`onBuildChange`·`onBuildFail`·`onTapLand(chunk)`·`onTapPlaced(id)`.
+  place·move·road·erase에서 한 손가락 = 유령 옮기기·길 칠하기 (손을 떼면 sim.paintRoad·eraseRoad), 두 손가락 = 지도 이동·확대. 유령은 놓을 수 있으면 초록·없으면 빨강, 입구 칸 (이어진 길이면 초록, 아니면 노랑).
+  `BuildingsView`는 놓인 것마다 그림을 세우고 (자리가 바뀌면 다시), `placedAt(wx, wy)`·`chunkAt`·`setHidden(id)`(옮기는 동안 숨김).
+  칸 금은 바닥 하나만 (`ground.ts setGrid`, 건물 아래: buildMode.ts는 칸 금을 그리지 않는다). 칠하는 길은 `BuildModeView.onPreview` → `ground.previewRoads` (진짜 길 모양,
+  손을 뗀 뒤 몇 프레임 더 두어 타일을 다시 굽는 동안 깜박이지 않게). 놓기·옮기기·길 모드에서는 가장자리 구름이 옅어진다 (`LandView.setSeeThrough`: 땅 끝 칸이 보이게).
+  큰 시설·보통 부스의 바닥 오솔길은 `FLOORS`의 walk 띠 (부스 5×5는 입구 길에서 계산대까지 한 칸 폭, 밀어내기·경주장·오리배도): 길이 아니라 디딤돌로 그린다 (`ground.ts drawWalk`, sim 길 칸도 아니다).
+  마을 입구 아치 밑만 road 띠 (진짜 길과 똑같이). 풀은 마당·연못·경주로를 가진 시설과 마을 입구 발자국, 오솔길 칸에는 심지 않는다 (`bareFloor`, `walkGrid`).
+  카메라: 땅 사기 말고는 가진 땅 둘레 + 구름 한 조각 안 (`world.ts area`), 땅 사기를 끝내면 산 조각 (없으면 들어가기 전 자리)으로. 마을 탭을 또 누르면 분수로 (`focusVillage`).
+  길 칠하기의 가장자리 자동 이동은 옆 띠가 좁고 (28px) 그 가장자리 쪽으로 움직이거나 멈춰 둘 때만 (`edgePan`). 길 깔기 모드로 이을 때는 입구와 가장 가까운 이어진 길 칸을 같이 담는다 (`panels/build.ts focusJoin`).
+  가장자리 구름은 가진 땅으로 22px 안팎만 삐져나오고, 가진 땅의 건물·장식·길에 걸치면 옅게 (`land.ts syncCovers`). 장식 유령·자동 배치는 건물 지붕에 가리는 두 줄을 뒤로 미룬다 (`village.ts underRoof`).
+- 디버그 (D 키, `?debug=1`): 칸·땅 조각·걸을 수 있는 길 칸·발자국·입구·안쪽 자리 + `debug.ts GuestDebug` (걷는 손님의 남은 길, 0.2초마다 자국: 초록 = 길 칸이나 입구 있는 건물 안, 빨강 = 길 밖, `world.debugGuests.off` = 길 밖 자국 수).
+- UI: `ui/buildBar.ts BuildBar` (짓기 모드 ✓/✕ 띠), `ui/panels/build.ts startPlace(ctx, key)`·`placeRow(ctx, key)`·`PlacedPanel` (장식), UiCtx `startBuild(mode)`·`showPlaced(id)`, UiApi `showLand`·`onBuildChange`·`toast`.
+- 주소: `?build=road|erase|land|<key>|tab|tab:<분류>` (처음부터 짓기 모드·짓기 탭), `?at=<key>` (놓인 그 건물), `?unlockAll=1`은 장식 36개도 길가에 놓는다 (`dev.ts devDecorate`).
+- 자동 배치 (`findSpot(…, spread)`, `autoPlace(key, spread)`): spread면 위·아래로 바로 붙은 다른 건물 칸마다 점수 +8 (새 길 한 칸 = 14): 건물 그림이 발자국 위로 1~2칸 삐져나가서,
+  붙여 놓으면 아래 건물 지붕이 위 시설의 마당·자리를 가린다. 옛 저장 옮기기·`devPlaceAll`(?all)만 켠다 (sim-check 촌장은 끈다: 흩어 놓으면 빈 땅이 조각나 일터가 늦게 놓인다).
+- sim-check: 처음 마을·놓기 검사·놓기/옮기기/보관하기·길 끊기/잇기·땅·길로만 걷기 (걷는 손님이 길 칸이나 건물 안)·옛 저장(4) 옮기기 (`scripts/fixtures/save-v4-*.json`: early 회관 1, mid 회관 3·부스 9·전당포, all 회관 5)·자동 배치 + 땅 넓히기 (selftest 0),
+  튼튼함 (`villageRobustness`: 마을 입구 앞 길, 경주장 둘레 길, 큰길 끊기·잇기, 일터 치우기, 15분 동안 아무렇게나 길 지우기·옮기기·보관하기: 길 밖 손님은 서 있지 않고, 풀밭은 짧게, 건물을 지나지 않는다).
+  `--village` = 배치형 마을 시험만. 매 틱 놓인 것 불변식 (`checkVillage`), 욕심쟁이 촌장은 보관함에 남은 것이 있으면 그것이 들어갈 땅을 산다 (`landFor`), 50초에 한 번쯤 길가에 장식 (`--no-decor`: 안 산다,
+  `--cheap N`: 회관 코인을 모으는 중에도 회관 코인의 N배 이하 부스는 연다). `--auto --seeds`는 10틱마다 길 밖 손님(`strays`: 서 있든 걷든)을 세어 하나라도 있으면 실패, 손님 시간 (놀기·걷기·입구 오가기·줄)을 찍는다.

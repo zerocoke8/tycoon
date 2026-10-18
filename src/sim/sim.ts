@@ -4,25 +4,29 @@
 // 무작위는 모두 this.rng (상태는 GameState.rng에 바로 쓰인다).
 // 넷째 묶음 (DESIGN 3.7): 돈이 떨어진 손님 → 전당포(장신구 맡기기)·은행(대출) 볼일 (toPawnshop·atPawnshop·toBank·atBank) → 지갑이 넉넉해지면 되찾기·갚기,
 // 떠날 때 빚을 못 갚으면 파산 → 일터 (toWork → working | waitWork) → 다 갚으면 relieved → 떠나 단골. 빚 걸기 판은 '단체 놀이' 묶음의 mode 'debt'.
+// 배치형 마을 (DESIGN 6.1): 건물·부스·장식은 GameState.village에 놓인 자리 (sim/village.ts), 손님은 길 칸으로만 걷는다 (sim/path.ts route).
+// 놓이지 않았거나(보관함) 입구가 길로 마을 입구와 이어지지 않은 곳엔 손님이 가지 않는다 (booths.ts boothOpen, shopOpen). 촌장의 짓기 행동은 '배치형 마을' 묶음.
 
 import { Emitter } from '../core/events.ts';
 import { Rng } from '../core/rng.ts';
-import { ACCESSORIES, BANK, BOOTHS, BOOTH_IDS, boothDef, BUILD_HALL, BUILDINGS, DEBT_MATCH, GROUP_RULES, isGroupBooth, LABOR, MATERIALS, MOOD, PAWN, PRECIOUS, RECIPES, SIDES, SIM, SPECIES, SPECIES_IDS, STAFF_STAT_NAMES, VAULT, WORK_FACILITIES, type AccessoryId, type BoothId, type BuildingId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type PreciousId, type SpeciesId } from '../data/defs.ts';
-import { BOOTH_SPOTS, BUILDING_SPOTS, DISTRICTS, NODES, REST_SPOTS, SHOP_SPOTS, WORK_YARD, type DistrictId, type Pt } from '../data/map.ts';
-import type { Cost, Result, SimApi } from './api.ts';
+import { ACCESSORIES, BANK, BOOTHS, BOOTH_IDS, boothDef, BUILD_HALL, BUILDINGS, DEBT_MATCH, DECOR, GROUP_RULES, isGroupBooth, LAND, LABOR, MATERIALS, MOOD, PAWN, PRECIOUS, RECIPES, SIDES, SIM, SPECIES, SPECIES_IDS, STAFF_STAT_NAMES, VAULT, WORK_FACILITIES, type AccessoryId, type BoothId, type BuildingId, type DecorId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type PreciousId, type SpeciesId } from '../data/defs.ts';
+import { CATALOG_KEYS, catalogKind, catalogName, footprint, storable, type CatalogKey } from '../data/catalog.ts';
+import { CELL, CHUNKS, DEFAULT_LOTS, cellAt, cellIndex, type Cell, type Pt } from '../data/map.ts';
+import type { CatalogEntry, Cost, Result, SimApi, StorageItem } from './api.ts';
 import * as B from './booths.ts';
 import { addMaterial, canAfford, costOf, fountainMoodPerMin, gateSpawnSec, goodDef, hallVisitors, isBuilt, missingReason, nextBuildingCost, officeCandidates, pay, warehouseCap, workshopSlots, workshopSpeed } from './economy.ts';
-import { bankLoan, bankOpenFor, canLend, counterPt, debtEligible, errandShop, laborGauge, laborRate, loanDebt, pairDebtors, pawnPick, pawnPrice, pickWorkSpot, redeemCost, redeemPick, waitPt, wantMore, workPt, workSlots } from './debt.ts';
+import { bankLoan, bankOpenFor, canLend, counterPt, debtEligible, errandShop, laborGauge, laborRate, loanDebt, pairDebtors, pawnPick, pawnPrice, pickWorkSpot, redeemCost, redeemPick, shopOpen, waitPt, wantMore, workPt, workSlots } from './debt.ts';
 import { decideOutcome } from './games.ts';
 import { betFraction, createMonster, displayName, faceToward, nameSubject, speedOf, stepMove } from './monsters.ts';
-import { dist, distancesFrom, nearestNodes, openNodes, pointOpen, route } from './path.ts';
+import { dist, gateDistance, laneOffset, onRoad, pathLength, roadPoint, route, walkCells } from './path.ts';
 import { groupGame, groupGatherSec, groupStartSoonSec, idleGroup, type GroupReadiness } from './group/index.ts';
 import { cheerKey, debtReaction, groupBuzzReaction, groupCheerReaction, groupSpectateReaction, moodDelta, pickReaction, snackReaction, spectateReaction, type DebtReactKind } from './reactions.ts';
 import { clearSave, newGame, saveGame } from './save.ts';
 import { fillCandidates, hirePost, levelUpCost, presetCandidates, presetPost, raiseStat, suits } from './staff.ts';
 import { josa } from './text.ts';
 import { TUNE } from './tuning.ts';
-import type { ActiveRound, DebtChange, Errand, GameState, GroupBuzz, GroupCheer, GroupEntry, GroupPlay, GroupState, LaborState, Monster, MonsterId, MonsterPhase, Pose, Reaction, Regular, RoundOutcome, SimBus, SimEvents, Staff, StaffId, StaffPost } from './types.ts';
+import type { ActiveRound, DebtChange, Errand, GameState, GroupBuzz, GroupCancelReason, GroupCheer, GroupEntry, GroupPlay, GroupState, LaborState, Monster, MonsterId, MonsterPhase, Pose, Reaction, Regular, RoundOutcome, SimBus, SimEvents, Staff, StaffId, StaffPost } from './types.ts';
+import { addChunk, addPlaced, checkPlace, chunkInfo, findSpot, isPlaced, movePlaced, removePlaced, setRoads, villageOf, type ChunkInfo, type PlaceCheck, type Village } from './village.ts';
 
 export { clearSave, loadGame, newGame, saveGame } from './save.ts';
 
@@ -41,8 +45,17 @@ const QUIET_EVENTS: ReadonlySet<string> = new Set([
 const samePost = (a: StaffPost | null, b: StaffPost | null): boolean => (a === null || b === null ? a === b : a.booth === b.booth && a.role === b.role);
 
 export class Sim implements SimApi {
+  /**
+   * 새 Sim의 autoPlace 처음 값. true면 부스를 열거나 건물을 지을 때 알맞은 자리에 길까지 이어 바로 놓는다 (sim-check·개발용).
+   * 게임에서는 false: 연 부스·지은 건물은 보관함으로 가고, 촌장이 짓기 모드로 놓는다.
+   */
+  static autoPlaceDefault = false;
   readonly state: GameState;
   readonly bus: SimBus = new Emitter<SimEvents>();
+  /** 부스를 열거나 건물을 지으면 바로 자동 배치 (Sim.autoPlaceDefault). */
+  autoPlaceOnBuy = Sim.autoPlaceDefault;
+  /** 짓기 모드 ✓로 사서 바로 놓는 중 (사는 알림은 놓을 때 한 줄로). */
+  private placingNow = false;
   private readonly rng: Rng;
   private quiet = false;
   private quietItems = false;
@@ -134,6 +147,10 @@ export class Sim implements SimApi {
     return canAfford(this.state, cost);
   }
 
+  missingReason(cost: Cost): string | null {
+    return missingReason(this.state, cost);
+  }
+
   buildingUpgradeCost(id: BuildingId): Cost | null {
     return nextBuildingCost(this.state, id);
   }
@@ -146,7 +163,7 @@ export class Sim implements SimApi {
     if (isBuilt(this.state, id)) return null;
     const need = BUILD_HALL[id];
     if (need === undefined || this.hallLevel() >= need) return null;
-    return `마을회관 레벨 ${need}부터 지을 수 있어요.`;
+    return `마을회관 Lv.${need}부터 지을 수 있어요.`;
   }
 
   boothUnlockCost(booth: BoothId): Cost | null {
@@ -159,8 +176,7 @@ export class Sim implements SimApi {
     if (this.state.booths[booth].unlocked) return null;
     const need = boothDef(booth).unlock.hall;
     if (this.hallLevel() >= need) return null;
-    const d = (Object.keys(DISTRICTS) as DistrictId[]).find((k) => DISTRICTS[k].hall === need);
-    return `마을회관 레벨 ${need}부터 열 수 있어요${d !== undefined ? ` (${josa(DISTRICTS[d].name, '이', '가')} 열려요)` : ''}.`;
+    return `마을회관 Lv.${need}부터 열 수 있어요.`;
   }
 
   boothUpgradeCost(booth: BoothId): Cost | null {
@@ -273,33 +289,103 @@ export class Sim implements SimApi {
         regs.splice(i, 1);
       }
     }
-    const m = createMonster(rng, st, st.nextId++, NODES.gate, regular);
+    const m = createMonster(rng, st, st.nextId++, villageOf(st).gateSpawn(), regular);
     st.monsters.push(m);
     st.totals.visitors += 1;
     const dex = (st.dex[m.species] ??= { visits: 0, reactions: [] });
     const first = dex.visits === 0;
     dex.visits += 1;
-    m.path = route(m.pos, this.arrivePoint(), st.districts);
+    this.go(m, this.arrivePoint());
     this.emit('monsterSpawned', { id: m.id });
     if (first) this.toast(`처음 보는 손님이 왔어요: ${SPECIES[m.species].name}`, 'good');
     else if (regular?.recovered === true) this.toast(`빚을 다 갚고 떠났던 단골 ${nameSubject(m)} 다시 놀러 왔어요.`, 'good');
     else if (regular !== null) this.toast(`단골 ${nameSubject(m)} 다시 놀러 왔어요.`, 'good');
   }
 
-  /** 입구에서 몇 걸음 들어온 곳: 입구 → 광장(분수에서 가장 가까운 노드) 길 거리의 TUNE.arriveFrac 사이. */
+  /**
+   * 입구에서 몇 걸음 들어온 길 칸: 마을 입구 → 광장(분수 입구) 길 거리의 TUNE.arriveFrac 사이 (분수가 없으면 가장 먼 길의 반까지).
+   * 길이 없으면 마을 입구 그 자리.
+   */
   private arrivePoint(): Pt {
-    const d = distancesFrom('gate', this.state.districts);
-    const plaza = nearestNodes(BUILDING_SPOTS.fountain, this.state.districts, 1)[0];
-    const toPlaza = (plaza !== undefined ? d.get(plaza) : undefined) ?? 1500;
+    const v = villageOf(this.state);
+    const walk = v.walkable;
+    if (walk.length === 0) return v.gateSpawn();
+    const fe = v.connected('fountain') ? v.entryPt('fountain') : null;
+    let toPlaza = fe !== null ? gateDistance(this.state, cellIndex(cellAt(fe).x, cellAt(fe).y)) : -1;
+    if (toPlaza <= 0) {
+      let far = 0;
+      for (const i of walk) far = Math.max(far, gateDistance(this.state, i));
+      toPlaza = Math.max(2, far * 0.5);
+    }
     const [f0, f1] = TUNE.arriveFrac;
-    const near = [...d.entries()].filter(([, v]) => v >= toPlaza * f0 && v <= toPlaza * f1).map(([id]) => id);
-    const fallback = [...d.entries()].filter(([id]) => id !== 'gate').sort((a, b) => a[1] - b[1])[0]?.[0];
-    const id = near.length > 0 ? this.rng.pick(near) : (fallback ?? 'gate');
-    return this.jitter(NODES[id], 40);
+    const near = walk.filter((i) => {
+      const d = gateDistance(this.state, i);
+      return d >= 1 && d >= toPlaza * f0 && d <= toPlaza * f1;
+    });
+    const i = near.length > 0 ? this.rng.pick(near) : (walk.find((c) => gateDistance(this.state, c) === 1) ?? (walk[0] as number));
+    return roadPoint(i, this.rng.next(), this.rng.next(), 26);
   }
 
-  private jitter(p: Pt, r: number): Pt {
-    return { x: p.x + this.rng.range(-r, r), y: p.y + this.rng.range(-r * 0.6, r * 0.6) };
+  /** 손님 m이 to까지 걷는 길 (sim/path.ts route: 길 칸으로만, via = 그 건물 입구로, 손님마다 조금 비켜 걷는다). */
+  private walk(m: Monster, to: Pt, via: CatalogKey | null = null): Pt[] {
+    return route(this.state, m.pos, to, via, laneOffset(m.id));
+  }
+
+  /** 손님 m을 to로 걷게 한다 (목적지를 적어 둔다: 길이 끊겨 덜 걸었으면 닿은 뒤 shortArrival이 다시 본다). */
+  private go(m: Monster, to: Pt, via: CatalogKey | null = null): void {
+    m.path = this.walk(m, to, via);
+    m.dest = { x: to.x, y: to.y, via };
+  }
+
+  /**
+   * 길을 다 걸었는데 목적지(Monster.dest)에 못 닿았다 (걷는 동안 길이 끊겨 가까운 길 칸까지만 왔다): 이제 갈 수 있으면 다시 걷고 (true),
+   * 못 가면 줄·자리로 가던 손님은 다른 걸 하러 간다 (true). 그 밖(쉬기·구경·볼일·일터)은 하던 phase가 닿은 곳에서 알아서 본다 (false).
+   */
+  private shortArrival(m: Monster): boolean {
+    const d = m.dest;
+    m.dest = null;
+    if (d === null || d === undefined || dist(m.pos, d) <= 3) return false;
+    // 안전망: 가던 건물이 옮겨져 목적지가 그 발자국 밖에 남았다 (옛 자리): 하던 일에 맞게 새 자리로 다시 보낸다.
+    const via = d.via ?? null;
+    if (via !== null && footprint(via).entry !== undefined && isPlaced(this.state, via) && !this.insideOf(via, d)) {
+      this.resend(m);
+      return true;
+    }
+    const path = this.walk(m, d, d.via);
+    const end = path[path.length - 1];
+    if (end !== undefined && dist(end, d) <= 3) {
+      m.path = path;
+      m.dest = d;
+      return true;
+    }
+    if (m.phase === 'toSeat' || m.phase === 'toBooth') {
+      this.decideSoon(m);
+      return true;
+    }
+    return false;
+  }
+
+  /** 점 pt가 key가 놓인 발자국 안인가 (놓이지 않았으면 false). */
+  private insideOf(key: CatalogKey, pt: Pt): boolean {
+    const v = villageOf(this.state);
+    const p = v.placed(key);
+    if (p === undefined) return false;
+    const c = cellAt(pt);
+    return v.at(c.x, c.y)?.id === p.id;
+  }
+
+  /**
+   * 가던 곳을 잃은 손님 (건물이 옮겨졌거나 보관함으로): 하던 일에 맞게 다시 보낸다.
+   * 파산 → 일터, 떠나는 중 → 마을 입구, 가게 볼일 → 그 계산대 (닫혔으면 닿은 뒤 arriveShop이 접는다), 그 밖 → 곧 다시 고르기.
+   */
+  private resend(m: Monster): void {
+    const st = this.state;
+    if (m.bankrupt === true) this.goWork(m);
+    else if (m.phase === 'leaving') this.go(m, villageOf(st).gateSpawn(), 'gate');
+    else if ((m.phase === 'toPawnshop' || m.phase === 'toBank') && m.errand !== null && m.errand !== undefined && isPlaced(st, errandShop(m.errand))) {
+      const shop = errandShop(m.errand);
+      this.go(m, counterPt(st, shop, m.counter ?? 0), shop);
+    } else this.decideSoon(m);
   }
 
   private tickCandidates(dt: number): void {
@@ -393,12 +479,17 @@ export class Sim implements SimApi {
     }
     if (m.phase !== 'leaving' && m.bankrupt !== true) {
       const f = fountainMoodPerMin(st);
-      if (f > 0) m.mood = clampMood(m.mood + (f / 60) * dt);
+      // 장식 둘레를 지나면 기분이 조금 더 (DECOR_AURA).
+      const c = cellAt(m.pos);
+      const a = villageOf(st).auraAt(cellIndex(c.x, c.y));
+      if (f + a > 0) m.mood = clampMood(m.mood + ((f + a) / 60) * dt);
     }
     if (m.path.length > 0) {
-      stepMove(m, dt);
-      if (m.path.length > 0) return;
-    }
+      // 길 칸 위에서는 조금 빨리 (건물 안 자리로 들어갈 때는 보통 걸음).
+      const c = cellAt(m.pos);
+      stepMove(m, dt, villageOf(st).isWalkable(cellIndex(c.x, c.y)) ? TUNE.roadSpeed : 1);
+      if (m.path.length > 0 || this.shortArrival(m)) return;
+    } else if (this.backToRoad(m)) return;
     switch (m.phase) {
       case 'arriving':
         this.setPhase(m, 'wandering');
@@ -410,7 +501,7 @@ export class Sim implements SimApi {
         break;
       case 'toBooth':
         this.setPhase(m, 'queued');
-        if (m.booth !== null) faceToward(m, BOOTH_SPOTS[m.booth].base.x);
+        if (m.booth !== null) faceToward(m, villageOf(st).booth(m.booth).base.x);
         break;
       case 'queued':
         if (m.booth === null || !st.booths[m.booth].queue.includes(m.id)) {
@@ -439,7 +530,7 @@ export class Sim implements SimApi {
         if (m.timer <= 0) this.afterReact(m);
         break;
       case 'resting':
-        faceToward(m, BUILDING_SPOTS.fountain.x);
+        faceToward(m, villageOf(st).art('fountain').x);
         m.timer -= dt;
         m.mood = clampMood(m.mood + TUNE.restMoodPerSec * dt);
         if (m.timer <= 0) this.decide(m);
@@ -476,12 +567,32 @@ export class Sim implements SimApi {
     }
   }
 
+  /**
+   * 길 밖(지운 길·치우거나 옮긴 건물 자리·끊긴 길 조각)에 서 있으면 가장 가까운 걸을 수 있는 길로 걸어 돌아간다 (phase·timer는 그대로: 다 걸으면 하던 일을 한다).
+   * 걸을 수 있는 길 칸·입구가 있는 건물 안이면 그대로. 돌아가기 시작했으면 true.
+   */
+  private backToRoad(m: Monster): boolean {
+    const st = this.state;
+    if (onRoad(st, m.pos)) return false;
+    const c = cellAt(m.pos);
+    const cells = villageOf(st).rescueCells(cellIndex(c.x, c.y));
+    const end = cells?.[cells.length - 1];
+    if (end === undefined) return false;
+    const to = roadPoint(end, 0.5, 0.5, 0);
+    m.path = this.walk(m, to);
+    if (m.path.length === 0) m.path = [to];
+    m.dest = null;
+    return true;
+  }
+
   /** 곧 다음 할 일을 고르게 (지금 자리에서 잠깐 멈춤). */
   private decideSoon(m: Monster): void {
     this.detach(m);
     this.setPhase(m, 'wandering');
     m.path = [];
     m.timer = this.rng.range(0.3, 0.8);
+    // 길 밖(끊긴 길·치운 건물 자리)이면 먼저 길로 돌아간다.
+    this.backToRoad(m);
   }
 
   private shouldLeave(m: Monster): boolean {
@@ -527,31 +638,37 @@ export class Sim implements SimApi {
     this.goWander(m);
   }
 
+  /** 돌아다니기: 걸을 수 있는 길 칸 가운데 하나로 (가까운 칸일수록 자주, 몇 칸만 뽑아 본다). */
   private goWander(m: Monster): void {
-    const nodes = openNodes(this.state.districts).filter((id) => id !== 'gate');
+    const walk = villageOf(this.state).walkable;
     this.setPhase(m, 'wandering');
     m.timer = this.rng.range(TUNE.wanderPauseSec[0], TUNE.wanderPauseSec[1]);
-    if (nodes.length === 0) {
+    if (walk.length === 0) {
       m.path = [];
       return;
     }
-    const id = this.rng.weighted(nodes.map((n) => [n, 1 / (1 + dist(m.pos, NODES[n]) / 700)] as const));
-    m.path = route(m.pos, this.jitter(NODES[id], 50), this.state.districts);
+    const picks = Array.from({ length: Math.min(12, walk.length) }, () => this.rng.pick(walk));
+    const i = this.rng.weighted(picks.map((c) => [c, 1 / (1 + dist(m.pos, roadPoint(c, 0.5, 0.5, 0)) / 700)] as const));
+    this.go(m, roadPoint(i, this.rng.next(), this.rng.next(), 30));
   }
 
+  /** 쉬기: 분수 둘레 빈 자리 (분수가 놓이고 길로 이어졌을 때). */
   private goRest(m: Monster): boolean {
     const st = this.state;
+    const v = villageOf(st);
+    if (!v.connected('fountain')) return false;
+    const spots = v.rest();
     const taken = new Set(st.monsters.filter((o) => o !== m && o.phase === 'resting').map((o) => o.spot));
     const free: number[] = [];
-    REST_SPOTS.forEach((p, i) => {
-      if (!taken.has(i) && pointOpen(p, st.districts)) free.push(i);
+    spots.forEach((_, i) => {
+      if (!taken.has(i)) free.push(i);
     });
     if (free.length === 0) return false;
     const i = this.rng.pick(free);
-    const p = REST_SPOTS[i] as Pt;
+    const p = spots[i] as Pt;
     this.setPhase(m, 'resting');
     m.spot = i;
-    m.path = route(m.pos, p, st.districts);
+    this.go(m, p, 'fountain');
     m.timer = this.rng.range(TUNE.restSec[0], TUNE.restSec[1]);
     return true;
   }
@@ -562,22 +679,26 @@ export class Sim implements SimApi {
     const rng = this.rng;
     const busy = BOOTH_IDS.filter((b) => B.boothOpen(st, b) && st.booths[b].seats.some((id) => id !== null && id !== m.id));
     if (busy.length === 0) return false;
-    // 진행 중인 단체 놀이(밖에서 봐도 재미있는 판)를 더 자주 보러 간다.
-    const b = rng.weighted(busy.map((x) => [x, st.booths[x].group?.phase === 'running' || st.booths[x].group?.phase === 'gathering' ? TUNE.groupWatchWeight : 1] as const));
+    // 진행 중인 단체 놀이(밖에서 봐도 재미있는 판)를 더 자주, 가까운 부스를 더 자주 보러 간다 (부스 고르기와 같은 거리 무게).
+    const near = (x: BoothId): number => {
+      const d = walkCells(st, m.pos, x);
+      return d > 0 ? 1 / (1 + d / (TUNE.boothNearCells * (isGroupBooth(x) ? TUNE.groupNearMult : 1))) : 1;
+    };
+    const b = rng.weighted(busy.map((x) => [x, (st.booths[x].group?.phase === 'running' || st.booths[x].group?.phase === 'gathering' ? TUNE.groupWatchWeight : 1) * near(x)] as const));
     let at: Pt;
+    let via: CatalogKey | null = null;
     if (st.booths[b].group !== null && isGroupBooth(b)) {
-      // 단체 놀이: 놀이마다 구경하는 자리 (경주장은 경주로 바깥 울타리 쪽).
-      at = groupGame(b).watchPoint(rng);
+      // 단체 놀이: 놀이마다 구경하는 자리 (시설 안, 경주장은 경주로 바깥 울타리 쪽).
+      at = groupGame(b).watchPoint(st, rng);
+      via = b;
     } else {
-      const seat = B.seatPt(b, 0);
-      const base = BOOTH_SPOTS[b].base;
-      const dx = seat.x - base.x;
-      const dy = seat.y - base.y;
-      const len = Math.hypot(dx, dy) || 1;
-      at = { x: seat.x + (dx / len) * 130 + rng.range(-100, 100), y: seat.y + (dy / len) * 130 + rng.range(-30, 50) };
+      // 보통 부스: 입구 앞 길 칸에 서서 본다.
+      const e = villageOf(st).entryPt(b);
+      if (e === null) return false;
+      at = { x: e.x + rng.range(-30, 30), y: e.y + rng.range(-18, 22) };
     }
     this.setPhase(m, 'spectating');
-    m.path = route(m.pos, at, st.districts);
+    this.go(m, at, via);
     m.timer = rng.range(TUNE.watchSec[0], TUNE.watchSec[1]);
     return true;
   }
@@ -590,7 +711,7 @@ export class Sim implements SimApi {
     m.booth = b;
     m.seat = null;
     this.setPhase(m, 'toBooth');
-    m.path = route(m.pos, B.queuePt(b, bs.queue.length - 1), st.districts, BOOTH_SPOTS[b].front);
+    this.go(m, B.queuePt(st, b, bs.queue.length - 1), b);
     this.pump(b);
   }
 
@@ -615,7 +736,7 @@ export class Sim implements SimApi {
   private goHome(m: Monster): void {
     this.detach(m);
     this.setPhase(m, 'leaving');
-    m.path = route(m.pos, NODES.gate, this.state.districts, 'gate');
+    this.go(m, villageOf(this.state).gateSpawn(), 'gate');
     if ((m.poseTime ?? 0) <= 0) m.pose = this.idlePose(m);
   }
 
@@ -647,13 +768,14 @@ export class Sim implements SimApi {
     bs.queue.forEach((id, idx) => {
       const m = this.monster(id);
       if (m === undefined) return;
-      const spot = B.queuePt(b, idx);
+      const spot = B.queuePt(this.state, b, idx);
       if (m.phase === 'queued') {
-        if (dist(m.pos, spot) > 2) m.path = [{ x: spot.x, y: spot.y }];
-      } else if (m.phase === 'toBooth') {
-        if (m.path.length === 0) m.path = [{ x: spot.x, y: spot.y }];
-        else m.path[m.path.length - 1] = { x: spot.x, y: spot.y };
-      }
+        // 줄에 선 손님은 부스 안에서 한 칸씩 앞으로.
+        if (dist(m.pos, spot) > 2) {
+          m.path = [{ x: spot.x, y: spot.y }];
+          m.dest = { x: spot.x, y: spot.y, via: b };
+        }
+      } else if (m.phase === 'toBooth') this.go(m, spot, b);
     });
   }
 
@@ -716,10 +838,13 @@ export class Sim implements SimApi {
       bs.seats[i] = m.id;
       m.seat = i;
       m.booth = b;
-      const target = B.seatPt(b, i);
+      const target = B.seatPt(st, b, i);
       const standing = m.phase === 'queued' && m.path.length === 0;
       this.setPhase(m, 'toSeat');
-      m.path = standing ? [{ x: target.x, y: target.y }] : route(m.pos, target, st.districts, BOOTH_SPOTS[b].front);
+      if (standing) {
+        m.path = [{ x: target.x, y: target.y }];
+        m.dest = null;
+      } else this.go(m, target, b);
       moved = true;
     }
     if (moved) this.layoutQueue(b);
@@ -751,7 +876,7 @@ export class Sim implements SimApi {
     const bs = st.booths[b];
     const fee = B.boothFee(st, b);
     m.wallet -= fee;
-    this.earn(fee, B.seatPt(b, seat));
+    this.earn(fee, B.seatPt(st, b, seat));
     // 재료 참가비 (복주머니): 손님이 들고 온 특산 재료가 마을 창고로.
     const matFee = Math.min(B.boothMatFee(b), m.mats);
     if (matFee > 0) {
@@ -779,7 +904,7 @@ export class Sim implements SimApi {
     m.poseTime = 0;
     m.firstPlay ??= st.time;
     // 앉은 손님은 진행자(0번 자리)를 본다 (화면의 진행자도 같은 점에 서서 손님을 본다).
-    faceToward(m, B.hostPt(b, 0).x);
+    faceToward(m, B.hostPt(st, b, 0).x);
     this.emit('roundStarted', { booth: b, seat, round });
   }
 
@@ -905,7 +1030,7 @@ export class Sim implements SimApi {
   private spectate(b: BoothId, seat: number, m: Monster, tier: OutcomeTier): void {
     if (tier === 'lose') return;
     const rng = this.rng;
-    const at = B.seatPt(b, seat);
+    const at = B.seatPt(this.state, b, seat);
     for (const o of this.state.monsters) {
       if (o === m || o.phase === 'leaving' || o.phase === 'playing' || o.phase === 'reacting' || o.bankrupt === true) continue;
       if (dist(o.pos, at) > TUNE.spectateRadius) continue;
@@ -951,7 +1076,7 @@ export class Sim implements SimApi {
       m.poseTime = 0;
     }
     m.path = [];
-    faceToward(m, game.face(seat).x);
+    faceToward(m, game.face(st, seat).x);
     if (g.phase === 'running' || g.phase === 'done') return;
     if (g.participants.some((e) => e.monster === m.id)) return;
     // 반장이 빚 걸기 판을 예약한 부스: 쉬는 판을 새로 열지 않고 (구경 자리에서) 빚 걸기 판을 기다린다.
@@ -964,7 +1089,7 @@ export class Sim implements SimApi {
     if (pre >= 0) g.prepaid?.splice(pre, 1);
     else if (fee > 0) {
       m.wallet -= fee;
-      this.earn(fee, B.seatPt(b, seat));
+      this.earn(fee, B.seatPt(st, b, seat));
     }
     const bet = debtor ? 0 : Math.max(1, Math.min(m.wallet, Math.round(m.wallet * betFraction(this.rng, m.traits) * (boothDef(b).betScale ?? 1))));
     m.wallet -= bet;
@@ -1002,7 +1127,7 @@ export class Sim implements SimApi {
     }
     if (g !== null && g.phase !== 'idle' && g.participants.some((e) => e.monster === m.id)) {
       // 참가자는 자기 자리의 놀이 쪽을 본다 (구경 자리에서 모래판으로 나서 걸어온 손님도).
-      if (b !== null && m.seat !== null && isGroupBooth(b)) faceToward(m, groupGame(b).face(m.seat).x);
+      if (b !== null && m.seat !== null && isGroupBooth(b)) faceToward(m, groupGame(b).face(this.state, m.seat).x);
       return;
     }
     // 판에 끼지 못하고 (줄다리기 편 맞추기) 너무 오래 기다렸다: 다른 걸 하러 간다.
@@ -1025,6 +1150,22 @@ export class Sim implements SimApi {
     m.stats.spent = Math.max(0, m.stats.spent - back);
   }
 
+  /** 보통 부스의 하던 한판을 접는다 (보관하기): 자리마다 건 코인을 항아리에서 돌려준다 (참가비는 마을에 남는다). */
+  private refundRounds(b: BoothId): void {
+    const bs = this.state.booths[b];
+    for (let i = 0; i < bs.rounds.length; i++) {
+      const r = bs.rounds[i];
+      if (r === null || r === undefined) continue;
+      bs.rounds[i] = null;
+      const m = this.monster(r.monster);
+      if (m === undefined) continue;
+      const back = Math.min(r.bet, bs.pot);
+      bs.pot -= back;
+      m.wallet += back;
+      m.stats.spent = Math.max(0, m.stats.spent - back);
+    }
+  }
+
   /** 모이는 중에 자리를 뜬 참가자: 참가를 무르고 건 코인을 돌려준다. 진행 중이면 결과만 못 받는다. */
   private leaveGroup(b: BoothId, m: Monster): void {
     const g = this.state.booths[b].group;
@@ -1037,7 +1178,7 @@ export class Sim implements SimApi {
   }
 
   /** 출발 전에 판을 접는다: 참가자마다 건 코인을 돌려준다 (leaveGroup과 같이). timeout이면 앉아 있던 참가자는 다른 걸 하러 간다. */
-  private cancelGroup(b: GroupBoothId, g: GroupState, reason: 'closed' | 'timeout'): void {
+  private cancelGroup(b: GroupBoothId, g: GroupState, reason: GroupCancelReason): void {
     const left = g.participants.slice();
     const debtors = g.mode === 'debt' ? (g.debtors ?? []).slice() : [];
     for (const e of left) this.refundBet(b, e);
@@ -1085,9 +1226,10 @@ export class Sim implements SimApi {
             this.resetGroup(g);
             break;
           }
-          // 모이는 중에 꼭 있어야 하는 진행자가 빠졌다: 건 코인을 돌려주고 판을 접는다 (앉은 손님은 다른 걸 하러 간다).
+          // 모이는 중에 문을 닫았다 (꼭 있어야 하는 진행자가 빠졌다, 입구 앞 길이 끊겼다): 건 코인을 돌려주고 판을 접는다 (앉은 손님은 다른 걸 하러 간다).
           if (!B.boothOpen(this.state, b)) {
-            this.cancelGroup(booth, g, 'closed');
+            const why = B.boothIdleReason(this.state, b);
+            this.cancelGroup(booth, g, why === 'road' || why === 'stored' ? why : 'closed');
             break;
           }
           g.elapsed += dt;
@@ -1136,8 +1278,9 @@ export class Sim implements SimApi {
     e.seat = s.seat;
     e.pick = s.pick;
     e.role = s.role;
-    const to = B.seatPt(b, s.seat);
+    const to = B.seatPt(this.state, b, s.seat);
     m.path = [{ x: to.x, y: to.y }];
+    m.dest = { x: to.x, y: to.y, via: b };
     g.countdown = Math.max(g.countdown, groupStartSoonSec(b, B.boothStat(this.state, b, 'pace')));
     this.emit('groupJoined', { booth: b, monster: m.id, seat: s.seat, pick: s.pick, role: s.role, bet: e.bet });
     this.pump(b);
@@ -1151,13 +1294,8 @@ export class Sim implements SimApi {
       if (id === null) continue;
       const m = this.monster(id);
       if (m === undefined || m.phase !== 'toSeat' || m.booth !== b) continue;
-      let d = 0;
-      let at = m.pos;
-      for (const p of m.path) {
-        d += dist(at, p);
-        at = p;
-      }
-      best = Math.min(best, d / speedOf(m));
+      // 길 위에서는 TUNE.roadSpeed배로 걷는다 (대강: 거의 다 길이다).
+      best = Math.min(best, pathLength(m.pos, m.path) / (speedOf(m) * TUNE.roadSpeed));
     }
     return best;
   }
@@ -1254,19 +1392,14 @@ export class Sim implements SimApi {
     const stay = play.end + GROUP_RULES[b].resultSec + 0.5;
     for (const o of st.monsters) {
       if (o.phase !== 'wandering' || o.stats.rounds === 0) continue;
-      if (dist(o.pos, game.center) > TUNE.groupDrawRadius) continue;
+      if (dist(o.pos, game.center(st)) > TUNE.groupDrawRadius) continue;
       if (!rng.chance((o.traits.includes('watcher') ? TUNE.groupWatcherDrawChance : TUNE.groupDrawChance) * k)) continue;
-      const path = route(o.pos, game.watchPoint(rng), st.districts);
-      let walk = 0;
-      let at = o.pos;
-      for (const p of path) {
-        walk += dist(at, p);
-        at = p;
-      }
-      walk /= speedOf(o);
+      const path = this.walk(o, game.watchPoint(st, rng), b);
+      const walk = pathLength(o.pos, path) / (speedOf(o) * TUNE.roadSpeed);
       if (walk > play.end * 0.6) continue;
       this.setPhase(o, 'spectating');
       o.path = path;
+      o.dest = { x: path[path.length - 1]?.x ?? o.pos.x, y: path[path.length - 1]?.y ?? o.pos.y, via: b };
       o.timer = Math.max(1.5, stay - walk);
     }
   }
@@ -1309,11 +1442,12 @@ export class Sim implements SimApi {
     const target = (star >= 0 ? g.participants[star] : undefined)?.monster ?? g.participants[0]?.monster;
     if (target === undefined) return;
     const joined = new Set(g.participants.map((e) => e.monster));
-    const look = game.face(-1);
+    const look = game.face(this.state, -1);
+    const center = game.center(this.state);
     for (const o of this.state.monsters) {
       if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving' || o.phase === 'reacting' || o.bankrupt === true || (o.poseTime ?? 0) > 0) continue;
       if (o.phase === 'playing' && o.booth !== b) continue;
-      if (dist(o.pos, game.center) > TUNE.groupSpectateRadius) continue;
+      if (dist(o.pos, center) > TUNE.groupSpectateRadius) continue;
       if (!rng.chance((o.traits.includes('watcher') ? TUNE.groupWatcherBuzzChance : TUNE.groupBuzzChance) + charm * TUNE.groupBuzzPerCharm)) continue;
       const reaction = groupBuzzReaction(rng, b, kind, o);
       o.mood = clampMood(o.mood + TUNE.groupBuzzMood[kind]);
@@ -1402,8 +1536,8 @@ export class Sim implements SimApi {
     const target = (star >= 0 ? g.participants[star] : undefined)?.monster ?? g.participants[0]?.monster;
     if (target === undefined) return;
     const charm = B.boothStat(st, b, 'charm');
-    const center = game.center;
-    const look = game.face(-1);
+    const center = game.center(st);
+    const look = game.face(st, -1);
     for (const o of st.monsters) {
       if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving' || o.bankrupt === true) continue;
       // 다른 부스에서 노는 손님은 빼고, 이 부스 자리에서 기다리던 손님은 넣는다.
@@ -1552,7 +1686,7 @@ export class Sim implements SimApi {
     const stage = this.moneyStage(m);
     if (m.declined === 'broke' || m.declined === stage) return false;
     const a = pawnPick(m);
-    const pawn = a !== undefined && isBuilt(st, 'pawnshop') && m.mood >= PAWN.wantMood;
+    const pawn = a !== undefined && shopOpen(st, 'pawnshop') && m.mood >= PAWN.wantMood;
     const loan = !pawn && bankOpenFor(st, m) && m.mood >= BANK.wantMood;
     if (!pawn && !loan) return false;
     // 은행: 일터에서 일하는 채무자가 많으면 망설인다 ('저렇게 되긴 싫어…').
@@ -1603,13 +1737,13 @@ export class Sim implements SimApi {
     if (m.bankrupt === true) return false;
     const left = (rounds: number): number => this.settleReserve(m, rounds, homeward);
     if (m.debt > 0) {
-      if (isBuilt(st, 'bank') && m.wallet >= m.debt + left(BANK.repayRounds)) {
+      if (shopOpen(st, 'bank') && m.wallet >= m.debt + left(BANK.repayRounds)) {
         this.goShop(m, 'repay', homeward);
         return true;
       }
       return false;
     }
-    if (m.pawned.length > 0 && isBuilt(st, 'pawnshop') && redeemPick(m, left(PAWN.redeemRounds)) !== undefined) {
+    if (m.pawned.length > 0 && shopOpen(st, 'pawnshop') && redeemPick(m, left(PAWN.redeemRounds)) !== undefined) {
       this.goShop(m, 'redeem', homeward);
       return true;
     }
@@ -1635,7 +1769,7 @@ export class Sim implements SimApi {
     m.counter = i;
     m.homeward = homeward;
     this.setPhase(m, shop === 'pawnshop' ? 'toPawnshop' : 'toBank');
-    m.path = route(m.pos, counterPt(shop, i), st.districts, SHOP_SPOTS[shop].front);
+    this.go(m, counterPt(st, shop, i), shop);
     m.pose = 'base';
     m.poseTime = 0;
     this.sideReact(m, errand === 'pawn' ? 'seekPawn' : errand === 'loan' ? 'seekLoan' : errand === 'redeem' ? 'goRedeem' : 'goRepay');
@@ -1657,8 +1791,18 @@ export class Sim implements SimApi {
       return;
     }
     const shop = errandShop(m.errand);
+    // 오는 동안 가게가 보관함에 들어갔거나 길이 끊겼다: 볼일을 접는다 (집에 가던 길이면 다시 집으로).
+    if (!shopOpen(this.state, shop)) {
+      m.errand = null;
+      delete m.counter;
+      if (m.homeward === true) {
+        m.homeward = false;
+        this.leave(m);
+      } else this.decide(m);
+      return;
+    }
     this.setPhase(m, shop === 'pawnshop' ? 'atPawnshop' : 'atBank');
-    faceToward(m, SHOP_SPOTS[shop].npc.x);
+    faceToward(m, villageOf(this.state).shop(shop).npc.x);
     m.timer = shop === 'pawnshop' ? PAWN.counterSec : BANK.counterSec;
   }
 
@@ -1666,7 +1810,7 @@ export class Sim implements SimApi {
   private finishErrand(m: Monster): void {
     const st = this.state;
     const e = m.errand ?? null;
-    const at = counterPt(e === null ? 'bank' : errandShop(e), m.counter ?? 0);
+    const at = counterPt(st, e === null ? 'bank' : errandShop(e), m.counter ?? 0);
     m.errand = null;
     delete m.counter;
     let kind: DebtReactKind | null = null;
@@ -1814,7 +1958,7 @@ export class Sim implements SimApi {
       this.vaultIn(paid, 0, null);
     }
     // 안전망: 다 갚았거나 일터가 없으면 (은행은 일터가 있어야 빌려준다) 그냥 집으로.
-    if (m.debt <= 0 || !isBuilt(st, 'workyard')) {
+    if (m.debt <= 0 || !shopOpen(st, 'workyard')) {
       m.debt = 0;
       this.goHome(m);
       return;
@@ -1841,19 +1985,32 @@ export class Sim implements SimApi {
     return this.state.monsters.filter((o) => o.bankrupt === true && o.labor !== null && o.labor !== undefined && o.labor.match === null);
   }
 
-  /** 일터로: 빈 일하는 자리 (없으면 기다리는 자리)로 느리게 걸어간다. */
+  /** 일터에 갈 수 있나: 놓였고 길로 이어졌거나, 이미 일터 안에 있다 (입구 앞 길만 끊겼으면 안에 있던 채무자는 그대로 일한다). */
+  private yardReach(m: Monster): boolean {
+    return shopOpen(this.state, 'workyard') || (isBuilt(this.state, 'workyard') && this.insideOf('workyard', m.pos));
+  }
+
+  /** 일터로: 빈 일하는 자리 (없으면 기다리는 자리)로 느리게 걸어간다. 일터에 갈 수 없으면 (보관함·길이 끊김) 가까운 길에서 기다린다 (backToRoad). */
   private goWork(m: Monster): void {
     const st = this.state;
     this.detach(m);
     const lab = (m.labor ??= this.newLabor(m.debt));
     lab.match = null;
+    if (!this.yardReach(m)) {
+      lab.spot = -1;
+      lab.wait = -1;
+      this.setPhase(m, 'waitWork');
+      m.path = [];
+      if ((m.poseTime ?? 0) <= 0) m.pose = 'sad';
+      return;
+    }
     const p = pickWorkSpot(this.rng, st, m, this.workers());
     lab.facility = p.facility;
     lab.spot = p.spot;
     lab.wait = p.wait;
     this.setPhase(m, 'toWork');
-    const to = p.spot >= 0 ? workPt(p.facility, p.spot) : waitPt(p.facility, p.wait);
-    m.path = route(m.pos, to, st.districts, WORK_YARD.front);
+    const to = p.spot >= 0 ? workPt(st, p.facility, p.spot) : waitPt(st, p.facility, p.wait);
+    this.go(m, to, 'workyard');
     if ((m.poseTime ?? 0) <= 0) m.pose = 'sad';
   }
 
@@ -1864,8 +2021,13 @@ export class Sim implements SimApi {
       this.decide(m);
       return;
     }
+    // 오는 동안 일터가 보관함에 들어갔거나 길이 끊겼다 (일터 밖에서 멈췄다): 길에서 기다린다 (goWork).
+    if (!this.yardReach(m)) {
+      this.goWork(m);
+      return;
+    }
     this.setPhase(m, lab.spot >= 0 ? 'working' : 'waitWork');
-    faceToward(m, WORK_YARD.facilities[lab.facility].face.x);
+    faceToward(m, villageOf(this.state).yard().facilities[lab.facility].face.x);
   }
 
   /**
@@ -1929,6 +2091,16 @@ export class Sim implements SimApi {
     if (this.forgiveLong(m, lab)) return;
     const t = m.phaseTime ?? 0;
     if (Math.floor(t) === Math.floor(t - SIM.dt)) return;
+    // 일터에 갈 수 없었던 채무자 (보관함·길이 끊김): 다시 갈 수 있으면 간다. 너무 오래 못 가면 반장이 남은 빚을 덜어 준다.
+    if (lab.wait < 0) {
+      if (this.yardReach(m)) this.goWork(m);
+      else if (t > LABOR.noYardSec) {
+        const left = m.debt;
+        m.debt = 0;
+        this.relieve(m, true, left, 'noYard');
+      }
+      return;
+    }
     const others = this.workers().filter((o) => o !== m);
     const free = WORK_FACILITIES.some((f) => {
       const used = others.filter((o) => o.labor?.facility === f && o.labor.spot >= 0).length;
@@ -1952,7 +2124,7 @@ export class Sim implements SimApi {
   /** 일터 반장: LABOR.foreman.everySec마다 일하는 채무자 하나를 다독인다 (게이지가 덜 찬 손님이 더 자주, 잠깐 빨라짐). */
   private tickForeman(dt: number): void {
     const st = this.state;
-    if (!isBuilt(st, 'workyard')) return;
+    if (!shopOpen(st, 'workyard')) return;
     st.foremanTimer = (st.foremanTimer ?? LABOR.foreman.everySec) - dt;
     if (st.foremanTimer > 0) return;
     st.foremanTimer = LABOR.foreman.everySec;
@@ -1969,7 +2141,7 @@ export class Sim implements SimApi {
   /**
    * 빚을 다 갚았다 (forgiven = 반장이 남은 빚 left를 덜어 줌): 어둠이 걷히고 기뻐한 뒤 (relieved) 떠나 단골이 된다 ('다시 일어선 단골').
    */
-  private relieve(m: Monster, forgiven: boolean, left = 0): void {
+  private relieve(m: Monster, forgiven: boolean, left = 0, why: 'long' | 'noYard' = 'long'): void {
     const st = this.state;
     this.detach(m);
     m.bankrupt = false;
@@ -1981,7 +2153,12 @@ export class Sim implements SimApi {
     st.debtTotals.relieved += 1;
     if (forgiven) st.debtTotals.forgiven += 1;
     this.emit('debtCleared', { id: m.id, forgiven });
-    this.toast(forgiven ? `${josa(displayName(m), '은', '는')} 오래 일해서 반장이 남은 빚 ${left}코인을 덜어 줬어요. 홀가분하게 떠나요.` : `${nameSubject(m)} 빚을 다 갚았어요! 홀가분하게 떠나요.`, 'good', 'debt');
+    const text = !forgiven
+      ? `${nameSubject(m)} 빚을 다 갚았어요! 홀가분하게 떠나요.`
+      : why === 'noYard'
+        ? `일터로 가는 길이 없어서 반장이 ${displayName(m)}의 남은 빚 ${left}코인을 덜어 줬어요. 홀가분하게 떠나요.`
+        : `${josa(displayName(m), '은', '는')} 오래 일해서 반장이 남은 빚 ${left}코인을 덜어 줬어요. 홀가분하게 떠나요.`;
+    this.toast(text, 'good', 'debt');
     this.debtReact(m, forgiven ? 'forgiven' : 'relieved', 'relieved');
   }
 
@@ -2084,7 +2261,7 @@ export class Sim implements SimApi {
       m.booth = b;
       m.seat = i;
       this.setPhase(m, 'toSeat');
-      m.path = route(m.pos, B.seatPt(b, i), st.districts, BOOTH_SPOTS[b].front);
+      this.go(m, B.seatPt(st, b, i), b);
       this.sideReact(m, 'matchCalled');
     });
     st.debtMatchAt[b] = st.time;
@@ -2170,7 +2347,7 @@ export class Sim implements SimApi {
    */
   devBankrupt(id: MonsterId, debt: number): boolean {
     const m = this.monster(id);
-    if (m === undefined || !isBuilt(this.state, 'workyard')) return false;
+    if (m === undefined || !shopOpen(this.state, 'workyard')) return false;
     this.detach(m);
     m.debt = Math.max(1, Math.min(DEBT_MATCH.maxDebt, Math.round(debt)));
     // 진짜 파산처럼 지갑은 비운다 (개발용이라 금고로 보내지는 않는다).
@@ -2251,12 +2428,15 @@ export class Sim implements SimApi {
     if (lock !== null) return fail(lock);
     const why = missingReason(st, cost);
     if (why !== null) return fail(why);
-    this.spend(cost, BUILDING_SPOTS[id]);
+    this.spend(cost, isPlaced(st, id) ? villageOf(st).art(id) : null);
     st.buildings[id].level += 1;
     const level = st.buildings[id].level;
     this.emit('buildingUpgraded', { id, level });
-    // 처음에 없던 건물 (전당포·은행·일터)을 지었다.
-    if (level === 1 && BUILD_HALL[id] !== undefined) this.toast(`${josa(BUILDINGS[id].name, '을', '를')} 지었어요!`, 'good');
+    // 처음에 없던 건물 (전당포·은행·일터)을 지었다: 보관함으로 (짓기 모드로 놓는다, 자동 배치면 바로).
+    if (level === 1 && BUILD_HALL[id] !== undefined && !this.placingNow) {
+      const placed = this.autoPlaceOnBuy && this.autoPlace(id).ok;
+      this.toast(placed ? `${josa(BUILDINGS[id].name, '을', '를')} 지었어요!` : `${josa(BUILDINGS[id].name, '을', '를')} 지었어요! 지도에 놓아 주세요.`, 'good');
+    }
     if (id === 'hall') this.onHallLevel(level);
     if (id === 'office') {
       fillCandidates(this.rng, st, officeCandidates(st), false);
@@ -2267,12 +2447,8 @@ export class Sim implements SimApi {
 
   private onHallLevel(level: number): void {
     const st = this.state;
-    for (const d of Object.keys(DISTRICTS) as DistrictId[]) {
-      if (DISTRICTS[d].hall > level || st.districts.includes(d)) continue;
-      st.districts.push(d);
-      this.emit('districtOpened', { district: d });
-      this.toast(`${josa(DISTRICTS[d].name, '이', '가')} 열렸어요!`, 'good');
-    }
+    // 이 레벨부터 살 수 있는 땅 (먼 고리).
+    if (LAND.hall.some((h, ring) => h === level && ring > 0)) this.toast('마을회관이 커져서 더 먼 땅도 살 수 있어요!', 'good');
     const newcomers = SPECIES_IDS.filter((s) => SPECIES[s].hall === level).map((s) => SPECIES[s].name);
     if (newcomers.length > 0) this.toast(`이제 ${newcomers.join(', ')} 손님도 놀러 와요.`, 'good');
     // 새로 열 수 있는 부스의 진행자(그림 있는 진행자)가 고용 후보로 온다.
@@ -2293,7 +2469,7 @@ export class Sim implements SimApi {
     if (cost === null) return fail('이미 열린 부스예요.');
     const why = missingReason(st, cost);
     if (why !== null) return fail(why);
-    this.spend(cost, BOOTH_SPOTS[booth].base);
+    this.spend(cost, null);
     bs.unlocked = true;
     bs.level = 1;
     bs.pot = BOOTHS[booth].potSeed;
@@ -2302,7 +2478,9 @@ export class Sim implements SimApi {
     bs.rounds.fill(null);
     B.fitSeats(st, booth);
     this.emit('boothUnlocked', { booth });
-    if (!this.autoAssign(booth)) this.toast(this.closedText(booth), 'info');
+    // 연 부스는 보관함으로 (짓기 모드로 놓는다: 놓으면 진행자를 세운다). 자동 배치면 바로 놓는다. 짓기 모드의 ✓로 사서 놓는 중이면 놓을 때 알린다.
+    if (this.placingNow) return OK;
+    if (!this.autoPlaceOnBuy || !this.autoPlace(booth).ok) this.toast(`${josa(BOOTHS[booth].name, '을', '를')} 열었어요! 지도에 놓으면 손님이 와요.`, 'good');
     return OK;
   }
 
@@ -2328,7 +2506,7 @@ export class Sim implements SimApi {
    * 2) 남은 꼭 있어야 하는 자리·있으면 좋은 자리: 쉬는 진행자 가운데 이 부스의 다른 빈 자리에 어울리지 않는 사람 (그림 없는 진행자 먼저).
    * 꼭 있어야 하는 자리가 다 찼으면 true.
    */
-  private autoAssign(booth: BoothId): boolean {
+  private autoAssign(booth: BoothId, say?: string[]): boolean {
     const st = this.state;
     const bs = st.booths[booth];
     B.fitSeats(st, booth);
@@ -2336,10 +2514,12 @@ export class Sim implements SimApi {
     const order = roles.map((r, i) => ({ r, i })).sort((a, b) => Number(a.r.optional === true) - Number(b.r.optional === true));
     const free = (i: number): boolean => (bs.staff[i] ?? null) === null;
     let changed = false;
+    // say를 주면 알림을 거기에 모은다 (부르는 쪽이 한 줄로 낸다).
     const put = (s: Staff, i: number): void => {
       this.assignRaw(s, { booth, role: i });
       changed = true;
-      this.toast(this.tookText(s, booth, i), 'good');
+      if (say !== undefined) say.push(this.tookText(s, booth, i));
+      else this.toast(this.tookText(s, booth, i), 'good');
     };
     for (const { i } of order) {
       if (!free(i)) continue;
@@ -2367,7 +2547,7 @@ export class Sim implements SimApi {
     if (cost === null) return fail('이미 최고 레벨이에요.');
     const why = missingReason(st, cost);
     if (why !== null) return fail(why);
-    this.spend(cost, BOOTH_SPOTS[booth].base);
+    this.spend(cost, isPlaced(st, booth) ? villageOf(st).booth(booth).base : null);
     bs.level += 1;
     B.fitSeats(st, booth);
     this.emit('buildingUpgraded', { id: booth, level: bs.level });
@@ -2434,6 +2614,7 @@ export class Sim implements SimApi {
       return OK;
     }
     if (!st.booths[booth].unlocked) return fail('아직 열리지 않은 부스예요.');
+    if (!isPlaced(st, booth)) return fail('보관함에 있는 부스예요. 먼저 지도에 놓아요.');
     if (!Number.isInteger(role) || role < 0 || role >= B.boothRoles(booth).length) return fail('없는 진행자 자리예요.');
     const to: StaffPost = { booth, role };
     if (samePost(s.post, to)) return OK;
@@ -2466,14 +2647,370 @@ export class Sim implements SimApi {
     const st = this.state;
     const r = RECIPES[recipe];
     if (r === undefined) return fail('없는 만들기예요.');
-    if (r.hall > this.hallLevel()) return fail(`마을회관 레벨 ${r.hall}부터 만들 수 있어요.`);
+    if (r.hall > this.hallLevel()) return fail(`마을회관 Lv.${r.hall}부터 만들 수 있어요.`);
     if (st.crafting.length >= workshopSlots(st)) return fail('공방 자리가 꽉 찼어요.');
     const cost: Cost = { coins: r.coins, mats: r.mats };
     const why = missingReason(st, cost);
     if (why !== null) return fail(why);
-    this.spend(cost, BUILDING_SPOTS.workshop);
+    this.spend(cost, isPlaced(st, 'workshop') ? villageOf(st).art('workshop') : null);
     st.crafting.push({ out: r.out, left: r.sec, total: r.sec });
     return OK;
+  }
+
+  // ── 배치형 마을 (DESIGN 6.1): 사기·놓기·옮기기·보관하기·길·땅 ───────────────────
+  // 부스·건물은 가지면 (열기 unlockBooth·짓기 upgradeBuilding, buy) 보관함으로 가고, place로 지도에 놓는다 (가지지 않았으면 place가 먼저 사서 놓는다).
+  // 장식은 사면 (buy) 보관함 개수가 늘고 place가 하나씩 놓는다. 놓인 것 옮기기 move (안의 손님도 같이 옮겨진다),
+  // 보관하기 store (안의 손님은 다른 걸 하러 가고, 부스 진행자는 쉰다, 모이거나 하던 판은 접고 건 코인을 돌려준다).
+  // 길: paintRoad·eraseRoad (가진 땅의 빈 칸, 지우면 걷던 손님은 길을 다시 찾는다). 땅: buyChunk (가진 땅에 이웃한 조각, village.ts chunkInfo).
+
+  /** 칸 지도·이어짐·세계 좌표 모양 (sim/village.ts Village, 매 틱 같은 객체일 수도 아닐 수도: 쥐고 있지 말 것). */
+  village(): Village {
+    return villageOf(this.state);
+  }
+
+  /** 가진 수 (부스·건물 0·1, 장식 = 놓인 것 + 보관함). */
+  owned(key: CatalogKey): number {
+    const st = this.state;
+    switch (catalogKind(key)) {
+      case 'booth':
+        return st.booths[key as BoothId].unlocked ? 1 : 0;
+      case 'building':
+        return isBuilt(st, key as BuildingId) ? 1 : 0;
+      default:
+        return (st.village.decor[key as DecorId] ?? 0) + st.village.placed.filter((p) => p.key === key).length;
+    }
+  }
+
+  /** 보관함에 있는 수 (가졌는데 놓지 않은 것). */
+  stored(key: CatalogKey): number {
+    if (catalogKind(key) === 'decor') return this.state.village.decor[key as DecorId] ?? 0;
+    return this.owned(key) > 0 && !isPlaced(this.state, key) ? 1 : 0;
+  }
+
+  /** 보관함 (부스 → 건물 → 장식 차례). */
+  storage(): StorageItem[] {
+    const out: StorageItem[] = [];
+    for (const key of CATALOG_KEYS) {
+      const n = this.stored(key);
+      if (n > 0) out.push({ key, count: n });
+    }
+    return out;
+  }
+
+  /** 사는 비용 (부스 = 열기, 처음엔 없는 건물 = 짓기, 장식 = 값). 이미 가진 부스·건물은 null. */
+  buyCost(key: CatalogKey): Cost | null {
+    switch (catalogKind(key)) {
+      case 'booth':
+        return this.boothUnlockCost(key as BoothId);
+      case 'building': {
+        const id = key as BuildingId;
+        return isBuilt(this.state, id) ? null : nextBuildingCost(this.state, id);
+      }
+      default:
+        return { coins: DECOR[key as DecorId].cost };
+    }
+  }
+
+  /** 비용 말고 아직 살 수 없는 이유 (마을회관 레벨). 살 수 있으면 null. */
+  buyLockReason(key: CatalogKey): string | null {
+    switch (catalogKind(key)) {
+      case 'booth':
+        return this.boothLockReason(key as BoothId);
+      case 'building':
+        return this.buildingLockReason(key as BuildingId);
+      default:
+        return null;
+    }
+  }
+
+  /** 짓기 목록 한 줄씩 (부스 → 건물 → 장식). */
+  catalog(): CatalogEntry[] {
+    return CATALOG_KEYS.map((key) => {
+      const fp = footprint(key);
+      return {
+        key,
+        kind: catalogKind(key),
+        owned: this.owned(key),
+        stored: this.stored(key),
+        placed: catalogKind(key) === 'decor' ? this.state.village.placed.filter((p) => p.key === key).length : isPlaced(this.state, key) ? 1 : 0,
+        cost: this.buyCost(key),
+        lock: this.buyLockReason(key),
+        w: fp.w,
+        h: fp.h,
+        needsRoad: fp.entry !== undefined,
+        fixed: fp.fixed === true,
+        storable: storable(key),
+      };
+    });
+  }
+
+  /** key를 칸 cell(왼쪽 위)에 놓을 수 있나 (moving = 옮기는 중인 자기 id). 미리보기 칠하기용 bad 칸, 입구가 길에 닿았나. */
+  canPlace(key: CatalogKey, cell: Cell, moving = 0): PlaceCheck {
+    return checkPlace(this.state, key, cell.x, cell.y, moving);
+  }
+
+  /** 사서 보관함에 (부스 열기·건물 짓기·장식 사기). autoPlaceOnBuy면 부스·건물은 바로 놓는다. */
+  buy(key: CatalogKey): Result {
+    const st = this.state;
+    switch (catalogKind(key)) {
+      case 'booth':
+        return this.unlockBooth(key as BoothId);
+      case 'building': {
+        const id = key as BuildingId;
+        if (isBuilt(st, id)) return fail('이미 있는 건물이에요.');
+        return this.upgradeBuilding(id);
+      }
+      default: {
+        const k = key as DecorId;
+        const cost: Cost = { coins: DECOR[k].cost };
+        const why = missingReason(st, cost);
+        if (why !== null) return fail(why);
+        this.spend(cost, null);
+        st.village.decor[k] = (st.village.decor[k] ?? 0) + 1;
+        return OK;
+      }
+    }
+  }
+
+  /** 지도에 놓는다 (보관함에서, 없으면 먼저 산다). 부스는 놓으면 진행자를 세운다. */
+  place(key: CatalogKey, cell: Cell): Result {
+    const st = this.state;
+    if (catalogKind(key) !== 'decor' && isPlaced(st, key)) return fail('이미 지도에 있어요. 옮기기로 자리를 바꿔요.');
+    const chk = checkPlace(st, key, cell.x, cell.y);
+    if (!chk.ok) return fail(chk.reason ?? '여기에는 놓을 수 없어요.');
+    let fresh = false;
+    if (this.stored(key) <= 0) {
+      const auto = this.autoPlaceOnBuy;
+      this.autoPlaceOnBuy = false;
+      // 사는 순간의 알림('…을 열었어요! 지도에 놓으면 …')은 내지 않는다: 바로 놓으니 placeRaw가 한 줄로 알린다.
+      this.placingNow = true;
+      const r = this.buy(key);
+      this.placingNow = false;
+      this.autoPlaceOnBuy = auto;
+      if (!r.ok) return r;
+      // 부스·건물을 사는 동안 (드물게) 다른 데 놓였으면 그대로.
+      if (catalogKind(key) !== 'decor' && isPlaced(st, key)) return OK;
+      fresh = catalogKind(key) !== 'decor';
+    }
+    this.placeRaw(key, cell.x, cell.y, fresh);
+    return OK;
+  }
+
+  /**
+   * 놓기 (검사는 먼저). 장식은 보관함에서 하나 뺀다. 부스는 진행자를 세운다.
+   * 알림은 한 줄로 (fresh = 막 열거나 지었다: '…을 열었어요!'를 앞에): 길이 이어지지 않았으면 길 먼저, 아니면 비어 있는 진행자 자리, 아니면 맡은 진행자.
+   */
+  private placeRaw(key: CatalogKey, x: number, y: number, fresh = false): void {
+    const st = this.state;
+    const kind = catalogKind(key);
+    if (kind === 'decor') {
+      const k = key as DecorId;
+      st.village.decor[k] = Math.max(0, (st.village.decor[k] ?? 0) - 1);
+    }
+    addPlaced(st, key, x, y);
+    this.emit('villageChanged', { what: 'place', key });
+    const name = catalogName(key);
+    const head = fresh ? `${josa(name, '을', '를')} ${kind === 'booth' ? '열었어요' : '지었어요'}! ` : '';
+    const took: string[] = [];
+    let staffed = true;
+    if (kind === 'booth') {
+      const b = key as BoothId;
+      B.fitSeats(st, b);
+      staffed = this.autoAssign(b, took);
+    }
+    if (kind !== 'decor' && footprint(key).entry !== undefined && !villageOf(st).connected(key)) {
+      const who = fresh ? '' : `${name} `;
+      this.toast(`${head}${who}입구 앞에 길을 이어 주세요. 길이 없으면 손님이 못 와요.`, 'warn');
+    } else if (!staffed) {
+      this.toast(`${head}${this.closedText(key as BoothId)}`, 'info');
+    } else if (head !== '' || took.length > 0) {
+      this.toast(`${head}${took.join(' ')}`.trim(), 'good');
+    }
+  }
+
+  /** 놓인 것(id)을 칸 cell로 옮긴다. 안에 있던 손님(자리·줄·계산대·일터)도 같이 옮겨지고, 오던 손님은 새 자리로 길을 다시 찾는다. */
+  move(id: number, cell: Cell): Result {
+    const st = this.state;
+    const p = st.village.placed.find((q) => q.id === id);
+    if (p === undefined) return fail('찾을 수 없어요.');
+    if (footprint(p.key).fixed === true) return fail('마을 입구는 옮길 수 없어요.');
+    if (p.x === cell.x && p.y === cell.y) return OK;
+    const chk = checkPlace(st, p.key, cell.x, cell.y, id);
+    if (!chk.ok) return fail(chk.reason ?? '여기에는 옮길 수 없어요.');
+    const fp = footprint(p.key);
+    const x0 = p.x * CELL;
+    const y0 = p.y * CELL;
+    const inside = (pt: Pt): boolean => pt.x >= x0 && pt.x < x0 + fp.w * CELL && pt.y >= y0 && pt.y < y0 + fp.h * CELL;
+    const dx = (cell.x - p.x) * CELL;
+    const dy = (cell.y - p.y) * CELL;
+    const shift = (pt: Pt): Pt => (inside(pt) ? { x: pt.x + dx, y: pt.y + dy } : { x: pt.x, y: pt.y });
+    const reroute: { m: Monster; to: Pt; via: CatalogKey | null }[] = [];
+    for (const m of st.monsters) {
+      // 가는 곳 = 적어 둔 목적지 (길이 끊겨 덜 걷는 길이면 길의 끝은 건물 밖이다), 없으면 길의 끝.
+      const last = m.path[m.path.length - 1];
+      const d = m.dest ?? null;
+      const was = inside(m.pos);
+      if (was) m.pos = shift(m.pos);
+      const tgt = d !== null && inside(d) ? d : last !== undefined && inside(last) ? last : null;
+      if (tgt !== null) reroute.push({ m, to: shift(tgt), via: p.key });
+      else if (was && last !== undefined) reroute.push({ m, to: d ?? last, via: d?.via ?? null });
+    }
+    movePlaced(st, id, cell.x, cell.y);
+    for (const r of reroute) this.go(r.m, r.to, r.via);
+    this.emit('villageChanged', { what: 'place', key: p.key });
+    return OK;
+  }
+
+  /** 놓인 것(id)을 보관함으로. 안의 손님은 다른 걸 하러 가고, 부스 진행자는 쉰다. 마을 입구는 보관할 수 없다. */
+  store(id: number): Result {
+    const st = this.state;
+    const p = st.village.placed.find((q) => q.id === id);
+    if (p === undefined) return fail('찾을 수 없어요.');
+    if (footprint(p.key).fixed === true) return fail('마을 입구는 보관할 수 없어요.');
+    if (!storable(p.key)) return fail(`${josa(catalogName(p.key), '은', '는')} 보관할 수 없어요. 옮기기로 자리를 바꿔요.`);
+    const key = p.key;
+    const kind = catalogKind(key);
+    const fp = footprint(key);
+    const x0 = p.x * CELL;
+    const y0 = p.y * CELL;
+    const inside = (pt: Pt): boolean => pt.x >= x0 && pt.x < x0 + fp.w * CELL && pt.y >= y0 && pt.y < y0 + fp.h * CELL;
+    removePlaced(st, id);
+    if (kind === 'decor') st.village.decor[key as DecorId] = (st.village.decor[key as DecorId] ?? 0) + 1;
+    const out: Monster[] = [];
+    if (kind === 'booth') {
+      const b = key as BoothId;
+      const bs = st.booths[b];
+      // 모이던·하던 판은 접고 건 코인을 돌려준다 (빚 걸기 판의 채무자는 일터로). 결과가 난 판(done)은 이미 나눴으니 그대로 치운다.
+      const g = this.groupOf(b);
+      if (g !== null && (g.g.phase === 'gathering' || g.g.phase === 'running')) this.cancelGroup(g.booth, g.g, 'stored');
+      else if (g !== null && g.g.phase === 'done') this.resetGroup(g.g);
+      // 보통 부스: 하던 한판은 접고 건 코인을 돌려준다.
+      if (bs.group === null) this.refundRounds(b);
+      for (const m of st.monsters) if (m.booth === b) out.push(m);
+      // 진행자는 쉰다.
+      let moved = false;
+      bs.staff.forEach((sid, i) => {
+        if (sid === null) return;
+        const s = st.staff.find((x) => x.id === sid);
+        if (s !== undefined) s.post = null;
+        bs.staff[i] = null;
+        moved = true;
+      });
+      if (moved) this.emit('staffChanged', {});
+    } else if (key === 'pawnshop' || key === 'bank') {
+      for (const m of st.monsters) {
+        if (m.errand === null || m.errand === undefined || errandShop(m.errand) !== key) continue;
+        m.errand = null;
+        delete m.counter;
+        out.push(m);
+      }
+    } else if (key === 'fountain') {
+      for (const m of st.monsters) if (m.phase === 'resting') out.push(m);
+    }
+    for (const m of st.monsters) {
+      if (out.includes(m)) continue;
+      const d = m.dest ?? null;
+      if (inside(m.pos) || (m.path.length > 0 && inside(m.path[m.path.length - 1] as Pt)) || (d !== null && inside(d))) out.push(m);
+    }
+    for (const m of out) {
+      if (!st.monsters.includes(m)) continue;
+      if (m.bankrupt === true) this.goWork(m);
+      else if (m.phase === 'leaving') this.go(m, villageOf(st).gateSpawn(), 'gate');
+      else this.decideSoon(m);
+    }
+    this.emit('villageChanged', { what: 'place', key });
+    return OK;
+  }
+
+  /** 길 칸을 깐다 (가진 땅의 빈 칸만, 나머지는 건너뛴다). 그래서 마을 입구와 이어진 건물이 생기면 알린다. */
+  paintRoad(cells: readonly Cell[]): Result {
+    const st = this.state;
+    const before = villageOf(st);
+    const cut = st.village.placed.filter((p) => catalogKind(p.key) !== 'decor' && footprint(p.key).entry !== undefined && !before.linkedId(p.id)).map((p) => p.key);
+    const n = setRoads(st, cells, true);
+    if (n === 0) return fail('길을 깔 수 있는 칸이 없어요.');
+    this.emit('villageChanged', { what: 'road' });
+    const after = villageOf(st);
+    const joined = cut.filter((k) => after.connected(k));
+    if (joined.length > 0) {
+      const names = joined.map((k) => catalogName(k)).join(', ');
+      const idle = joined.some((k) => catalogKind(k) === 'booth' && !B.boothStaffed(st, k as BoothId));
+      this.toast(`${names}에 길이 이어졌어요! ${idle ? '진행자를 세우면 손님이 와요.' : '이제 손님이 와요.'}`, 'good');
+    }
+    return OK;
+  }
+
+  /** 길 칸을 지운다. 걷던 손님은 길을 다시 찾는다. */
+  eraseRoad(cells: readonly Cell[]): Result {
+    const st = this.state;
+    // 마을 입구 앞 길 칸은 지우지 않는다 (손님이 들어오고 나가는 길: 마을 입구처럼 고정).
+    const g = villageOf(st).placed('gate');
+    const ge = g === undefined ? -1 : villageOf(st).entryCellIndex(g);
+    const list = cells.filter((c) => cellIndex(c.x, c.y) !== ge);
+    if (list.length === 0 && cells.length > 0 && ge >= 0) return fail('마을 입구 앞 길은 지울 수 없어요.');
+    const n = setRoads(st, list, false);
+    if (n === 0) return fail('지울 길이 없어요.');
+    for (const m of st.monsters) {
+      const last = m.path[m.path.length - 1];
+      if (last === undefined) continue;
+      const d = m.dest;
+      this.go(m, d ?? last, d?.via ?? null);
+    }
+    this.emit('villageChanged', { what: 'road' });
+    return OK;
+  }
+
+  /** 땅 조각 하나의 상태 (가졌나·이웃·고리·회관 레벨·값). */
+  chunk(index: number): ChunkInfo {
+    return chunkInfo(this.state, index);
+  }
+
+  /** 비용 말고 그 땅을 살 수 없는 이유 (살 수 있으면 null). */
+  chunkLockReason(index: number): string | null {
+    const info = chunkInfo(this.state, index);
+    if (info.owned) return '이미 가진 땅이에요.';
+    if (!info.adjacent) return '가진 땅에 붙은 땅만 살 수 있어요.';
+    if (this.hallLevel() < info.hall) return `마을회관 Lv.${info.hall}부터 살 수 있어요.`;
+    return null;
+  }
+
+  /** 땅 조각을 산다 (구름이 걷힌다). */
+  buyChunk(index: number): Result {
+    const st = this.state;
+    if (!Number.isInteger(index) || index < 0 || index >= CHUNKS.w * CHUNKS.h) return fail('없는 땅이에요.');
+    const lock = this.chunkLockReason(index);
+    if (lock !== null) return fail(lock);
+    const info = chunkInfo(st, index);
+    const cost: Cost = { coins: info.price };
+    const why = missingReason(st, cost);
+    if (why !== null) return fail(why);
+    this.spend(cost, null);
+    addChunk(st, index);
+    this.emit('landBought', { chunk: index });
+    this.emit('villageChanged', { what: 'land' });
+    this.toast('땅을 넓혔어요! 새 땅에 건물을 놓을 수 있어요.', 'good');
+    return OK;
+  }
+
+  /**
+   * 보관함의 key를 알맞은 자리에 길까지 이어 놓는다 (village.ts findSpot: 이어 줄 길이 짧고 마을 입구에 가까운 곳). 자리가 없으면 실패 (땅을 넓혀야).
+   * 옛 저장 옮기기·sim-check 촌장·개발용 ?all=1이 쓴다 (autoPlaceOnBuy면 열기·짓기가 부른다).
+   */
+  autoPlace(key: CatalogKey, spread = false): Result {
+    const st = this.state;
+    if (catalogKind(key) !== 'decor' && isPlaced(st, key)) return OK;
+    if (this.stored(key) <= 0) return fail('보관함에 없어요.');
+    const spot = findSpot(st, key, DEFAULT_LOTS[key as BoothId], spread);
+    if (spot === null) return fail('놓을 자리가 없어요. 땅을 넓혀요.');
+    if (spot.road.length > 0 && setRoads(st, spot.road, true) > 0) this.emit('villageChanged', { what: 'road' });
+    this.placeRaw(key, spot.x, spot.y);
+    return OK;
+  }
+
+  /** 불러온 저장에 보관함의 부스·건물이 있으면 알린다 (옛 저장을 옮기다 자리를 못 잡은 것: main.ts가 UI를 만든 뒤 부른다). */
+  announceStorage(): void {
+    const left = this.storage().filter((x) => catalogKind(x.key) !== 'decor');
+    if (left.length > 0) this.toast(`보관함에 아직 놓지 않은 건물이 있어요: ${left.map((x) => catalogName(x.key)).join(', ')}. 짓기 탭에서 지도에 놓아요.`, 'info');
   }
 
   // ── 저장 ────────────────────────────────────────────────────────────

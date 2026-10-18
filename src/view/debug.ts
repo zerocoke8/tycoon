@@ -1,25 +1,30 @@
-// 디버그 오버레이 (지도에서 D 키): 길 그래프 노드·간선, 부스 자리·줄·항아리·진행자, 경주로·오리배 물길 레인, 단체 놀이 마당
-// (씨름 모래판, 연 하늘, 줄다리기 선, 보물찾기 판 자리·상자 자리), 건물 자리, 쉬는 곳, 빈 부지, 구역 사각형.
-// map.ts의 숫자를 눈으로 맞출 때 쓴다. 처음 켤 때 한 번 그린다.
+// 디버그 오버레이 (지도에서 D 키): 배치형 마을 (DESIGN 6.1)의 칸 지도와 놓인 것의 안쪽 자리.
+// 가진 땅 칸 격자, 땅 조각 경계, 놓인 것의 발자국·입구 칸 (초록 = 마을 입구와 이어진 길, 빨강 = 안 이어짐)·문,
+// 부스 자리·줄·항아리·진행자, 경주로·오리배 물길 레인, 단체 놀이 마당 (모래판, 연 하늘, 줄다리기 선, 보물찾기 판·상자 자리),
+// 쉬는 곳, 가게 계산대·주인, 일터 자리·기다리는 자리·반장. catalog.ts의 숫자를 눈으로 맞출 때 쓴다. 마을이 바뀌면 world.ts가 다시 그린다.
+// 걸을 수 있는 길 칸은 옅은 파랑. GuestDebug = 걷는 손님의 자국·남은 길·지금 자리 (초록 = 길 칸이나 입구 있는 건물 안, 빨강 = 길 밖): 매 프레임.
 
 import { Container, Graphics, Text } from 'pixi.js';
+import { catalogKind, footprint } from '../data/catalog.ts';
 import { BOOTH_IDS } from '../data/defs.ts';
-import { BOAT_COURSE, BOOTH_SPOTS, BUILDING_SPOTS, DIG_FIELD, DISTRICTS, EDGES, KITE_FIELD, NODES, RACE_TRACK, REST_SPOTS, SHOP_SPOTS, SPARE_LOTS, SSIREUM_RING, TUG_FIELD, WORK_YARD, boatPoint, trackPoint, type NodeId, type Pt } from '../data/map.ts';
-import { DISTRICT_IDS, RACE_START_P } from './mapUtil.ts';
+import { CELL, CHUNK, CHUNKS, GRID, lanePoint, type Pt } from '../data/map.ts';
+import { onRoad } from '../sim/path.ts';
+import type { GameState } from '../sim/types.ts';
+import type { Village } from '../sim/village.ts';
+import { RACE_START_P } from './mapUtil.ts';
 
 const COLORS = {
-  district: 0x2d6cdf,
-  edge: 0x1f5fbf,
-  node: 0xd94040,
+  grid: 0x2d6cdf,
+  chunk: 0x1f3f9f,
   seat: 0x2e9e4f,
   queue: 0xe0a020,
   pot: 0xe07020,
   base: 0x8a3fbf,
-  building: 0x8a3fbf,
   rest: 0x20a0a0,
-  lot: 0x7a5a3a,
   host: 0xc0398a,
   track: 0x8a5a00,
+  ok: 0x2e9e4f,
+  bad: 0xd94040,
 } as const;
 
 function label(text: string, at: Pt, color: number, size = 18): Text {
@@ -37,126 +42,193 @@ function cross(g: Graphics, p: Pt, r: number, color: number): void {
   g.moveTo(p.x - r, p.y - r).lineTo(p.x + r, p.y + r).moveTo(p.x + r, p.y - r).lineTo(p.x - r, p.y + r).stroke({ width: 4, color });
 }
 
-export function buildDebugOverlay(): Container {
+export function buildDebugOverlay(v: Village): Container {
   const root = new Container();
   root.eventMode = 'none';
   const g = new Graphics();
   root.addChild(g);
 
-  for (const id of DISTRICT_IDS) {
-    const d = DISTRICTS[id];
-    g.rect(d.rect.x, d.rect.y, d.rect.w, d.rect.h).stroke({ width: 6, color: COLORS.district, alpha: 0.8 });
-    root.addChild(label(`${id} (${d.name}, 회관 ${d.hall})`, { x: d.rect.x + d.rect.w / 2, y: d.rect.y + 40 }, COLORS.district, 26));
+  // 가진 땅 칸 격자와 조각 경계.
+  for (let y = 0; y < GRID.h; y++) for (let x = 0; x < GRID.w; x++) if (v.isOwned(x, y)) g.rect(x * CELL, y * CELL, CELL, CELL);
+  g.stroke({ width: 1.5, color: COLORS.grid, alpha: 0.35 });
+  for (let cx = 0; cx <= CHUNKS.w; cx++) g.moveTo(cx * CHUNK * CELL, 0).lineTo(cx * CHUNK * CELL, GRID.h * CELL);
+  for (let cy = 0; cy <= CHUNKS.h; cy++) g.moveTo(0, cy * CHUNK * CELL).lineTo(GRID.w * CELL, cy * CHUNK * CELL);
+  g.stroke({ width: 5, color: COLORS.chunk, alpha: 0.6 });
+  // 걸을 수 있는 길 칸 (마을 입구와 이어진 길).
+  for (const i of v.walkable) g.rect((i % GRID.w) * CELL + 4, Math.floor(i / GRID.w) * CELL + 4, CELL - 8, CELL - 8);
+  g.fill({ color: COLORS.grid, alpha: 0.14 });
+
+  // 놓인 것: 발자국, 입구 칸, 문.
+  for (const p of v.state.placed) {
+    const fp = footprint(p.key);
+    g.rect(p.x * CELL, p.y * CELL, fp.w * CELL, fp.h * CELL).stroke({ width: 4, color: COLORS.base, alpha: 0.8 });
+    if (catalogKind(p.key) !== 'decor') root.addChild(label(p.key, { x: p.x * CELL + 50, y: p.y * CELL + 34 }, COLORS.base, 18));
+    if (fp.entry !== undefined) {
+      const ok = v.linkedId(p.id);
+      const ex = (p.x + fp.entry.x) * CELL;
+      const ey = (p.y + fp.entry.y) * CELL;
+      g.rect(ex + 8, ey + 8, CELL - 16, CELL - 16).stroke({ width: 5, color: ok ? COLORS.ok : COLORS.bad });
+      cross(g, v.door(p.key), 9, ok ? COLORS.ok : COLORS.bad);
+    }
   }
 
-  for (const [a, b] of EDGES) {
-    const p = NODES[a];
-    const q = NODES[b];
-    g.moveTo(p.x, p.y).lineTo(q.x, q.y).stroke({ width: 4, color: COLORS.edge, alpha: 0.85 });
-  }
-  for (const id of Object.keys(NODES) as NodeId[]) {
-    const p = NODES[id];
-    g.circle(p.x, p.y, 9).fill(COLORS.node).stroke({ width: 2, color: 0xffffff });
-    root.addChild(label(id, p, COLORS.node, 16));
-  }
-
-  for (const b of BOOTH_IDS) {
-    const s = BOOTH_SPOTS[b];
+  for (const id of BOOTH_IDS) {
+    if (v.placed(id) === undefined) continue;
+    const s = v.booth(id);
     cross(g, s.base, 14, COLORS.base);
-    root.addChild(label(`부스 ${b}`, s.base, COLORS.base, 20));
     s.seats.forEach((p, i) => {
-      g.circle(p.x, p.y, 12).stroke({ width: 4, color: COLORS.seat });
-      root.addChild(label(`자리${i}`, p, COLORS.seat, 15));
+      g.circle(p.x, p.y, 12).stroke({ width: 3, color: COLORS.seat });
+      root.addChild(label(`${i}`, p, COLORS.seat, 14));
     });
     s.queue.forEach((p, i) => {
-      g.rect(p.x - 8, p.y - 8, 16, 16).stroke({ width: 3, color: COLORS.queue });
-      root.addChild(label(`줄${i}`, p, COLORS.queue, 14));
+      g.rect(p.x - 9, p.y - 9, 18, 18).stroke({ width: 3, color: COLORS.queue });
+      root.addChild(label(`줄${i}`, p, COLORS.queue, 12));
     });
-    g.circle(s.pot.x, s.pot.y, 10).fill(COLORS.pot);
-    root.addChild(label('항아리', s.pot, COLORS.pot, 15));
     s.hosts.forEach((p, i) => {
       cross(g, p, 10, COLORS.host);
-      root.addChild(label(`진행자${i}`, p, COLORS.host, 15));
+      root.addChild(label(`진행${i}`, p, COLORS.host, 13));
+    });
+    g.circle(s.pot.x, s.pot.y, 14).stroke({ width: 3, color: COLORS.pot });
+  }
+
+  // 경주로·오리배 물길: 레인 가운데 선, 출발선·결승.
+  const loops = [] as { course: Parameters<typeof lanePoint>[0]; start: number }[];
+  if (v.placed('race') !== undefined) loops.push({ course: v.race(), start: RACE_START_P });
+  if (v.placed('boat') !== undefined) loops.push({ course: v.boat().course, start: 0 });
+  for (const { course, start } of loops) {
+    for (let lane = 0; lane < course.lanes; lane++) {
+      for (let i = 0; i <= 64; i++) {
+        const p = lanePoint(course, lane, i / 64);
+        if (i === 0) g.moveTo(p.x, p.y);
+        else g.lineTo(p.x, p.y);
+      }
+      g.stroke({ width: 3, color: COLORS.track, alpha: 0.8 });
+      const s = lanePoint(course, lane, start);
+      const f = lanePoint(course, lane, 1);
+      g.circle(s.x, s.y, 7).fill(COLORS.track);
+      g.circle(f.x, f.y, 7).stroke({ width: 3, color: COLORS.track });
+    }
+  }
+  if (v.placed('ssireum') !== undefined) {
+    const R = v.ring();
+    g.ellipse(R.center.x, R.center.y, R.rx, R.ry).stroke({ width: 3, color: COLORS.track });
+  }
+  if (v.placed('kite') !== undefined) {
+    const K = v.kite();
+    g.rect(K.sky.x, K.sky.y, K.sky.w, K.sky.h).stroke({ width: 3, color: COLORS.grid, alpha: 0.7 });
+    g.moveTo(K.sky.x, K.skyLow).lineTo(K.sky.x + K.sky.w, K.skyLow).moveTo(K.sky.x, K.skyHigh).lineTo(K.sky.x + K.sky.w, K.skyHigh).stroke({ width: 2, color: COLORS.grid, alpha: 0.6 });
+    g.rect(K.watch.x, K.watch.y, K.watch.w, K.watch.h).stroke({ width: 3, color: COLORS.rest });
+  }
+  if (v.placed('tug') !== undefined) {
+    const T = v.tug();
+    for (const dx of [-T.lineHalf, 0, T.lineHalf]) g.moveTo(T.center.x + dx, T.center.y - 90).lineTo(T.center.x + dx, T.center.y + 60).stroke({ width: 3, color: COLORS.track });
+    g.rect(T.watch.x, T.watch.y, T.watch.w, T.watch.h).stroke({ width: 3, color: COLORS.rest });
+  }
+  if (v.placed('dig') !== undefined) {
+    const D = v.dig();
+    D.chests.forEach((p, i) => {
+      g.circle(p.x, p.y, i < D.spots.length ? 16 : 10).stroke({ width: 3, color: COLORS.pot });
+      root.addChild(label(i < D.spots.length ? `판${i}` : `상자${i}`, p, COLORS.pot, 14));
+    });
+    g.rect(D.watch.x, D.watch.y, D.watch.w, D.watch.h).stroke({ width: 3, color: COLORS.rest });
+  }
+  if (v.placed('boat') !== undefined) for (const w of v.boat().watch) g.rect(w.x, w.y, w.w, w.h).stroke({ width: 3, color: COLORS.rest });
+
+  if (v.placed('fountain') !== undefined) {
+    v.rest().forEach((p, i) => {
+      g.circle(p.x, p.y, 10).stroke({ width: 3, color: COLORS.rest });
+      root.addChild(label(`쉼${i}`, p, COLORS.rest, 14));
     });
   }
-
-  // 경주로: 레인 가운데 선 넷 (진행 0 → 1), 출발대·결승선 자리
-  for (let lane = 0; lane < RACE_TRACK.lanes; lane++) {
-    for (let i = 0; i <= 48; i++) {
-      const p = trackPoint(lane, i / 48);
-      if (i === 0) g.moveTo(p.x, p.y);
-      else g.lineTo(p.x, p.y);
-    }
-    g.stroke({ width: 3, color: COLORS.track, alpha: 0.8 });
-  }
-  // 지도가 그리는 출발선 (출발대 바로 앞, mapUtil RACE_START_P): 선수가 서는 점.
-  for (let lane = 0; lane < RACE_TRACK.lanes; lane++) g.circle(trackPoint(lane, RACE_START_P).x, trackPoint(lane, RACE_START_P).y, 7).fill(COLORS.track);
-  root.addChild(label(`출발선 p=${RACE_START_P.toFixed(3)}`, trackPoint(RACE_TRACK.lanes - 1, RACE_START_P), COLORS.track, 15));
-  cross(g, RACE_TRACK.gate, 14, COLORS.track);
-  root.addChild(label('출발대', RACE_TRACK.gate, COLORS.track, 18));
-  cross(g, RACE_TRACK.finish, 14, COLORS.track);
-  root.addChild(label('결승선', RACE_TRACK.finish, COLORS.track, 18));
-
-  // 오리배 물길: 레인 가운데 선 넷, 출발(p 0)·결승(p 1) 점.
-  for (let lane = 0; lane < BOAT_COURSE.lanes; lane++) {
-    for (let i = 0; i <= 64; i++) {
-      const p = boatPoint(lane, i / 64);
-      if (i === 0) g.moveTo(p.x, p.y);
-      else g.lineTo(p.x, p.y);
-    }
-    g.stroke({ width: 3, color: COLORS.track, alpha: 0.8 });
-    g.circle(boatPoint(lane, 0).x, boatPoint(lane, 0).y, 7).fill(COLORS.track);
-    g.circle(boatPoint(lane, 1).x, boatPoint(lane, 1).y, 7).stroke({ width: 3, color: COLORS.track });
-  }
-  root.addChild(label('물길 출발', boatPoint(0, 0), COLORS.track, 15), label('물길 결승', boatPoint(BOAT_COURSE.lanes - 1, 1), COLORS.track, 15));
-  // 씨름 모래판, 연 하늘·날리는 자리, 줄다리기 가운데·승리 선, 보물찾기 판 자리·상자 자리.
-  const c = SSIREUM_RING.center;
-  g.ellipse(c.x, c.y, SSIREUM_RING.rx, SSIREUM_RING.ry).stroke({ width: 3, color: COLORS.track });
-  const sky = KITE_FIELD.sky;
-  g.rect(sky.x, sky.y, sky.w, sky.h).stroke({ width: 3, color: COLORS.district, alpha: 0.7 });
-  g.moveTo(sky.x, KITE_FIELD.skyLow).lineTo(sky.x + sky.w, KITE_FIELD.skyLow).moveTo(sky.x, KITE_FIELD.skyHigh).lineTo(sky.x + sky.w, KITE_FIELD.skyHigh).stroke({ width: 2, color: COLORS.district, alpha: 0.6 });
-  root.addChild(label('연 하늘 (높이 0 ~ 1)', { x: sky.x + sky.w / 2, y: sky.y + 30 }, COLORS.district, 16));
-  const t = TUG_FIELD.center;
-  for (const dx of [-TUG_FIELD.lineHalf, 0, TUG_FIELD.lineHalf]) g.moveTo(t.x + dx, t.y - 90).lineTo(t.x + dx, t.y + 60).stroke({ width: 3, color: COLORS.track });
-  root.addChild(label('줄다리기 가운데', t, COLORS.track, 15));
-  DIG_FIELD.chests.forEach((p, i) => {
-    g.circle(p.x, p.y, i < DIG_FIELD.spots.length ? 16 : 10).stroke({ width: 3, color: COLORS.pot });
-    root.addChild(label(i < DIG_FIELD.spots.length ? `판${i}` : `상자${i}`, p, COLORS.pot, 14));
-  });
-
-  for (const [id, p] of Object.entries(BUILDING_SPOTS)) {
-    cross(g, p, 16, COLORS.building);
-    root.addChild(label(id, p, COLORS.building, 20));
-  }
-  REST_SPOTS.forEach((p, i) => {
-    g.circle(p.x, p.y, 10).stroke({ width: 3, color: COLORS.rest });
-    root.addChild(label(`쉼${i}`, p, COLORS.rest, 14));
-  });
-  for (const l of SPARE_LOTS) {
-    g.rect(l.at.x - 12, l.at.y - 12, 24, 24).stroke({ width: 3, color: COLORS.lot });
-    root.addChild(label(`빈 부지 (${l.district})`, l.at, COLORS.lot, 15));
-  }
   // 넷째 묶음: 가게 계산대·주인, 일터 자리·기다리는 자리·반장.
-  for (const [shop, sp] of Object.entries(SHOP_SPOTS)) {
+  for (const shop of ['pawnshop', 'bank'] as const) {
+    if (v.placed(shop) === undefined) continue;
+    const sp = v.shop(shop);
     sp.counter.forEach((p, i) => {
       g.circle(p.x, p.y, 10).stroke({ width: 3, color: COLORS.seat });
       root.addChild(label(`${shop === 'pawnshop' ? '전당' : '은행'}${i}`, p, COLORS.seat, 14));
     });
     cross(g, sp.npc, 10, COLORS.host);
-    root.addChild(label(sp.art, sp.npc, COLORS.host, 14));
   }
-  for (const [f, fs] of Object.entries(WORK_YARD.facilities)) {
-    fs.spots.forEach((p, i) => {
-      g.circle(p.x, p.y, 10).stroke({ width: 3, color: COLORS.seat });
-      root.addChild(label(`${f}${i}`, p, COLORS.seat, 14));
-    });
-    fs.wait.forEach((p, i) => {
-      g.rect(p.x - 8, p.y - 8, 16, 16).stroke({ width: 3, color: COLORS.queue });
-      root.addChild(label(`${f}대기${i}`, p, COLORS.queue, 13));
-    });
-    cross(g, fs.face, 8, COLORS.pot);
+  if (v.placed('workyard') !== undefined) {
+    const Y = v.yard();
+    for (const [f, fs] of Object.entries(Y.facilities)) {
+      fs.spots.forEach((p, i) => {
+        g.circle(p.x, p.y, 10).stroke({ width: 3, color: COLORS.seat });
+        root.addChild(label(`${f}${i}`, p, COLORS.seat, 14));
+      });
+      fs.wait.forEach((p, i) => {
+        g.rect(p.x - 8, p.y - 8, 16, 16).stroke({ width: 3, color: COLORS.queue });
+        root.addChild(label(`${f}대기${i}`, p, COLORS.queue, 13));
+      });
+      cross(g, fs.face, 8, COLORS.pot);
+    }
+    cross(g, Y.foreman, 10, COLORS.host);
   }
-  cross(g, WORK_YARD.foreman, 10, COLORS.host);
-  root.addChild(label('반장', WORK_YARD.foreman, COLORS.host, 14));
   return root;
+}
+
+/** 걷는 손님 자국을 모으는 칸 수와 모으는 간격 (초). */
+const TRAIL_MAX = 2400;
+const TRAIL_EVERY = 0.2;
+
+/**
+ * 디버그: 걷는 손님의 자국 (지난 자리 점: 초록 = 길 칸이나 입구 있는 건물 안, 빨강 = 길 밖)과 지금 남은 길 (파란 선).
+ * 점·선 굵기는 화면에서 늘 같게 (확대로 나눈다). world.ts가 디버그를 켰을 때만 매 프레임 부른다.
+ */
+export class GuestDebug {
+  readonly g = new Graphics();
+  private readonly xs = new Float32Array(TRAIL_MAX);
+  private readonly ys = new Float32Array(TRAIL_MAX);
+  private readonly ok = new Uint8Array(TRAIL_MAX);
+  private n = 0;
+  private head = 0;
+  private acc = 0;
+  /** 지금까지 잰 길 밖 자국 수. */
+  off = 0;
+
+  constructor() {
+    this.g.eventMode = 'none';
+  }
+
+  update(state: GameState, dt: number, zoom: number): void {
+    this.acc += dt;
+    if (this.acc >= TRAIL_EVERY) {
+      this.acc = 0;
+      for (const m of state.monsters) {
+        if (m.path.length === 0) continue;
+        const k = this.head;
+        this.xs[k] = m.pos.x;
+        this.ys[k] = m.pos.y;
+        const on = onRoad(state, m.pos);
+        this.ok[k] = on ? 1 : 0;
+        if (!on) this.off++;
+        this.head = (k + 1) % TRAIL_MAX;
+        this.n = Math.min(TRAIL_MAX, this.n + 1);
+      }
+    }
+    const g = this.g;
+    g.clear();
+    const u = 1 / Math.max(0.05, zoom);
+    for (const m of state.monsters) {
+      if (m.path.length === 0) continue;
+      g.moveTo(m.pos.x, m.pos.y);
+      for (const p of m.path) g.lineTo(p.x, p.y);
+      g.stroke({ width: 2.5 * u, color: COLORS.grid, alpha: 0.7, join: 'round' });
+    }
+    for (let i = 0; i < this.n; i++) if (this.ok[i] === 1) g.circle(this.xs[i] ?? 0, this.ys[i] ?? 0, 2.2 * u);
+    g.fill({ color: COLORS.ok, alpha: 0.75 });
+    for (let i = 0; i < this.n; i++) if (this.ok[i] === 0) g.circle(this.xs[i] ?? 0, this.ys[i] ?? 0, 3.5 * u);
+    g.fill({ color: COLORS.bad });
+    for (const m of state.monsters) {
+      if (m.path.length === 0) continue;
+      g.circle(m.pos.x, m.pos.y, 5 * u).fill(onRoad(state, m.pos) ? COLORS.ok : COLORS.bad).stroke({ width: 1.5 * u, color: 0xffffff });
+    }
+  }
+
+  clear(): void {
+    this.g.clear();
+    this.n = this.head = 0;
+    this.off = 0;
+  }
 }

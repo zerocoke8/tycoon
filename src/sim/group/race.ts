@@ -4,9 +4,9 @@
 
 import type { Rng } from '../../core/rng.ts';
 import { RACE } from '../../data/defs.ts';
-import { RACE_TRACK, trackPoint } from '../../data/map.ts';
 import { generateRace, pickRacer, raceOutcome, raceStandings } from '../race.ts';
 import { TUNE } from '../tuning.ts';
+import { villageOf } from '../village.ts';
 import type { GroupEntry, GroupEvent, GroupPlay, GroupState, RaceResult, RacerIndex } from '../types.ts';
 import { raceOf, type GroupGame, type GroupGenCtx } from './core.ts';
 
@@ -60,12 +60,12 @@ export function makeRace(rng: Rng, entries: readonly GroupEntry[], ctx: GroupGen
 export const RACE_GAME: GroupGame = {
   booth: 'race',
   picks: RACE.racers.length,
-  center: RACE_TRACK.center,
-  face: () => RACE_TRACK.finish,
-  // 경주로 바깥 울타리 쪽 (아래 직선·오른쪽 굽이).
-  watchPoint: (rng) => {
-    const p = trackPoint(RACE_TRACK.lanes + 1 + rng.range(0, 1), rng.range(0.12, 0.5));
-    return { x: p.x, y: p.y };
+  center: (st) => villageOf(st).race().center,
+  face: (st) => villageOf(st).race().finish,
+  // 관중석 양옆 경주로 바깥 (catalog.ts RACE_GEO.watch: 입구 쪽 위 띠라 달리는 경주로를 가로지르지 않는다).
+  watchPoint: (st, rng) => {
+    const w = rng.pick(villageOf(st).race().watch);
+    return { x: w.x + rng.next() * w.w, y: w.y + rng.next() * w.h };
   },
   join: (rng, _seat, m) => ({ pick: pickRacer(rng, m.species), role: 'bettor' }),
   readiness: (es) => (es.length >= RACE.minRunners ? 'soon' : es.length > 0 ? 'ok' : 'none'),

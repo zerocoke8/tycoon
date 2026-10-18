@@ -1,22 +1,23 @@
-// 단체 놀이 모듈: 보물찾기 마당. 손님마다 판 자리 하나(= 자리, map.ts DIG_FIELD.spots)를 판다.
-// 판의 DIG.chestChance에만 상자가 DIG_FIELD.chests 가운데 한 곳에 묻힌다 (판마다 많아야 하나).
+// 단체 놀이 모듈: 보물찾기 마당. 손님마다 판 자리 하나(= 자리, catalog.ts DIG_GEO.spots)를 판다.
+// 판의 DIG.chestChance에만 상자가 DIG_GEO.chests 가운데 한 곳에 묻힌다 (판마다 많아야 하나).
 // 등급 (손님마다): 상자를 판 손님 jackpot ×8, 상자 바로 옆(DIG.nearPx 안)을 판 손님 nearMiss ("바로 옆이었는데!"),
 // 나머지는 DIG.winChance로 작은 보물(동전 주머니·보석, win ×2.5), 아니면 헌 장화·조약돌(lose). 배당 ODDS.dig.
 // 타임라인: 손님마다 삽질 시작(dig) → 차례로 무언가 튀어 오른다(find, 상자는 마지막에). 아무도 못 찾은 상자는 끝에 할아버지가 판다(reveal).
 // 자리(판 자리)는 빈 흙더미 가운데 무작위로 고른다. 상자가 바로 옆에서 나오면 그 손님은 "바로 옆이었는데!" (응원 behind).
 
 import { DIG, DIG_FINDS, type OutcomeTier } from '../../data/defs.ts';
-import { DIG_FIELD } from '../../data/map.ts';
+import { DIG_GEO } from '../../data/catalog.ts';
 import type { DigFind, GroupEntry, GroupEvent, GroupKey, GroupPlay } from '../types.ts';
+import { villageOf } from '../village.ts';
 import { groupOutcome, pollTimeline, type GroupGame } from './core.ts';
 
-const SPOTS = DIG_FIELD.spots.length;
+const SPOTS = DIG_GEO.spots.length;
 
-/** 상자 자리 c(DIG_FIELD.chests index) 바로 옆의 판 자리인가 (상자 자리 그곳은 아니다). */
+/** 상자 자리 c(DIG_GEO.chests index) 바로 옆의 판 자리인가 (상자 자리 그곳은 아니다). 거리는 시설 안 상대 좌표라 놓인 자리와 상관없다. */
 export function digNear(c: number, spot: number): boolean {
   if (c < 0 || c === spot) return false;
-  const a = DIG_FIELD.chests[c];
-  const b = DIG_FIELD.spots[spot];
+  const a = DIG_GEO.chests[c];
+  const b = DIG_GEO.spots[spot];
   return a !== undefined && b !== undefined && Math.hypot(a.x - b.x, a.y - b.y) <= DIG.nearPx;
 }
 
@@ -25,17 +26,23 @@ const findIndex = (f: DigFind): number => DIG_FINDS.indexOf(f);
 export const DIG_GAME: GroupGame = {
   booth: 'dig',
   picks: SPOTS,
-  center: DIG_FIELD.center,
+  center: (st) => villageOf(st).dig().center,
   // 손님은 자기 흙더미(왼쪽)를 본다.
-  face: (seat) => (seat >= 0 ? (DIG_FIELD.spots[seat] ?? DIG_FIELD.center) : DIG_FIELD.center),
-  watchPoint: (rng) => ({ x: rng.range(6960, 7660), y: rng.range(6960, 7030) }),
+  face: (st, seat) => {
+    const D = villageOf(st).dig();
+    return seat >= 0 ? (D.spots[seat] ?? D.center) : D.center;
+  },
+  watchPoint: (st, rng) => {
+    const w = villageOf(st).dig().watch;
+    return { x: w.x + rng.next() * w.w, y: w.y + rng.next() * w.h };
+  },
   // 판 자리는 빈 흙더미 가운데 무작위 (판마다 상자 자리가 달라 어디나 같다).
   seatFor: (rng, _m, free) => rng.pick(free),
   join: (_rng, seat) => ({ pick: seat, role: 'player' }),
   readiness: (es) => (es.length >= DIG.soonAt ? 'soon' : es.length > 0 ? 'ok' : 'none'),
   generate: (rng, entries, ctx) => {
     const D = ctx.duration;
-    const chest = rng.chance(DIG.chestChance) ? rng.int(0, DIG_FIELD.chests.length - 1) : -1;
+    const chest = rng.chance(DIG.chestChance) ? rng.int(0, DIG_GEO.chests.length - 1) : -1;
     const finds: DigFind[] = Array.from({ length: SPOTS }, () => 'none');
     const findAt: number[] = Array.from({ length: SPOTS }, () => -1);
     const tiers: OutcomeTier[] = [];

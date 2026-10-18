@@ -4,7 +4,7 @@
 import type { BoothId, BuildingId } from '../data/defs.ts';
 import type { Result, SimApi } from '../sim/api.ts';
 import type { GameState, MonsterId } from '../sim/types.ts';
-import type { UiHooks } from '../view/contracts.ts';
+import type { BuildMode, UiHooks } from '../view/contracts.ts';
 import { h } from './dom.ts';
 import type { Menu } from './menu.ts';
 import { Live } from './widgets.ts';
@@ -32,6 +32,12 @@ export interface UiCtx {
   openHire(): void;
   showBuilding(id: BuildingId): void;
   showMonster(id: MonsterId): void;
+  /** 놓인 것 하나 (장식 등: Placed.id)의 옮기기·보관하기 시트. */
+  showPlaced(id: number): void;
+  /** 시트를 닫고 지도 짓기 모드로 (놓기·옮기기·길·땅, DESIGN 6.1). */
+  startBuild(mode: BuildMode): void;
+  /** 짓기 탭을 그 묶음으로 연다 (ui/panels/build.ts BuildCat: booth·big·shop·decor·road·land). */
+  openBuild(category?: string): void;
   closeAll(): void;
   /** 다음 update에서 곧바로 다시 그린다. */
   markDirty(): void;

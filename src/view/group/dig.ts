@@ -8,7 +8,8 @@
 // 판이 끝나 쉬면 나온 것·상자·구덩이는 스르르 사라진다. 모두 화면 시계(this.clock)의 함수, 노드는 미리 만들어 고쳐 쓴다.
 
 import { Container, Graphics } from 'pixi.js';
-import { DIG_FIELD, type Pt } from '../../data/map.ts';
+import type { DigGeo } from '../../data/catalog.ts';
+import type { Pt } from '../../data/map.ts';
 import { ease } from '../../core/tween.ts';
 import { trackAt } from '../../sim/group/core.ts';
 import type { DigFind, GroupEntry, GroupPlay, GroupState } from '../../sim/types.ts';
@@ -79,11 +80,13 @@ interface Walk {
 }
 
 export class DigMapView extends GroupMapBase {
+  /** 보물찾기 마당 (세계 좌표, 만들 때 놓인 자리). */
+  private readonly D: DigGeo = this.ctx.sim.village().dig();
   private readonly bodies: PuppetSet;
   private readonly spots: Spot[] = [];
   /** 구덩이 (상자가 묻힐 수 있는 곳마다: 앞 여섯 = 판 자리). */
   private readonly holes: Graphics[] = [];
-  /** 구덩이 가운데와 상자 자리 (DIG_FIELD.chests 순서, 미리 잰다). */
+  /** 구덩이 가운데와 상자 자리 (this.D.chests 순서, 미리 잰다). */
   private readonly holePts: Pt[];
   private readonly chestPts: Pt[];
   /** 이번 판에 할아버지가 상자를 꺼내는 때 (-1 = 없음). */
@@ -104,10 +107,10 @@ export class DigMapView extends GroupMapBase {
     super(ctx);
     this.bodies = new PuppetSet(ctx.monsters);
     const L = ctx.layers;
-    this.holePts = DIG_FIELD.chests.map((c, i) => (i < DIG_FIELD.spots.length ? { x: c.x - 8, y: c.y - 16 } : { x: c.x, y: c.y - 2 }));
-    this.chestPts = DIG_FIELD.chests.map((c, i) => (i < DIG_FIELD.spots.length ? { x: c.x - 22, y: c.y + 14 } : { x: c.x, y: c.y + 10 }));
+    this.holePts = this.D.chests.map((c, i) => (i < this.D.spots.length ? { x: c.x - 8, y: c.y - 16 } : { x: c.x, y: c.y - 2 }));
+    this.chestPts = this.D.chests.map((c, i) => (i < this.D.spots.length ? { x: c.x - 22, y: c.y + 14 } : { x: c.x, y: c.y + 10 }));
     // 구덩이: 바닥층 (흙더미 그림 위). 원점 = 구덩이 가운데.
-    for (let i = 0; i < DIG_FIELD.chests.length; i++) {
+    for (let i = 0; i < this.D.chests.length; i++) {
       const p = this.holeAt(i);
       const h = new Graphics()
         .ellipse(0, 3, 30, 12)
@@ -131,8 +134,8 @@ export class DigMapView extends GroupMapBase {
     this.rays.visible = false;
     this.own(L.floor, this.rays);
     // 판 자리마다 삽과 나온 것 (나온 것은 효과층: 손님 위).
-    for (let i = 0; i < DIG_FIELD.spots.length; i++) {
-      const at = DIG_FIELD.spots[i] as Pt;
+    for (let i = 0; i < this.D.spots.length; i++) {
+      const at = this.D.spots[i] as Pt;
       const shovel = new ArtNode({ k: SHOVEL_K, anchor: 'center', placeholder: { w: 560, h: 560, color: 0xb0aaa0 } });
       shovel.setArt('items', 'shovel');
       this.own(L.objects, shovel);
@@ -155,12 +158,12 @@ export class DigMapView extends GroupMapBase {
 
   /** 구덩이 가운데 (판 자리는 흙더미 앞쪽 비탈, 그 밖은 땅). */
   private holeAt(i: number): Pt {
-    return this.holePts[i] ?? DIG_FIELD.center;
+    return this.holePts[i] ?? this.D.center;
   }
 
   /** 상자가 놓이는 곳 (발 = 아래 가운데). */
   private chestAt(i: number): Pt {
-    return this.chestPts[i] ?? DIG_FIELD.center;
+    return this.chestPts[i] ?? this.D.center;
   }
 
   protected override onShown(show: boolean): void {
@@ -562,7 +565,7 @@ export class DigMapView extends GroupMapBase {
   }
 
   override hitTest(wx: number, wy: number): boolean {
-    const c = DIG_FIELD.center;
+    const c = this.D.center;
     return inEllipse(wx, wy, c.x, c.y, 430, 250);
   }
 

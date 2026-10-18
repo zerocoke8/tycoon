@@ -2,8 +2,9 @@
 // GameState는 그대로 JSON으로 저장된다 (함수·클래스 인스턴스·Map을 넣지 않는다).
 
 import type { Emitter } from '../core/events.ts';
-import type { AccessoryId, AccessorySlot, BoothId, BuildingId, GoodId, GroupBoothId, MaterialId, OutcomeTier, PreciousId, SlotSymbol, SpeciesId, StaffStats, TraitId, WorkFacility } from '../data/defs.ts';
-import type { DistrictId, NodeId, Pt } from '../data/map.ts';
+import type { CatalogKey } from '../data/catalog.ts';
+import type { AccessoryId, AccessorySlot, BoothId, BuildingId, DecorId, GoodId, GroupBoothId, MaterialId, OutcomeTier, PreciousId, SlotSymbol, SpeciesId, StaffStats, TraitId, WorkFacility } from '../data/defs.ts';
+import type { Pt } from '../data/map.ts';
 
 export type MonsterId = number;
 export type StaffId = number;
@@ -80,7 +81,7 @@ export interface Monster {
   broke?: boolean;
   /** 촌장에게 간식을 받았다. */
   snacked?: boolean;
-  /** 쉬는 자리 (REST_SPOTS index). */
+  /** 쉬는 자리 (분수 catalog.ts FOUNTAIN_REST index). */
   spot?: number;
   /** 다시 찾아온 단골. */
   regular?: boolean;
@@ -99,7 +100,7 @@ export interface Monster {
   errand?: Errand | null;
   /** 볼일이 끝나면 집에 간다 (떠나기 전에 되찾기·갚기). */
   homeward?: boolean;
-  /** 볼일 자리 (SHOP_SPOTS[가게].counter index). */
+  /** 볼일 자리 (catalog.ts SHOP_GEO[가게].counter index). */
   counter?: number;
   /** 파산해서 일터에서 빚을 갚는 중 (어두운 필터, 축 처진 슬픈 모습, 느린 걸음). 다 갚으면 false. */
   bankrupt?: boolean;
@@ -114,6 +115,11 @@ export interface Monster {
   declined?: 'low' | 'broke' | null;
   /** 빚을 갚으려고 끈기가 다 된 뒤에 더 한 판 수 (BANK.chase.max까지, 마음을 접으면 max). */
   chased?: number;
+  /**
+   * 배치형 마을: 지금 걷는 길의 목적지와 그 건물 (Sim.go). 길이 끊겨 목적지 가까운 길 칸까지만 걸었으면 닿은 뒤 다시 길을 찾고,
+   * 그래도 못 가면 하던 일을 접는다 (끊긴 길 너머 자리에서 노는 일이 없게).
+   */
+  dest?: { x: number; y: number; via: CatalogKey | null } | null;
 }
 
 /** 몸에 단 장신구 하나 (defs.ts ACCESSORIES). value = 전당포가 쳐 주는 값 (손님이 올 때 정한다). */
@@ -135,7 +141,7 @@ export interface PawnTicket {
 export type Errand = 'pawn' | 'redeem' | 'loan' | 'repay';
 
 /**
- * 파산한 손님의 일 (Monster.labor). facility·spot = 일하는 자리 (map.ts WORK_YARD.facilities[facility].spots index, -1 = 자리가 없어 기다림),
+ * 파산한 손님의 일 (Monster.labor). facility·spot = 일하는 자리 (catalog.ts YARD_GEO.facilities[facility].spots index, -1 = 자리가 없어 기다림),
  * wait = 기다리는 자리 (wait index, 일하는 중이면 -1).
  */
 export interface LaborState {
@@ -249,7 +255,7 @@ export type GroupRole = 'player' | 'bettor';
 /**
  * 단체 놀이에 참가한 손님 하나. pick = 고른 것 (놀이마다):
  *   race·boat = 선수·배 0~3, ssireum = 편 0 홍·1 청 (선수는 자기 편: 자리 0 = 홍, 1 = 청), tug = 편 0 홍·1 청 (자리 짝수 = 홍, 홀수 = 청),
- *   kite = 연 0~3 (날리는 손님은 자기 연 = 자리 0~3), dig = 판 자리 0~5 (= 자리, map.ts DIG_FIELD.spots).
+ *   kite = 연 0~3 (날리는 손님은 자기 연 = 자리 0~3), dig = 판 자리 0~5 (= 자리, catalog.ts DIG_GEO.spots).
  * 어느 자리에 앉을지는 놀이 모듈 GroupGame.seatFor가 고른다 (씨름 선수·구경, 연 날리기·구경, 줄다리기 편 맞추기, 보물찾기 판 자리).
  */
 export interface GroupEntry {
@@ -274,7 +280,7 @@ export interface GroupEntry {
  *   cut    = 연줄이 끊어졌다. actor = 끊긴 연, other = 끊은 연.
  *   dig    = 보물찾기: 한 자리에서 삽질을 시작했다. actor = 판 자리.
  *   find   = 보물찾기: 무언가 튀어 올랐다. actor = 판 자리, value = DIG_FINDS index (defs.ts).
- *   reveal = 보물찾기: 아무도 못 찾은 상자를 할아버지가 파서 보여 준다. actor = 상자 자리 (map.ts DIG_FIELD.chests index).
+ *   reveal = 보물찾기: 아무도 못 찾은 상자를 할아버지가 파서 보여 준다. actor = 상자 자리 (catalog.ts DIG_GEO.chests index).
  *   finish = 승부가 났다 (씨름 넘어뜨리기, 줄다리기 선 넘음, 마지막 연). actor = 이긴 편·연.
  */
 export type GroupEventType = 'lead' | 'brink' | 'flip' | 'tangle' | 'cut' | 'dig' | 'find' | 'reveal' | 'finish';
@@ -309,7 +315,7 @@ interface GroupPlayBase {
  *   race·boat: tracks[선수] = 진행 0~1 (= race.keys, 읽기는 sim/race.ts raceProgress(race, 선수, t)).
  *   ssireum: tracks[0] = 미는 힘 p (-1~1, +1 = 홍이 청을 넘어뜨림, -1 = 청이 이김). throwAt에 ±1.
  *   tug: tracks[0] = 밧줄 가운데 c (-1~1, +1 = 홍 쪽 선까지 끌려감 = 홍 승리, -1 = 청 승리). crossAt에 ±1.
- *   kite: tracks[2k] = 연 k의 높이 (0 = 낮게 뜬 높이 KITE_FIELD.skyLow, 1 = 가장 높이 skyHigh: 화면은 손에서 연줄로 잇는다), tracks[2k + 1] = 연 k의 좌우 (-1~1, 자기 자리 위가 0). 끊긴 뒤의 키는 없다 (화면이 날려 보낸다).
+ *   kite: tracks[2k] = 연 k의 높이 (0 = 낮게 뜬 높이 KITE_GEO.skyLow, 1 = 가장 높이 skyHigh: 화면은 손에서 연줄로 잇는다), tracks[2k + 1] = 연 k의 좌우 (-1~1, 자기 자리 위가 0). 끊긴 뒤의 키는 없다 (화면이 날려 보낸다).
  *   dig: tracks[자리] = 판 깊이 (0~1, findAt에 1). 아무도 안 판 자리는 빈 목록.
  */
 export type GroupPlay = GroupPlayBase &
@@ -352,11 +358,11 @@ export type GroupPlay = GroupPlayBase &
       }
     | {
         kind: 'dig';
-        /** 판 자리마다 나온 것 (DIG_FIELD.spots 순서). */
+        /** 판 자리마다 나온 것 (DIG_GEO.spots 순서). */
         finds: DigFind[];
         /** 판 자리마다 무언가 튀어 오르는 때 (초, 아무도 안 판 자리는 -1). */
         findAt: number[];
-        /** 상자가 묻힌 곳 (DIG_FIELD.chests index, -1 = 이번 판엔 상자가 없다). 앞 여섯은 판 자리와 같은 곳. */
+        /** 상자가 묻힌 곳 (DIG_GEO.chests index, -1 = 이번 판엔 상자가 없다). 앞 여섯은 판 자리와 같은 곳. */
         chest: number;
         /** 손님이 상자를 찾았다 (아니면 끝에 할아버지가 파서 보여 준다: 'reveal'). */
         found: boolean;
@@ -365,6 +371,8 @@ export type GroupPlay = GroupPlayBase &
 
 export type GroupKind = GroupPlay['kind'];
 export type GroupPhase = 'idle' | 'gathering' | 'running' | 'done';
+/** 판을 접은 까닭: closed = 꼭 있어야 하는 진행자가 빠짐, road = 입구 앞 길이 끊김, stored = 보관함에 넣음, timeout = 출발 조건이 안 맞은 채 오래 기다림. */
+export type GroupCancelReason = 'closed' | 'road' | 'stored' | 'timeout';
 
 /**
  * 단체 놀이 상태 (BoothState.group). idle → (첫 손님이 자리에 앉아 고르면) gathering → (countdown 0, 출발 조건) running → (elapsed ≥ duration) done → idle.
@@ -482,8 +490,30 @@ export interface CraftJob {
   total: number;
 }
 
+/** 놓인 것 하나 (부스·건물·장식). x·y = 차지한 칸들의 왼쪽 위 칸 (catalog.ts footprint). */
+export interface Placed {
+  id: number;
+  key: CatalogKey;
+  x: number;
+  y: number;
+}
+
+/**
+ * 배치형 마을 (DESIGN 6.1, sim/village.ts). 부스·건물은 가졌으면 (해금·지음) 놓였거나 보관함에 있다 (보관함은 따로 적지 않는다: 가졌는데 placed에 없으면 보관함).
+ * 장식은 여럿 가질 수 있어 보관함 개수를 decor에 적는다. roads = 길 칸 (map.ts cellIndex, 오름차순), chunks = 산 땅 조각 (map.ts chunkIndex, 처음 땅 포함).
+ * rev = 바뀐 횟수 (sim/village.ts가 칸 지도·이어짐·모양을 다시 만들 때를 안다, 화면도): place = 건물·장식 자리, road = 길, land = 땅.
+ */
+export interface VillageState {
+  placed: Placed[];
+  roads: number[];
+  chunks: number[];
+  decor: Partial<Record<DecorId, number>>;
+  nextId: number;
+  rev: { place: number; road: number; land: number };
+}
+
 export interface GameState {
-  version: 4;
+  version: 5;
   /** 시뮬레이션 누적 초. */
   time: number;
   rng: number;
@@ -504,8 +534,8 @@ export interface GameState {
   /** 도감: 종마다 온 횟수, 본 반응, 인형 뽑기로 모은 인형 수 (plush, 없으면 0). */
   dex: Partial<Record<SpeciesId, DexEntry>>;
   totals: { visitors: number; rounds: number; jackpots: number; coinsEarned: number };
-  /** 열린 구역. */
-  districts: DistrictId[];
+  /** 배치형 마을: 놓인 건물·부스·장식, 길, 산 땅, 보관함의 장식. */
+  village: VillageState;
   savedAt: number;
   /** 다시 찾아올 단골 (덧붙은 칸, 없으면 빈 목록). */
   regulars?: Regular[];
@@ -584,13 +614,17 @@ export interface SimEvents extends Record<string, unknown> {
   groupEvent: { booth: GroupBoothId; group: GroupState; event: GroupEvent; cheers: GroupCheer[] };
   /** 단체 놀이 끝 (group.phase = 'done'). 그다음 참가자마다 roundFinished·monsterReact, 근처 구경꾼 monsterSpectate. */
   groupFinished: { booth: GroupBoothId; group: GroupState };
-  /** 모이던 판을 접었다 (closed = 꼭 있어야 하는 진행자가 빠짐, timeout = 출발 조건이 안 맞은 채 오래 기다림). 건 코인은 돌려준다. */
-  groupCancelled: { booth: GroupBoothId; reason: 'closed' | 'timeout' };
+  /** 모이던 (보관하기면 하던) 판을 접었다 (GroupCancelReason). 건 코인은 돌려준다. */
+  groupCancelled: { booth: GroupBoothId; reason: GroupCancelReason };
   coinsChanged: { coins: number; delta: number; at: Pt | null };
   itemsChanged: Record<string, never>;
   buildingUpgraded: { id: BuildingId | BoothId; level: number };
+  /** 부스를 열었다 (보관함으로: 놓으면 손님을 받는다). */
   boothUnlocked: { booth: BoothId };
-  districtOpened: { district: DistrictId };
+  /** 배치형 마을이 바뀌었다 (place = 건물·장식 자리, road = 길, land = 땅). key = 놓거나 옮기거나 보관한 것. */
+  villageChanged: { what: 'place' | 'road' | 'land'; key?: CatalogKey };
+  /** 땅 조각을 샀다 (map.ts chunkIndex). */
+  landBought: { chunk: number };
   staffChanged: Record<string, never>;
   craftDone: { good: GoodId };
   /** topic 'debt' = 파산·다 갚음처럼 큰 마을에서 자주 오는 넷째 묶음 알림 (UI가 몰아 오면 건너뛴다). */
@@ -642,6 +676,3 @@ export interface DebtChange {
 }
 
 export type SimBus = Emitter<SimEvents>;
-
-/** 길 그래프 노드 이름 (data/map.ts)과 좌표를 함께 쓸 때. */
-export type { NodeId };

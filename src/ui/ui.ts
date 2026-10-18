@@ -5,14 +5,15 @@ import './ui.css';
 import { isGroupBooth, type BoothId, type BuildingId } from '../data/defs.ts';
 import type { Result, SimApi } from '../sim/api.ts';
 import type { MonsterId } from '../sim/types.ts';
-import type { UiApi, UiHooks } from '../view/contracts.ts';
+import type { BuildMode, BuildState, UiApi, UiHooks } from '../view/contracts.ts';
 import { BoothPanel } from './boothPanel.ts';
+import { BuildBar } from './buildBar.ts';
 import { h, injectHead, makeInsetProbe } from './dom.ts';
 import { Hud, Nav, Toasts } from './hud.ts';
 import { Menu } from './menu.ts';
 import { MonsterCard } from './monsterCard.ts';
 import type { BasePanel, DexView, TabId, ToastKind, UiCtx } from './panel.ts';
-import { BuildingPanel, BuildPanel, LockedBoothPanel } from './panels/build.ts';
+import { BuildingPanel, BuildPanel, isBuildCat, LockedBoothPanel, PlacedPanel } from './panels/build.ts';
 import { BankPanel, DebtLog, PawnshopPanel, WorkyardPanel, type DebtBuildingId } from './panels/debt.ts';
 import { GoalChip } from './goal.ts';
 import { DexPanel } from './panels/dex.ts';
@@ -53,12 +54,17 @@ export class Ui implements UiApi, UiCtx {
   private readonly card: MonsterCard;
   private readonly booth: BoothPanel;
   private readonly tabs: Record<Exclude<TabId, 'village'>, BasePanel>;
+  /** 짓기 탭 (묶음 고르기). */
+  private readonly buildPanel: BuildPanel;
   private readonly staffPanel: StaffPanel;
   private readonly dex: DexPanel;
   private readonly bag: BagPanel;
   private readonly settings: SettingsPanel;
   private readonly building: BuildingPanel;
   private readonly lockedBooth: LockedBoothPanel;
+  private readonly placedPanel: PlacedPanel;
+  /** 짓기 모드 ✓/✕ 띠. */
+  private readonly buildBar: BuildBar;
   /** 넷째 묶음 건물 시트 (전당포 진열장·은행 대출·일터 일꾼). */
   private readonly debtSheets: Record<DebtBuildingId, BasePanel>;
   /** 지금 시트에 든 내용과 그 이름 ('tab:build', 'bag', 'building:hall' …). */
@@ -100,15 +106,18 @@ export class Ui implements UiApi, UiCtx {
       () => this.openSettings(),
     );
     this.goal = new GoalChip(this, root);
+    this.buildBar = new BuildBar(this, root);
     this.toasts = new Toasts(root);
 
     this.dex = new DexPanel(this);
     this.staffPanel = new StaffPanel(this);
-    this.tabs = { build: new BuildPanel(this), staff: this.staffPanel, workshop: new WorkshopPanel(this), dex: this.dex };
+    this.buildPanel = new BuildPanel(this);
+    this.tabs = { build: this.buildPanel, staff: this.staffPanel, workshop: new WorkshopPanel(this), dex: this.dex };
     this.bag = new BagPanel(this);
     this.settings = new SettingsPanel(this);
     this.building = new BuildingPanel(this);
     this.lockedBooth = new LockedBoothPanel(this);
+    this.placedPanel = new PlacedPanel(this);
     this.debtSheets = { pawnshop: new PawnshopPanel(this), bank: new BankPanel(this), workyard: new WorkyardPanel(this, new DebtLog(sim)) };
 
     const bus = sim.bus;
@@ -127,14 +136,17 @@ export class Ui implements UiApi, UiCtx {
     bus.on('monsterLeft', (e) => {
       if (this.card.id === e.id) this.card.close();
     });
-    for (const k of ['itemsChanged', 'buildingUpgraded', 'boothUnlocked', 'staffChanged', 'craftDone', 'districtOpened', 'pawned', 'redeemed', 'bankrupt', 'debtCleared', 'debtMatchCalled', 'debtSettled'] as const) bus.on(k, () => this.markDirty());
+    for (const k of ['itemsChanged', 'buildingUpgraded', 'boothUnlocked', 'staffChanged', 'craftDone', 'villageChanged', 'landBought', 'pawned', 'redeemed', 'bankrupt', 'debtCleared', 'debtMatchCalled', 'debtSettled'] as const) bus.on(k, () => this.markDirty());
 
     window.addEventListener('resize', () => {
       this.menu.close();
       this.booth.layout();
     });
     window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') this.closeAll();
+      if (e.key !== 'Escape') return;
+      // 시트·카드가 열려 있으면 그것부터, 아니면 짓기 모드를 끝낸다.
+      if (!this.sheet.isOpen && this.hooks.world.buildState().mode.kind !== 'none') this.hooks.world.cancelBuild();
+      else this.closeAll();
     });
 
     void loadPicIndex().then(() => this.redrawAll());
@@ -151,14 +163,18 @@ export class Ui implements UiApi, UiCtx {
     // 토스트는 HUD·다음 목표 칩 바로 아래에 (칩의 비용 줄을 가리지 않게).
     this.root.style.setProperty('--toast-top', `${Math.round(top + 4)}px`);
     const h = this.root.clientHeight;
-    const bottom = this.card.isOpen ? h - this.card.el.offsetTop + 8 : this.nav.el.offsetHeight;
+    // 짓기 모드 띠가 떠 있으면 그 위까지 (유령·✓/✕가 띠에 가리지 않게).
+    const bottom = this.card.isOpen ? h - this.card.el.offsetTop + 8 : this.buildBar.visible ? h - this.buildBar.el.offsetTop + 6 : this.nav.el.offsetHeight;
     this.hooks.world.setViewInset(top, Math.max(0, bottom));
+    this.buildBar.setBand(top, h - Math.max(0, bottom));
   }
 
   // ── UiApi ──
 
   update(dt: number): void {
     this.hud.update(dt);
+    // 짓기 모드 ✓/✕는 매 프레임 유령을 따라간다.
+    this.buildBar.follow();
     this.acc += dt;
     if (!this.dirty && this.acc < REFRESH_SEC) return;
     this.acc = 0;
@@ -172,6 +188,7 @@ export class Ui implements UiApi, UiCtx {
     }
     this.card.refresh();
     this.booth.refresh();
+    this.buildBar.refresh();
   }
 
   showMonster(id: MonsterId): void {
@@ -223,6 +240,40 @@ export class Ui implements UiApi, UiCtx {
     this.booth.close();
   }
 
+  showPlaced(id: number): void {
+    if (this.sim.village().byId.get(id) === undefined) return;
+    this.placedPanel.id = id;
+    this.openSheet(this.placedPanel, `placed:${id}`, null, true);
+  }
+
+  showLand(chunk: number): void {
+    this.closeAll();
+    this.hooks.world.setBuildMode({ kind: 'land', chunk });
+  }
+
+  onBuildChange(s: BuildState): void {
+    const was = this.buildBar.visible;
+    this.buildBar.show(s);
+    // 띠가 나타나거나 사라지면 지도 카메라 아래 여백을 곧바로 (유령이 띠 뒤로 가지 않게).
+    if (was !== this.buildBar.visible) this.syncInsets();
+    this.markDirty();
+  }
+
+  openBuild(category?: string): void {
+    if (isBuildCat(category)) this.buildPanel.cat = category;
+    const key = 'tab:build';
+    if (this.sheetKey === key && this.sheet.isOpen) {
+      this.buildPanel.refresh(true);
+      return;
+    }
+    this.openSheet(this.buildPanel, key, 'build', false, TAB_TITLE.build);
+  }
+
+  startBuild(mode: BuildMode): void {
+    this.closeAll();
+    this.hooks.world.setBuildMode(mode);
+  }
+
   // ── UiCtx ──
 
   act(r: Result): boolean {
@@ -236,8 +287,13 @@ export class Ui implements UiApi, UiCtx {
   }
 
   openTab(tab: TabId): void {
+    // 다른 탭을 열면 짓기 모드는 끝낸다 (짓기 탭은 이어서 고를 수 있게 그대로).
+    if (tab !== 'build' && this.hooks.world.buildState().mode.kind !== 'none') this.hooks.world.cancelBuild();
     if (tab === 'village') {
+      // 아무것도 열려 있지 않은데 마을 탭을 또 누르면 마을 가운데로 (멀리 굴려 마을을 잃었을 때).
+      const open = this.sheet.isOpen || this.card.isOpen || this.booth.isOpen;
       this.closeAll();
+      if (!open && this.hooks.world.buildState().mode.kind === 'none') this.hooks.world.focusVillage();
       return;
     }
     const key = `tab:${tab}`;

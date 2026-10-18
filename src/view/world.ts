@@ -1,9 +1,14 @@
 // 마을 지도 화면 (VillageView): 카메라·층·입력, sim 이벤트를 연출로 잇는다.
 // 층 (카메라 안, 세계 좌표): 바닥(구운 타일, 경주로 포함) → 바닥 그림(모래판·선착장·흙더미, 단체 놀이 표시) → 그림자(+ 경주장 방석)
 //   → 물체(건물·소품·주민·손님·경주 선수·배, y로 정렬) → 효과(이모트·입자·숫자) → 하늘(연, 모든 것 위) → 디버그.
-// 닫힌 구역의 구름은 물체층 안에서 구역 아래 변의 y로 정렬한다 (buildings.ts): 구역 바로 아래 키 큰 건물이 구름 앞에 선다.
+// 사지 않은 땅의 구름(land.ts)은 물체층 안에서 땅 조각 한 줄(띠)의 아래 변 y로 정렬한다: 구름 바로 아래 키 큰 건물이 구름 앞에 선다.
+// 짓기 모드(땅 사기 빼고)에서는 바닥에 칸 금을 깐다 (ground.ts setGrid: 건물 아래).
 // 조작: 한 손가락 끌기 = 이동(관성), 두 손가락 = 확대·축소(두 손가락 가운데 기준), 휠 = 확대·축소(커서 기준).
-//       짧게 누르기(8px 안, 350ms 안) = 누르기: 손님 → 부스 → 건물 → 단체 놀이 마당(경주로·모래판·밧줄·연…) → 빈 땅.
+//       짧게 누르기(8px 안, 350ms 안) = 누르기: 손님 → 부스 → 건물 → 단체 놀이 마당(경주로·모래판·밧줄·연…) → 장식 → 구름(사지 않은 땅) → 빈 땅.
+// 짓기 모드 (DESIGN 6.1, view/buildMode.ts): 놓기·옮기기 = 유령을 잡고 끌면 유령이 칸에 붙어 따라오고, 유령 밖을 끌면 지도 이동, 누르면 유령이 그리로.
+//       길 깔기·지우기 = 한 손가락이 길을 칠한다. 두 손가락은 언제나 지도 이동·확대. 유령·붓을 끄는 손가락이 화면 가장자리에 닿으면 지도가 그쪽으로 (edgePan).
+//       땅 사기 모드에서는 한 손가락 끌기 = 이동, 누르기 = 조각 고르기. UI가 setBuildMode·confirmBuild·cancelBuild·undoBuild를 부르고 buildAnchor로 ✓/✕를 유령 옆에 띄운다.
+// 배치형 마을: 놓인 것이 바뀌면 (sim.village().stamp.place) 단체 놀이 화면을 새 자리로 다시 만든다 (건물·바닥은 스스로 맞춘다).
 // 단체 놀이 화면(경주장 racetrack.ts, 씨름·오리배·연·줄다리기·보물찾기 view/group/<booth>.ts)은 view/group/registry.ts가 부스마다 만든다.
 // 손님을 그리기 전에 단체 놀이 화면을 먼저 돌린다 (손님 몸을 그 프레임에 맡길 수 있게).
 // 넷째 묶음 (DESIGN 3.7) 연출(빚 게이지·표, 전당포·은행 볼일, 일터 먼지·재료, 다 갚음, 빚 걸기 판)은 debtMap.ts: 손님을 그린 뒤 돌린다.
@@ -13,15 +18,18 @@ import { Container, Graphics, Rectangle, type Application, type FederatedPointer
 import type { BoothId, BuildingId, GroupBoothId } from '../data/defs.ts';
 import { ART_SCALE, artMeta } from './art.ts';
 import { BOOTH_IDS, BOOTHS, GROUP_BOOTHS } from '../data/defs.ts';
-import { BOOTH_SPOTS, PLAZAS, WORLD, type Pt } from '../data/map.ts';
-import type { SimApi } from '../sim/api.ts';
+import { footprint } from '../data/catalog.ts';
+import { CELL, CHUNK, CHUNKS, WORLD, type Pt } from '../data/map.ts';
+import type { Result, SimApi } from '../sim/api.ts';
 import type { ActiveRound, GroupState, MonsterId } from '../sim/types.ts';
 import { BuildingsView } from './buildings.ts';
-import type { VillageViewApi } from './contracts.ts';
-import { buildDebugOverlay } from './debug.ts';
+import { BuildModeView, type BuildMode, type BuildState } from './buildMode.ts';
+import type { Rect, VillageViewApi } from './contracts.ts';
+import { GuestDebug, buildDebugOverlay } from './debug.ts';
 import { DebtMapView } from './debtMap.ts';
 import { FxLayer } from './fx.ts';
 import { GroundView } from './ground.ts';
+import { LandView } from './land.ts';
 import { clamp, follow, makeViewRect, type ViewRect } from './mapUtil.ts';
 import { GROUP_MAP, type GroupMapRenderer } from './group/registry.ts';
 import { MonstersView } from './monsterView.ts';
@@ -56,6 +64,19 @@ const NONE = 0;
 const PENDING = 1;
 const PAN = 2;
 const PINCH = 3;
+/** 짓기 모드: 한 손가락이 유령을 옮기거나 길을 칠한다. */
+const BUILD = 4;
+/** 짓기 모드 가장자리 자동 이동: 보이는 띠 가장자리에서 이만큼(화면 px) 안이면 그쪽으로, 가장 빠를 때 화면 px/초. */
+const EDGE_ZONE = 56;
+const EDGE_SPEED = 820;
+/**
+ * 길 칠하기는 가장자리 옆을 따라 칠하는 일이 잦다: 옆 띠를 좁게 (화면 px), 그 가장자리 쪽으로 움직일 때 (화면 px/초 넘게) 또는
+ * 가장자리에 손가락을 멈춰 두었을 때 (EDGE_DWELL초)만 그쪽으로 가고, 천천히 빨라진다 (EDGE_RAMP초).
+ */
+const EDGE_ZONE_PAINT = 28;
+const EDGE_TOWARD = 60;
+const EDGE_DWELL = 0.25;
+const EDGE_RAMP = 0.5;
 
 interface PointerPos {
   x: number;
@@ -68,6 +89,14 @@ export class VillageView implements VillageViewApi {
   onTapBooth: (booth: BoothId) => void = () => {};
   onTapBuilding: (id: BuildingId) => void = () => {};
   onTapEmpty: () => void = () => {};
+  /** 구름 덮인 땅(사지 않은 조각)을 눌렀을 때 (map.ts chunkIndex). */
+  onTapLand: (chunk: number) => void = () => {};
+  /** 장식을 눌렀을 때 (Placed.id: 옮기기·보관하기). */
+  onTapPlaced: (id: number) => void = () => {};
+  /** 짓기 모드가 바뀌었을 때 (UI의 ✓/✕ 띠). */
+  onBuildChange: (s: BuildState) => void = () => {};
+  /** 짓기 모드 행동이 안 됐을 때 이유 (UI 토스트). */
+  onBuildFail: (reason: string) => void = () => {};
 
   private readonly app: Application;
   private readonly sim: SimApi;
@@ -83,13 +112,24 @@ export class VillageView implements VillageViewApi {
   private readonly skyLayer = new Container();
   private readonly debugLayer = new Container();
   private readonly ground: GroundView;
+  /** 사지 않은 땅의 구름 (land.ts). */
+  private readonly land: LandView;
   private readonly buildings: BuildingsView;
   private readonly monsters: MonstersView;
-  /** 단체 놀이 화면 (부스마다 하나, view/group/registry.ts). */
-  private readonly groups: { readonly booth: GroupBoothId; readonly r: GroupMapRenderer }[];
+  /** 단체 놀이 화면 (부스마다 하나, view/group/registry.ts). 놓인 자리가 바뀌면 새로 만든다. */
+  private groups: { readonly booth: GroupBoothId; readonly r: GroupMapRenderer }[] = [];
+  private readonly groupLayers: { floor: Container; shadows: Container; objects: Container; effects: Container; sky: Container };
+  /** 단체 놀이 화면·디버그를 만든 마을 자리 도장. */
+  private placeStamp = -1;
+  private debugStamp = -1;
+  /** 짓기 모드 (유령·길 칠하기·땅 고르기). */
+  private readonly build: BuildModeView;
+  private readonly buildLayer = new Container();
   private readonly fx: FxLayer;
   private readonly debt: DebtMapView;
   private debugNode: Container | null = null;
+  /** 디버그: 걷는 손님의 자국·남은 길·자리 (매 프레임, debug.ts GuestDebug). */
+  private readonly debugGuests = new GuestDebug();
   private readonly hitRect = new Rectangle(0, 0, 1, 1);
 
   // 카메라: (camX, camY) = 화면 가운데의 세계 좌표.
@@ -113,6 +153,12 @@ export class VillageView implements VillageViewApi {
   private by0 = 0;
   private by1 = 0;
   private readonly view: ViewRect = makeViewRect();
+  /** 카메라가 보는 땅 (가진 땅 둘레 + 구름 한 조각)과 그것을 잰 땅 도장. */
+  private owned = { x0: 0, y0: 0, x1: WORLD.w, y1: WORLD.h };
+  private areaStamp = -1;
+  /** 땅 사기 모드에 들어가기 전 카메라 (끝내면 돌아간다)와 그동안 산 마지막 조각. */
+  private preLand: { x: number; y: number; zoom: number } | null = null;
+  private landBought = -1;
 
   // 입력
   private inputOn = true;
@@ -124,6 +170,12 @@ export class VillageView implements VillageViewApi {
   private lastX = 0;
   private lastY = 0;
   private lastMoveT = 0;
+  /** 짓기 손가락의 빠르기 (화면 px/초, 가장자리 자동 이동이 본다)·가장자리에 멈춰 둔 초·자동 이동이 이어진 초. */
+  private buildVX = 0;
+  private buildVY = 0;
+  private buildMoveT = 0;
+  private edgeDwell = 0;
+  private edgeRun = 0;
   private pinchD0 = 1;
   private pinchZ0 = 1;
   private pinchWX = 0;
@@ -141,7 +193,7 @@ export class VillageView implements VillageViewApi {
   constructor(app: Application, sim: SimApi) {
     this.app = app;
     this.sim = sim;
-    const start = PLAZAS[0]?.c ?? { x: WORLD.w / 2, y: WORLD.h / 2 };
+    const start = this.homePoint();
     this.camX = start.x;
     this.camY = start.y;
 
@@ -149,24 +201,30 @@ export class VillageView implements VillageViewApi {
     this.ground = new GroundView(renderer);
     this.fx = new FxLayer(renderer);
     this.objectLayer.sortableChildren = true;
-    for (const l of [this.floorLayer, this.shadowLayer, this.objectLayer, this.effectLayer, this.emoteLayer, this.skyLayer, this.debugLayer]) {
+    for (const l of [this.floorLayer, this.shadowLayer, this.objectLayer, this.effectLayer, this.emoteLayer, this.skyLayer, this.debugLayer, this.buildLayer]) {
       l.eventMode = 'none';
       l.interactiveChildren = false;
     }
     this.debtLayer.eventMode = 'none';
     this.debtLayer.interactiveChildren = false;
     this.effectLayer.addChild(this.emoteLayer, this.debtLayer, this.fx.node);
-    this.camera.addChild(this.ground.node, this.floorLayer, this.shadowLayer, this.objectLayer, this.effectLayer, this.skyLayer, this.debugLayer);
+    this.camera.addChild(this.ground.node, this.floorLayer, this.shadowLayer, this.objectLayer, this.effectLayer, this.skyLayer, this.buildLayer, this.debugLayer);
     this.camera.eventMode = 'none';
     this.camera.interactiveChildren = false;
     this.root.addChild(this.backdrop, this.camera);
     this.root.label = 'VillageView';
 
     this.buildings = new BuildingsView(sim, { objects: this.objectLayer, floor: this.floorLayer }, this.fx, renderer);
+    this.land = new LandView(sim, this.objectLayer, renderer, this.fx);
     this.monsters = new MonstersView(sim, { objects: this.objectLayer, shadows: this.shadowLayer, effects: this.emoteLayer }, this.fx);
-    const layers = { floor: this.floorLayer, shadows: this.shadowLayer, objects: this.objectLayer, effects: this.effectLayer, sky: this.skyLayer };
-    this.groups = GROUP_BOOTHS.map((booth) => ({ booth, r: GROUP_MAP[booth]({ sim, booth, layers, fx: this.fx, buildings: this.buildings, monsters: this.monsters }) }));
+    this.groupLayers = { floor: this.floorLayer, shadows: this.shadowLayer, objects: this.objectLayer, effects: this.effectLayer, sky: this.skyLayer };
+    this.syncGroups();
     this.debt = new DebtMapView({ sim, layer: this.debtLayer, fx: this.fx, buildings: this.buildings, monsters: this.monsters });
+    this.build = new BuildModeView(sim, this.buildings, this.fx);
+    this.build.onChange = (st) => this.onBuildChange(st);
+    this.build.onFail = (r) => this.onBuildFail(r);
+    this.build.onPreview = (add, erase) => this.ground.previewRoads(add, erase);
+    this.buildLayer.addChild(this.build.node);
 
     // 입력: 화면 전체를 받는 root 하나. 지도 안 물체는 직접 재서 고른다 (Pixi 히트 테스트를 물체마다 돌리지 않게).
     this.root.eventMode = 'static';
@@ -193,6 +251,7 @@ export class VillageView implements VillageViewApi {
       this.ground.invalidate();
       this.fx.tex.reset();
       this.buildings.restoreTextures();
+      this.land.restoreTextures();
       for (const g of this.groups) g.r.restoreTextures?.();
     };
     app.canvas.addEventListener('webglcontextrestored', this.onRestored);
@@ -222,7 +281,10 @@ export class VillageView implements VillageViewApi {
       }),
       bus.on('buildingUpgraded', () => this.buildings.refresh()),
       bus.on('boothUnlocked', () => this.buildings.refresh()),
-      bus.on('districtOpened', () => this.buildings.refresh()),
+      bus.on('villageChanged', () => this.buildings.refresh()),
+      bus.on('landBought', (e) => {
+        this.landBought = e.chunk;
+      }),
       bus.on('staffChanged', () => this.buildings.refresh()),
     );
 
@@ -232,6 +294,27 @@ export class VillageView implements VillageViewApi {
     this.frameOpenBooths();
     this.clampHard();
     this.applyCamera();
+  }
+
+  /** 마을 가운데 (분수, 없으면 마을 입구 조금 위, 그것도 없으면 세계 가운데). */
+  private homePoint(): Pt {
+    const v = this.sim.village();
+    if (v.placed('fountain') !== undefined) return v.art('fountain');
+    if (v.placed('gate') !== undefined) {
+      const g = v.gateSpawn();
+      return { x: g.x, y: g.y - 900 };
+    }
+    return { x: WORLD.w / 2, y: WORLD.h / 2 };
+  }
+
+  /** 놓인 자리가 바뀌었으면 단체 놀이 화면을 새로 만든다 (모양을 만들 때 읽는다). */
+  private syncGroups(): void {
+    const v = this.sim.village();
+    if (v.stamp.place === this.placeStamp) return;
+    this.placeStamp = v.stamp.place;
+    for (const g of this.groups) g.r.destroy();
+    const layers = this.groupLayers;
+    this.groups = GROUP_BOOTHS.map((booth) => ({ booth, r: GROUP_MAP[booth]({ sim: this.sim, booth, layers, fx: this.fx, buildings: this.buildings, monsters: this.monsters }) }));
   }
 
   /** 처음 카메라: 열린 놀이부스가 HUD와 아래 탭 사이에 다 들어오게 (넓은 화면은 ZOOM_START까지만 가까이). */
@@ -246,9 +329,10 @@ export class VillageView implements VillageViewApi {
       y0 = Math.min(y0, y);
       y1 = Math.max(y1, y);
     };
+    const v = this.sim.village();
     for (const b of BOOTH_IDS) {
-      if (!this.sim.state.booths[b].unlocked) continue;
-      const s = BOOTH_SPOTS[b];
+      if (!this.sim.state.booths[b].unlocked || v.placed(b) === undefined) continue;
+      const s = v.booth(b);
       // 부스 그림 크기 (그림이 없으면 대략).
       const m = artMeta('map', BOOTHS[b].building);
       const hw = m !== undefined ? (m.trim.w * ART_SCALE.booth) / 2 : 210;
@@ -263,7 +347,7 @@ export class VillageView implements VillageViewApi {
       add(s.pot.x + 35, s.pot.y);
     }
     if (!Number.isFinite(x0)) {
-      const c = PLAZAS[0]?.c ?? { x: WORLD.w / 2, y: WORLD.h / 2 };
+      const c = this.homePoint();
       add(c.x - 500, c.y - 400);
       add(c.x + 500, c.y + 400);
     }
@@ -286,15 +370,25 @@ export class VillageView implements VillageViewApi {
     this.time += dt;
     const scr = this.app.screen;
     if (scr.width !== this.sw || scr.height !== this.sh) this.resize(scr.width, scr.height);
+    this.edgePan(dt);
     this.updateCamera(dt);
     const dpr = this.app.renderer.resolution;
-    this.ground.update(this.view, this.zoom * dpr);
+    const village = this.sim.village();
+    const bk = this.build.current.kind;
+    this.ground.setGrid(bk !== 'none' && bk !== 'land');
+    this.land.setSeeThrough(bk !== 'none' && bk !== 'land');
+    this.ground.update(this.view, this.zoom * dpr, village);
     this.buildings.update(dt, this.view);
+    this.land.update(dt, this.view);
+    this.syncGroups();
+    if (this.debugNode !== null && this.debugNode.visible && this.debugStamp !== village.stamp.place + village.stamp.road * 1e6) this.setDebug(true);
     // 단체 놀이 화면 먼저 (그 프레임의 손님 몸을 맡긴다), 그다음 손님.
     for (const g of this.groups) g.r.update(dt, this.view);
     this.monsters.update(dt, this.time, this.view, this.zoom);
     this.debt.update(dt, this.view, this.zoom);
+    if (this.debugGuests.g.visible && this.debugGuests.g.parent !== null) this.debugGuests.update(this.sim.state, dt, this.zoom);
     this.fx.update(dt, this.zoom);
+    this.build.update(dt, this.zoom);
   }
 
   resize(w: number, h: number): void {
@@ -336,11 +430,119 @@ export class VillageView implements VillageViewApi {
   }
 
   setDebug(on: boolean): void {
-    if (on && this.debugNode === null) {
-      this.debugNode = buildDebugOverlay();
+    const v = this.sim.village();
+    const stamp = v.stamp.place + v.stamp.road * 1e6;
+    if (on && (this.debugNode === null || this.debugStamp !== stamp)) {
+      this.debugNode?.destroy({ children: true });
+      this.debugNode = buildDebugOverlay(v);
+      this.debugStamp = stamp;
       this.debugLayer.addChild(this.debugNode);
     }
     if (this.debugNode !== null) this.debugNode.visible = on;
+    if (this.debugGuests.g.parent === null) this.debugLayer.addChild(this.debugGuests.g);
+    this.debugGuests.g.visible = on;
+    if (!on) this.debugGuests.clear();
+  }
+
+  // ── 짓기 모드 (view/buildMode.ts) ──
+
+  /** 짓기 모드를 바꾼다 (place·move면 유령을 화면 가운데에, 옮기기는 지금 자리에). */
+  setBuildMode(mode: BuildMode): void {
+    // 유령은 지금 보는 곳 가운데 (카메라가 움직이는 중이면 가는 곳) 둘레의 빈 자리에서 시작하고, 카메라가 그리로 간다.
+    const at = this.focusing ? { x: this.focusX, y: this.focusY } : { x: this.camX, y: this.camY - this.bandShift(this.zoom) };
+    const wasLand = this.build.current.kind === 'land';
+    if (mode.kind === 'land' && !wasLand) {
+      this.preLand = this.focusing ? { x: this.focusX, y: this.focusY, zoom: this.focusZoom } : { x: at.x, y: at.y, zoom: this.zoom };
+      this.landBought = -1;
+    }
+    this.build.set(mode, at);
+    // 땅 사기에서 다른 모드로: 놓기·옮기기는 유령으로, 길은 그 자리 그대로 (끝내기는 cancelBuild가 카메라를 돌린다).
+    if (wasLand && mode.kind !== 'land' && mode.kind !== 'none') this.preLand = null;
+    if (wasLand && mode.kind === 'none') this.leaveLand();
+    const s = this.build.state();
+    const band = Math.max(120, this.sh - this.insetTop - this.insetBottom);
+    // 땅 사기: 조각이 둘레까지 보이게 멀리서 (고른 조각이 있으면 그리로).
+    if (mode.kind === 'land') {
+      const S = CHUNK * CELL;
+      const c = s.chunk;
+      if (c >= 0) this.focusOn({ x: ((c % CHUNKS.w) + 0.5) * S, y: (Math.floor(c / CHUNKS.w) + 0.5) * S }, Math.min(this.zoom, this.sw / (S * 2.4), band / (S * 2.4)));
+      else {
+        // 고른 조각이 없으면 살 수 있는 조각이 다 보이게.
+        let x0 = Infinity;
+        let y0 = Infinity;
+        let x1 = -Infinity;
+        let y1 = -Infinity;
+        for (let i = 0; i < CHUNKS.w * CHUNKS.h; i++) {
+          const info = this.sim.chunk(i);
+          if (info.owned || !info.adjacent) continue;
+          x0 = Math.min(x0, info.cx * S);
+          y0 = Math.min(y0, info.cy * S);
+          x1 = Math.max(x1, (info.cx + 1) * S);
+          y1 = Math.max(y1, (info.cy + 1) * S);
+        }
+        if (Number.isFinite(x0)) this.focusOn({ x: (x0 + x1) / 2, y: (y0 + y1) / 2 }, clamp(Math.min(this.sw / (x1 - x0), band / (y1 - y0)), this.minZoom(), Math.min(this.zoom, 0.3)));
+        else this.focusOn(at, Math.min(this.zoom, this.sw / (S * 2.4)));
+      }
+    }
+    // 길: 칸이 손가락만큼 크게 (칸 약 40px).
+    if ((mode.kind === 'road' || mode.kind === 'erase') && this.zoom < 0.42) this.focusOn(at, 0.42);
+    if ((mode.kind === 'place' || mode.kind === 'move') && s.cell !== null) {
+      const key = mode.kind === 'place' ? mode.key : this.sim.village().byId.get(mode.id)?.key;
+      if (key !== undefined) {
+        // 발자국이 화면에 다 들어오고 (큰 시설), 작은 것은 너무 작지 않게.
+        const fp = footprint(key);
+        const hi = Math.min(ZOOM_MAX, (this.sw * 0.82) / (fp.w * CELL), (band * 0.62) / ((fp.h + 2) * CELL));
+        const z = clamp(this.zoom, Math.min(0.42, hi), hi);
+        this.focusOn({ x: (s.cell.x + fp.w / 2) * CELL, y: (s.cell.y + fp.h / 2) * CELL }, z);
+      }
+    }
+  }
+
+  /** 짓기 모드 유령이 차지한 칸 (땅 사기는 고른 조각)의 화면 사각형 (CSS px). 없으면 null. */
+  buildAnchor(): Rect | null {
+    const b = this.build.anchor();
+    if (b === null) return null;
+    const a = this.worldToScreen({ x: b.x0, y: b.y0 });
+    const c = this.worldToScreen({ x: b.x1, y: b.y1 });
+    return { x: a.x, y: a.y, w: c.x - a.x, h: c.y - a.y };
+  }
+
+  /** 길 깔기·지우기의 마지막 붓질을 되돌린다. */
+  undoBuild(): Result {
+    return this.build.undo();
+  }
+
+  /** 지금 짓기 모드 (모드·유령 칸과 검사·고른 땅). */
+  buildState(): BuildState {
+    return this.build.state();
+  }
+
+  /** ✓ (놓기·옮기기·땅 사기). */
+  confirmBuild(): Result {
+    return this.build.confirm();
+  }
+
+  /** ✕ (짓기 모드 끝). 땅 사기를 끝내면 카메라를 돌린다. */
+  cancelBuild(): void {
+    const wasLand = this.build.current.kind === 'land';
+    this.build.cancel();
+    if (wasLand) this.leaveLand();
+  }
+
+  /** 땅 사기 모드를 끝냈다: 산 땅이 있으면 그 조각을 마을 눈높이로, 아니면 들어가기 전 카메라로. */
+  private leaveLand(): void {
+    const S = CHUNK * CELL;
+    const c = this.landBought;
+    const pre = this.preLand;
+    this.preLand = null;
+    this.landBought = -1;
+    if (c >= 0) this.focusOn({ x: ((c % CHUNKS.w) + 0.5) * S, y: (Math.floor(c / CHUNKS.w) + 0.5) * S }, Math.max(this.minZoom(), 0.35));
+    else if (pre !== null) this.focusOn({ x: pre.x, y: pre.y }, pre.zoom);
+  }
+
+  /** 마을 가운데 (분수)로 카메라를 돌린다 (이미 보고 있는 마을 탭을 또 눌렀을 때). */
+  focusVillage(): void {
+    this.focusOn(this.homePoint(), Math.max(this.zoom, 0.5));
   }
 
   setInputEnabled(on: boolean): void {
@@ -380,9 +582,11 @@ export class VillageView implements VillageViewApi {
     this.app.canvas.removeEventListener('webglcontextrestored', this.onRestored);
     this.root.removeAllListeners();
     for (const g of this.groups) g.r.destroy();
+    this.build.destroy();
     this.debt.destroy();
     this.monsters.destroy();
     this.buildings.destroy();
+    this.land.destroy();
     this.ground.destroy();
     this.fx.destroy();
     this.root.destroy({ children: true });
@@ -398,7 +602,7 @@ export class VillageView implements VillageViewApi {
   private groupFinished(booth: GroupBoothId, g: GroupState): void {
     this.payRows.clear();
     const outs = g.play?.outcomes ?? [];
-    const seats = BOOTH_SPOTS[booth].seats;
+    const seats = this.sim.village().booth(booth).seats;
     const at = (seat: number): Pt => seats[seat] ?? { x: 0, y: 0 };
     const won = g.participants.filter((_, i) => (outs[i]?.multiplier ?? 0) > 0).map((e) => ({ id: e.monster, p: at(e.seat), row: 0 }));
     won.sort((a, b) => a.p.x - b.p.x);
@@ -449,16 +653,50 @@ export class VillageView implements VillageViewApi {
     return clamp(this.sw / WORLD.w, ZOOM_FLOOR, ZOOM_MIN);
   }
 
-  /** 확대 z에서 카메라 가운데가 갈 수 있는 범위 (세계가 화면보다 작으면 가운데에 고정). */
+  /**
+   * 카메라가 보는 땅 (세계 px): 땅 사기 모드는 지도 전체, 그 밖에는 가진 땅 둘레에 구름 한 조각 (멀리 굴려 구름 속에서 마을을 잃지 않게).
+   * 가진 땅이 바뀔 때만 다시 잰다.
+   */
+  private area(): { x0: number; y0: number; x1: number; y1: number } {
+    if (this.build.current.kind === 'land') return { x0: 0, y0: 0, x1: WORLD.w, y1: WORLD.h };
+    const v = this.sim.village();
+    if (v.stamp.land !== this.areaStamp) {
+      this.areaStamp = v.stamp.land;
+      const S = CHUNK * CELL;
+      let x0 = Infinity;
+      let y0 = Infinity;
+      let x1 = -Infinity;
+      let y1 = -Infinity;
+      for (const ci of v.state.chunks) {
+        const cx = (ci % CHUNKS.w) * S;
+        const cy = Math.floor(ci / CHUNKS.w) * S;
+        x0 = Math.min(x0, cx);
+        y0 = Math.min(y0, cy);
+        x1 = Math.max(x1, cx + S);
+        y1 = Math.max(y1, cy + S);
+      }
+      this.owned = Number.isFinite(x0)
+        ? { x0: Math.max(0, x0 - S), y0: Math.max(0, y0 - S), x1: Math.min(WORLD.w, x1 + S), y1: Math.min(WORLD.h, y1 + S) }
+        : { x0: 0, y0: 0, x1: WORLD.w, y1: WORLD.h };
+    }
+    return this.owned;
+  }
+
+  /**
+   * 확대 z에서 카메라 가운데가 갈 수 있는 범위 (area 안). 땅이 화면보다 작으면 (멀리 줄였을 때) 땅이 화면 밖으로 나가지 않는 만큼만 움직인다:
+   * 마을(처음 땅은 지도 아래 가운데)을 가운데에 둘 수 있게 (땅 사기 모드가 조각을 다 담으려고 멀리 줄일 때).
+   */
   private computeBounds(z: number): void {
+    const a = this.area();
     const hw = this.sw / (2 * z);
     const hh = this.sh / (2 * z);
-    this.bx0 = hw - EDGE_PAD;
-    this.bx1 = WORLD.w - hw + EDGE_PAD;
-    if (this.bx0 > this.bx1) this.bx0 = this.bx1 = WORLD.w / 2;
-    this.by0 = hh - EDGE_PAD;
-    this.by1 = WORLD.h - hh + EDGE_PAD;
-    if (this.by0 > this.by1) this.by0 = this.by1 = WORLD.h / 2;
+    this.bx0 = a.x0 + hw - EDGE_PAD;
+    this.bx1 = a.x1 - hw + EDGE_PAD;
+    if (this.bx0 > this.bx1) [this.bx0, this.bx1] = [this.bx1, this.bx0];
+    // 위·아래 UI(HUD·탭·짓기 띠)에 덮인 만큼 더 굴려 지도 끝 줄도 보이는 띠 안으로 올 수 있게.
+    this.by0 = a.y0 + hh - EDGE_PAD - this.insetTop / z;
+    this.by1 = a.y1 - hh + EDGE_PAD + this.insetBottom / z;
+    if (this.by0 > this.by1) [this.by0, this.by1] = [this.by1, this.by0];
   }
 
   private clampHard(): void {
@@ -565,6 +803,49 @@ export class VillageView implements VillageViewApi {
     this.camY = wy - (sy - this.sh / 2) / this.zoom;
   }
 
+  /**
+   * 짓기 모드: 유령·붓을 끄는 손가락이 보이는 띠 가장자리 가까이 있으면 지도가 그쪽으로 (유령·붓도 손가락을 따라).
+   * 길 칠하기는 옆 띠가 좁고, 그 가장자리 쪽으로 움직이거나 멈춰 둘 때만 (화면 옆을 따라 곧게 칠하는 길이 비뚤어지지 않게).
+   */
+  private edgePan(dt: number): void {
+    if (this.mode !== BUILD || this.pointers.size !== 1) {
+      this.edgeDwell = this.edgeRun = 0;
+      return;
+    }
+    const [p] = this.firstTwo();
+    // 잡자마자 가장자리에 있으면 움직이지 않는다 (조금이라도 끌고 나서부터).
+    if (p === undefined || Math.hypot(p.x - this.downX, p.y - this.downY) < TAP_SLOP * 2) return;
+    const paint = this.build.paintMode;
+    const top = this.insetTop;
+    const bottom = this.sh - this.insetBottom;
+    const push = (v: number, lo: number, hi: number, zone: number): number => (v < lo + zone ? -Math.min(1, (lo + zone - v) / zone) : v > hi - zone ? Math.min(1, (v - (hi - zone)) / zone) : 0);
+    let ex = push(p.x, 0, this.sw, paint ? EDGE_ZONE_PAINT : EDGE_ZONE);
+    let ey = push(p.y, top, bottom, EDGE_ZONE);
+    if (paint) {
+      // 손가락 빠르기 (손을 멈추면 move가 오지 않으니 오래된 값은 0으로).
+      const still = performance.now() - this.buildMoveT > 90;
+      const vx = still ? 0 : this.buildVX;
+      const vy = still ? 0 : this.buildVY;
+      const inZone = ex !== 0 || ey !== 0;
+      this.edgeDwell = inZone && Math.hypot(vx, vy) < 40 ? this.edgeDwell + dt : 0;
+      const dwell = this.edgeDwell >= EDGE_DWELL;
+      if (!dwell && !(ex !== 0 && vx * ex > EDGE_TOWARD)) ex = 0;
+      if (!dwell && !(ey !== 0 && vy * ey > EDGE_TOWARD)) ey = 0;
+    }
+    if (ex === 0 && ey === 0) {
+      this.edgeRun = 0;
+      return;
+    }
+    this.edgeRun += dt;
+    const ramp = paint ? Math.min(1, 0.25 + this.edgeRun / EDGE_RAMP) : 1;
+    const sp = (EDGE_SPEED * ramp * Math.min(dt, 0.05)) / this.zoom;
+    this.computeBounds(this.zoom);
+    this.camX = clamp(this.camX + ex * Math.abs(ex) * sp, this.bx0, this.bx1);
+    this.camY = clamp(this.camY + ey * Math.abs(ey) * sp, this.by0, this.by1);
+    const w = this.screenToWorld(p.x, p.y, this.tmp);
+    this.build.move(w.x, w.y);
+  }
+
   // ── 입력 ──
 
   private readonly onDown = (e: FederatedPointerEvent): void => {
@@ -579,7 +860,19 @@ export class VillageView implements VillageViewApi {
       this.downY = this.lastY = y;
       this.downT = this.lastMoveT = performance.now();
       this.velX = this.velY = 0;
+      // 짓기 모드: 길은 한 손가락이 칠하고, 놓기·옮기기는 유령을 잡았을 때만 끈다 (밖은 지도 이동·누르기).
+      const w = this.screenToWorld(x, y, this.tmp);
+      if (this.build.paintMode || (this.build.ghostMode && this.build.hitGhost(w.x, w.y))) {
+        this.mode = BUILD;
+        this.followId = null;
+        this.focusing = false;
+        this.buildVX = this.buildVY = 0;
+        this.buildMoveT = this.downT;
+        this.edgeDwell = this.edgeRun = 0;
+        this.build.down(w.x, w.y);
+      }
     } else if (this.pointers.size === 2) {
+      if (this.mode === BUILD) this.build.cancelStroke();
       this.startPinch();
     }
   };
@@ -622,6 +915,22 @@ export class VillageView implements VillageViewApi {
       this.camY = this.pinchWY - (my - this.sh / 2) / this.zoom;
       return;
     }
+    if (this.mode === BUILD) {
+      // 손가락 빠르기 (가장자리 자동 이동이 본다: 부드럽게).
+      const now = performance.now();
+      const dts = (now - this.buildMoveT) / 1000;
+      if (dts > 0.001 && dts < 0.2) {
+        const k = Math.min(1, dts / 0.06);
+        this.buildVX += ((p.x - this.lastX) / dts - this.buildVX) * k;
+        this.buildVY += ((p.y - this.lastY) / dts - this.buildVY) * k;
+      } else this.buildVX = this.buildVY = 0;
+      this.buildMoveT = now;
+      this.lastX = p.x;
+      this.lastY = p.y;
+      const w = this.screenToWorld(p.x, p.y, this.tmp);
+      this.build.move(w.x, w.y);
+      return;
+    }
     if (this.mode === PENDING) {
       if (Math.hypot(p.x - this.downX, p.y - this.downY) <= TAP_SLOP) return;
       // 끌기 시작: 따라가기·맞추기를 멈추고 손가락을 따른다.
@@ -654,6 +963,13 @@ export class VillageView implements VillageViewApi {
     const y = e.global.y;
     this.pointers.delete(e.pointerId);
     const now = performance.now();
+    if (this.mode === BUILD) {
+      if (this.pointers.size === 0) {
+        this.build.up();
+        this.mode = NONE;
+      }
+      return;
+    }
     if (this.mode === PENDING && this.pointers.size === 0) {
       this.mode = NONE;
       if (now - this.downT <= TAP_MS && Math.hypot(x - this.downX, y - this.downY) <= TAP_SLOP) this.tap(x, y);
@@ -700,6 +1016,7 @@ export class VillageView implements VillageViewApi {
 
   private dropPointer(id: number): void {
     if (!this.pointers.delete(id)) return;
+    if (this.mode === BUILD) this.build.cancelStroke();
     if (this.pointers.size === 0) this.mode = NONE;
     else if (this.pointers.size === 1 && this.mode === PINCH) {
       const [a] = this.firstTwo();
@@ -712,11 +1029,12 @@ export class VillageView implements VillageViewApi {
     }
   }
 
-  /** 누르기: 손님(앞쪽) → 부스 → 건물 → 단체 놀이 마당 → 빈 땅. 구름 덮인 곳은 빈 땅. */
+  /** 누르기: 손님(앞쪽) → 부스 → 건물 → 단체 놀이 마당 → 장식 → 구름 덮인 땅 → 빈 땅. 땅 사기 모드에서는 조각 고르기. */
   private tap(sx: number, sy: number): void {
     const w = this.screenToWorld(sx, sy, this.tmp);
     const wx = w.x;
     const wy = w.y;
+    if (this.build.tap(wx, wy)) return;
     const m = this.monsters.hitTest(wx, wy);
     if (m !== null) {
       this.onTapMonster(m);
@@ -736,6 +1054,18 @@ export class VillageView implements VillageViewApi {
           this.onTapBooth(g.booth);
           return;
         }
+      }
+      // 장식 (옮기기·보관하기).
+      const p = this.buildings.placedAt(wx, wy);
+      if (p !== undefined) {
+        this.onTapPlaced(p.id);
+        return;
+      }
+    } else {
+      const c = this.buildings.chunkAt(wx, wy);
+      if (c >= 0) {
+        this.onTapLand(c);
+        return;
       }
     }
     this.onTapEmpty();

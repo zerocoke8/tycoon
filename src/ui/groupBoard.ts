@@ -7,9 +7,10 @@
 
 import { boothDef, isGroupBooth, SIDES, SPECIES, TUG, type GroupBoothId, type SpeciesId } from '../data/defs.ts';
 import type { SimApi } from '../sim/api.ts';
+import { boothIdleReason } from '../sim/booths.ts';
 import { livePlay } from '../sim/group/index.ts';
 import { josa } from '../sim/text.ts';
-import type { DebtChange, GroupEntry, GroupPlay, GroupRole, GroupState, Monster, MonsterId, Pose } from '../sim/types.ts';
+import type { DebtChange, GroupCancelReason, GroupEntry, GroupPlay, GroupRole, GroupState, Monster, MonsterId, Pose } from '../sim/types.ts';
 import { btn, fmt, h, setText } from './dom.ts';
 import {
   chestPlace,
@@ -72,7 +73,7 @@ export interface PlayResult {
 /** 부스마다 지난 판과 접힌 판 (sim 이벤트를 듣는다). */
 export class GroupResults {
   private readonly plays = new Map<GroupBoothId, PlayResult>();
-  private readonly cancels = new Map<GroupBoothId, { at: number; reason: 'closed' | 'timeout' }>();
+  private readonly cancels = new Map<GroupBoothId, { at: number; reason: GroupCancelReason }>();
 
   constructor(sim: SimApi) {
     const bus = sim.bus;
@@ -124,7 +125,7 @@ export class GroupResults {
   }
 
   /** 지난 판보다 나중에 접힌 판 (없으면 null). */
-  cancelAfterLast(b: GroupBoothId): { at: number; reason: 'closed' | 'timeout' } | null {
+  cancelAfterLast(b: GroupBoothId): { at: number; reason: GroupCancelReason } | null {
     const c = this.cancels.get(b);
     if (c === undefined) return null;
     const p = this.plays.get(b);
@@ -220,7 +221,8 @@ export class GroupSection {
     const sub = h('small');
     const watch = btn('sub small mpv-watch', [icon('pin'), '지도'], () => {
       this.ctx.closeAll();
-      this.ctx.hooks.world.focusOn(groupWatchBox(b).c, groupWatchZoom(b, window.innerWidth, window.innerHeight));
+      const v = this.ctx.sim.village();
+      this.ctx.hooks.world.focusOn(groupWatchBox(v, b).c, groupWatchZoom(v, b, window.innerWidth, window.innerHeight));
     });
     watch.setAttribute('aria-label', '지도에서 구경하기');
     const el = h('div', `mpv-race-st ${this.g?.phase ?? 'idle'}`, flag, h('div', 'mpv-grow', title, sub), watch);
@@ -228,7 +230,7 @@ export class GroupSection {
       const cur = this.sim.state.booths[b];
       el.classList.toggle('debt', cur.group?.mode === 'debt');
       const missing = boothDef(b).roles.filter((r, i) => r.optional !== true && (cur.staff[i] ?? null) === null).map((r) => r.name);
-      const t = phaseText(b, cur.group, this.sim.boothOpen(b), missing);
+      const t = phaseText(b, cur.group, this.sim.boothOpen(b), missing, boothIdleReason(this.sim.state, b));
       setText(flag, t.flag);
       setText(title, t.title);
       setText(sub, t.sub);
@@ -538,7 +540,18 @@ export class GroupSection {
     const cancel = this.results.cancelAfterLast(b);
     const R = roundWord(b);
     if (cancel !== null && this.sim.state.time - cancel.at < 90) {
-      const why = cancel.reason === 'timeout' ? (b === 'ssireum' ? '상대 선수가 오지 않아' : b === 'tug' ? '두 편이 차지 않아' : '손님이 모이지 않아') : '진행자 자리가 비어';
+      const why =
+        cancel.reason === 'timeout'
+          ? b === 'ssireum'
+            ? '상대 선수가 오지 않아'
+            : b === 'tug'
+              ? '두 편이 차지 않아'
+              : '손님이 모이지 않아'
+          : cancel.reason === 'road'
+            ? '입구 앞 길이 끊겨'
+            : cancel.reason === 'stored'
+              ? '보관함에 넣어서'
+              : '진행자 자리가 비어';
       return h('div', 'mpv-last cancel', h('div', 'head', h('span', 'mpv-tag', `지난 ${R}`), h('span', 'mpv-grow', `${why} ${josa(R, '을', '를')} 접었어요 (건 코인은 돌려줬어요)`)));
     }
     if (r === undefined) return null;

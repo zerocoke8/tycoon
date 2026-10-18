@@ -1,0 +1,441 @@
+/* 짓기 모드·짓기 탭 (DESIGN 6.1 배치형 마을): ui/buildBar.ts가 불러온다. 토큰은 ui.css :root. */
+
+/* ── 짓기 모드 (ui/buildBar.ts, DESIGN 6.1): 아래 띠 + 유령 옆 ✓/✕ ── */
+
+.mpv-buildbar {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: calc(var(--nav-h) + var(--sab) + 8px);
+  z-index: 39;
+  max-width: 520px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 14px;
+  border-radius: 18px;
+  border: var(--dd-stroke-fat) solid var(--dd-ink);
+  background: var(--dd-paper);
+  box-shadow: var(--dd-pop);
+  pointer-events: auto;
+}
+.mpv-buildbar[hidden],
+.mpv-ui.sheet-open .mpv-buildbar,
+.mpv-ui.booth-open .mpv-buildbar {
+  display: none;
+}
+/* 길: 도구 줄이 아래로 (길|지우개 · 되돌리기 · 끝) */
+.mpv-buildbar.road {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px;
+}
+.mpv-buildbar.road .mpv-bb-head {
+  padding: 0 6px;
+}
+.mpv-bb-head {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.mpv-bb-title {
+  font-family: var(--dd-font-round);
+  font-size: 16px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mpv-bb-note {
+  margin-top: 1px;
+  font-size: 12.5px;
+  line-height: 1.3;
+  color: var(--dd-ink-soft);
+}
+.mpv-buildbar[data-state='need'] .mpv-bb-note {
+  color: var(--dd-wood-2);
+  font-family: var(--dd-font-round);
+}
+.mpv-bb-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mpv-bb-tools:empty {
+  display: none;
+}
+.mpv-bb-tools .mpv-btn.small {
+  padding: 0 10px;
+  gap: 4px;
+}
+.mpv-bb-tools .mpv-btn .mpv-svg {
+  width: 20px;
+  height: 20px;
+}
+.mpv-buildbar.road .mpv-bb-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+/* 좁은 폰 (360px 등): 되돌리기는 그림만 (길|지우개 글이 잘리지 않게). */
+@media (max-width: 380px) {
+  .mpv-bb-undo .lbl {
+    display: none;
+  }
+  .mpv-buildbar.road .mpv-bb-undo {
+    width: 44px;
+    padding: 0;
+    justify-content: center;
+  }
+  .mpv-bb-tools .mpv-btn.small {
+    padding: 0 8px;
+  }
+}
+.mpv-bb-seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 14px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-2);
+}
+.mpv-btn.tool {
+  min-height: 44px;
+  min-width: 0;
+  padding: 0 6px;
+  gap: 3px;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 15px;
+}
+.mpv-btn.tool.on {
+  background: var(--dd-sky);
+  border-color: var(--dd-ink);
+  box-shadow: var(--dd-pop-s);
+}
+.mpv-btn.tool:active {
+  transform: translateY(1px);
+}
+
+/* 유령 옆 ✓/✕ (화면 왼쪽 위 기준, transform으로 매 프레임 자리) */
+.mpv-ghostctl {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 19;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  will-change: transform;
+  transition: opacity 0.12s;
+}
+.mpv-ghostctl[hidden],
+.mpv-ui.sheet-open .mpv-ghostctl,
+.mpv-ui.booth-open .mpv-ghostctl {
+  display: none;
+}
+.mpv-ghostctl.dragging {
+  opacity: 0.35;
+}
+.mpv-ghostctl.dragging .mpv-gc-btns {
+  pointer-events: none;
+}
+.mpv-gc-msg {
+  max-width: min(260px, calc(100vw - 32px));
+  padding: 4px 10px;
+  border-radius: 12px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  box-shadow: var(--dd-pop-s);
+  font-family: var(--dd-font-round);
+  font-size: 13.5px;
+  line-height: 1.25;
+  text-align: center;
+}
+.mpv-ghostctl[data-state='bad'] .mpv-gc-msg {
+  background: #fbe0d8;
+  color: #9e3422;
+}
+.mpv-ghostctl[data-state='need'] .mpv-gc-msg {
+  background: var(--dd-butter);
+}
+.mpv-gc-btns {
+  display: flex;
+  gap: 14px;
+  pointer-events: auto;
+}
+.mpv-gc-btns .mpv-btn {
+  min-width: 52px;
+  min-height: 52px;
+  padding: 0;
+  border-radius: 999px;
+  font-size: 17px;
+}
+.mpv-gc-btns .mpv-btn .mpv-svg {
+  width: 26px;
+  height: 26px;
+}
+.mpv-btn.mpv-gc-no {
+  width: 52px;
+  background: var(--dd-paper-3);
+}
+.mpv-btn.mpv-gc-no .mpv-svg {
+  width: 22px;
+  height: 22px;
+}
+.mpv-btn.mpv-gc-ok {
+  background: var(--dd-green);
+}
+.mpv-btn.mpv-gc-ok.wide {
+  padding: 0 16px 0 10px;
+  gap: 4px;
+}
+.mpv-btn.mpv-gc-ok .mpv-pic {
+  width: 22px;
+  height: 22px;
+}
+.mpv-btn.mpv-gc-ok.off {
+  background: var(--dd-paper-2);
+  color: var(--dd-ink-soft);
+}
+.mpv-btn.mpv-gc-ok.off .mpv-svg {
+  opacity: 0.45;
+}
+.mpv-ghostctl.shake .mpv-gc-btns {
+  animation: mpv-gc-shake 0.36s ease-out;
+}
+@keyframes mpv-gc-shake {
+  0%,
+  100% {
+    transform: none;
+  }
+  20% {
+    transform: translateX(-8px);
+  }
+  45% {
+    transform: translateX(7px);
+  }
+  70% {
+    transform: translateX(-4px);
+  }
+}
+/* 짓기 모드 동안 다음 목표 칩은 숨긴다 (지도를 넓게) */
+.mpv-ui.build-mode .mpv-goal {
+  display: none;
+}
+
+/* ── 짓기 탭 목록 (ui/panels/build.ts) ── */
+
+.mpv-cats {
+  position: sticky;
+  /* 시트 몸통 위 여백(6px)까지 덮어 굴린 카드가 비치지 않게 */
+  top: -6px;
+  z-index: 2;
+  display: grid;
+  /* 글이 긴 묶음(놀이부스·가게·건물)에 조금 더 (길·땅도 44px는 넘는다) */
+  grid-template-columns: 1.12fr 1.02fr 1.22fr 0.88fr 0.84fr 0.84fr;
+  gap: 3px;
+  margin: -6px -12px 4px;
+  padding: 8px 8px;
+  background: var(--dd-paper);
+  border-bottom: 2px dashed rgba(59, 42, 32, 0.18);
+}
+.mpv-cat {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-height: 52px;
+  min-width: 0;
+  padding: 4px 0 3px;
+  border-radius: 12px;
+  border: 2px solid transparent;
+  background: transparent;
+  font-family: var(--dd-font-round);
+  font-size: 12px;
+  line-height: 1.1;
+  letter-spacing: -0.3px;
+  color: var(--dd-wood-2);
+  pointer-events: auto;
+}
+.mpv-cat .mpv-svg {
+  width: 26px;
+  height: 26px;
+}
+.mpv-cat .nm {
+  white-space: nowrap;
+}
+@media (max-width: 374px) {
+  .mpv-cat {
+    font-size: 11px;
+    letter-spacing: -0.6px;
+  }
+  .mpv-cat .mpv-svg {
+    width: 24px;
+    height: 24px;
+  }
+}
+.mpv-cat.on {
+  background: var(--dd-butter);
+  border-color: var(--dd-ink);
+  box-shadow: var(--dd-pop-s);
+  color: var(--dd-ink);
+}
+.mpv-cat:active {
+  transform: translateY(1px);
+}
+.mpv-cat-badge {
+  position: absolute;
+  top: 1px;
+  right: 3px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  border: 1.5px solid var(--dd-ink);
+  background: var(--dd-sky);
+  font-size: 11px;
+  line-height: 15px;
+  text-align: center;
+  color: var(--dd-ink);
+}
+.mpv-cat-badge.warn {
+  background: var(--dd-red);
+  color: #fff;
+}
+.mpv-hint {
+  margin: -2px 4px 8px;
+  font-size: 12.5px;
+  color: var(--dd-ink-soft);
+}
+.mpv-fp {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+.mpv-fp .mpv-tag {
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(59, 42, 32, 0.22);
+}
+.mpv-lv.off {
+  background: var(--dd-paper-2);
+  color: var(--dd-ink-soft);
+}
+.mpv-lv.store {
+  background: var(--dd-sky);
+}
+.mpv-card.stored {
+  border-color: #3d7fb0;
+  box-shadow: 0 2px 0 #3d7fb0;
+  background: #eef7fd;
+}
+.mpv-place {
+  margin-top: 6px;
+}
+.mpv-place > .mpv-warn {
+  margin-bottom: -2px;
+}
+.mpv-place > .mpv-act {
+  margin-top: 6px;
+}
+.mpv-place:first-child {
+  margin-top: 0;
+}
+.mpv-store-note {
+  margin-bottom: -2px;
+  font-family: var(--dd-font-round);
+  font-size: 14px;
+  color: #2f6a96;
+}
+.mpv-act.wrap {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mpv-act .mpv-btn .mpv-svg {
+  width: 20px;
+  height: 20px;
+}
+.mpv-act.wrap .mpv-btn.small {
+  gap: 4px;
+  padding: 0 10px;
+}
+.mpv-btn.grow {
+  flex: 1;
+}
+.mpv-tool-card .mpv-desc {
+  margin-top: 0;
+}
+.mpv-tool-card .mpv-title.sm {
+  margin-top: 6px;
+}
+.mpv-tool-card .mpv-lock {
+  align-self: flex-start;
+}
+.mpv-empty.ok {
+  color: #3d7a3a;
+  border-color: rgba(61, 122, 58, 0.35);
+}
+.mpv-card.mpv-cut {
+  align-items: center;
+}
+.mpv-decor {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.mpv-decor-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 4px;
+  border-radius: var(--dd-round);
+  border: var(--dd-stroke) solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  box-shadow: var(--dd-pop-s);
+  pointer-events: auto;
+}
+.mpv-decor-tile:active {
+  transform: translateY(2px);
+  box-shadow: none;
+}
+.mpv-decor-tile .mpv-thumb {
+  width: 58px;
+  height: 58px;
+}
+.mpv-decor-tile .nm {
+  font-family: var(--dd-font-round);
+  font-size: 14.5px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.mpv-decor-tile .sub {
+  font-size: 11.5px;
+  color: #3d7a3a;
+}
+.mpv-decor-tile .mpv-cost {
+  justify-content: center;
+}
+.mpv-decor-tile.short {
+  background: var(--dd-paper-2);
+}
+.mpv-chip.stored {
+  background: var(--dd-sky);
+}
+.mpv-decor-tile .sub .n {
+  color: var(--dd-ink-soft);
+}

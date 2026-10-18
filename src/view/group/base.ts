@@ -10,17 +10,18 @@
 //     objects = y로 정렬되는 물체 (zIndex = 발 y: 밧줄·배), effects = 이모트·입자, sky = 모든 것 위 (연과 연줄).
 //   - 부스 그림·진행자·항아리·props(깃발·흙더미)는 buildings.ts가 그린다. 진행자를 통통: this.ctx.buildings.hostHop(부스, 자리, 세기).
 //     효과: this.ctx.fx (puff·confetti·sparkles·floatText·coinArc …, view/fx.ts).
-//   - 닫힌 부스(잠김)·닫힌 구역에서는 draw를 부르지 않고 own()으로 만든 그릇을 숨긴다 (onShown).
+//   - 닫힌 부스(잠김)·지도에 놓이지 않은 부스(보관함)에서는 draw를 부르지 않고 own()으로 만든 그릇을 숨긴다 (onShown).
+//   - 배치형 마을 (DESIGN 6.1): 모양(this.spot, 놀이마다의 마당)은 만들 때의 세계 좌표 (sim.village()). 건물을 옮기면 world.ts가 화면을 새로 만든다.
 
 import type { Container } from 'pixi.js';
 import type { GroupBoothId } from '../../data/defs.ts';
-import { BOOTH_SPOTS, type BoothSpot, type DistrictId } from '../../data/map.ts';
+import type { BoothSpot } from '../../data/catalog.ts';
 import type { SimApi } from '../../sim/api.ts';
 import { groupGame } from '../../sim/group/index.ts';
 import type { BoothState, GroupEntry, GroupPlay, GroupState, Monster, MonsterId } from '../../sim/types.ts';
 import type { BuildingsView } from '../buildings.ts';
 import type { FxLayer } from '../fx.ts';
-import { clamp, districtAt, follow, type ViewRect } from '../mapUtil.ts';
+import { clamp, follow, type ViewRect } from '../mapUtil.ts';
 import type { MonsterPuppet, MonstersView, MonsterView } from '../monsterView.ts';
 
 export interface GroupMapLayers {
@@ -59,8 +60,9 @@ export abstract class GroupMapBase implements GroupMapRenderer {
   protected readonly ctx: GroupMapCtx;
   protected readonly booth: GroupBoothId;
   protected readonly spot: BoothSpot;
-  private readonly district: DistrictId | null;
-  /** 부스가 열렸고 구역도 열려 보이는 중. */
+  /** 지도에 놓였나 (만들 때). */
+  protected readonly placed: boolean;
+  /** 부스가 열렸고 지도에 놓여 보이는 중. */
   protected shown = false;
   /** 화면 시계 (판 시작 뒤 초, 판이 없으면 0). */
   protected clock = 0;
@@ -75,8 +77,9 @@ export abstract class GroupMapBase implements GroupMapRenderer {
   constructor(ctx: GroupMapCtx) {
     this.ctx = ctx;
     this.booth = ctx.booth;
-    this.spot = BOOTH_SPOTS[ctx.booth];
-    this.district = districtAt(this.spot.base.x, this.spot.base.y);
+    const v = ctx.sim.village();
+    this.spot = v.booth(ctx.booth);
+    this.placed = v.placed(ctx.booth) !== undefined;
   }
 
   protected get sim(): SimApi {
@@ -126,8 +129,7 @@ export abstract class GroupMapBase implements GroupMapRenderer {
 
   update(dt: number, view: ViewRect): void {
     this.time += dt;
-    const st = this.ctx.sim.state;
-    const show = this.bs.unlocked && (this.district === null || st.districts.includes(this.district));
+    const show = this.bs.unlocked && this.placed;
     if (show !== this.shown) {
       this.shown = show;
       this.onShown(show);

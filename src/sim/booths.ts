@@ -1,12 +1,15 @@
-// 놀이부스: 레벨 값, 진행자 자리, 열림 여부, 자리·줄 위치, 손님의 부스 고르기.
+// 놀이부스: 레벨 값, 진행자 자리, 열림 여부, 자리·줄 위치 (배치형 마을: 놓인 자리의 세계 좌표, sim/village.ts), 손님의 부스 고르기.
 
 import type { Rng } from '../core/rng.ts';
 import { BOOTHS, BOOTH_IDS, boothDef, DEBT_MATCH, isGroupBooth, SPECIES, type BoothId, type BoothRole, type StaffStats } from '../data/defs.ts';
-import { BOOTH_SPOTS, type Pt } from '../data/map.ts';
+import { BOOTH_LAYOUT } from '../data/catalog.ts';
+import type { Pt } from '../data/map.ts';
 import { byLevel, goodDef, type GoodDef } from './economy.ts';
 import { groupGame } from './group/index.ts';
+import { clampInto, walkCells } from './path.ts';
 import { TUNE } from './tuning.ts';
 import type { BoothState, GameState, Monster, Staff } from './types.ts';
+import { boothSpot, isConnected, isPlaced } from './village.ts';
 
 export function boothFee(state: GameState, b: BoothId): number {
   return byLevel(BOOTHS[b].fee, state.booths[b].level);
@@ -19,7 +22,7 @@ export function boothMatFee(b: BoothId): number {
 
 /** 자리 수 (지도에 놓인 자리 수를 넘지 않는다). */
 export function boothSeats(state: GameState, b: BoothId): number {
-  return Math.max(1, Math.min(byLevel(BOOTHS[b].seats, state.booths[b].level), BOOTH_SPOTS[b].seats.length));
+  return Math.max(1, Math.min(byLevel(BOOTHS[b].seats, state.booths[b].level), BOOTH_LAYOUT[b].spot.seats.length));
 }
 
 export function boothRoundSec(state: GameState, b: BoothId): number {
@@ -64,9 +67,17 @@ export function boothStaffed(state: GameState, b: BoothId): boolean {
   return boothRoles(b).every((r, i) => r.optional === true || (bs.staff[i] ?? null) !== null);
 }
 
-/** 열림 = 해금됐고 꼭 있어야 하는 진행자 자리가 다 찼다. */
+/** 열림 = 해금됐고, 꼭 있어야 하는 진행자 자리가 다 찼고, 지도에 놓여 입구가 길로 마을 입구와 이어졌다 (배치형 마을). */
 export function boothOpen(state: GameState, b: BoothId): boolean {
-  return state.booths[b].unlocked && boothStaffed(state, b);
+  return state.booths[b].unlocked && boothStaffed(state, b) && isConnected(state, b);
+}
+
+/** 열린 부스가 손님을 받지 못하는 까닭 (받으면 null): 보관함 → 길 → 진행자. 해금 전이면 null (잠긴 까닭은 따로). */
+export function boothIdleReason(state: GameState, b: BoothId): 'stored' | 'road' | 'staff' | null {
+  if (!state.booths[b].unlocked) return null;
+  if (!isPlaced(state, b)) return 'stored';
+  if (!isConnected(state, b)) return 'road';
+  return boothStaffed(state, b) ? null : 'staff';
 }
 
 /** 걸어 둔 응원 도구 (없으면 null). */
@@ -84,30 +95,33 @@ export function fitSeats(state: GameState, b: BoothId): void {
   while (bs.staff.length < roles) bs.staff.push(null);
 }
 
-export function seatPt(b: BoothId, i: number): Pt {
-  const s = BOOTH_SPOTS[b].seats;
-  return s[i] ?? s[0] ?? BOOTH_SPOTS[b].base;
+/** 자리 i (세계 좌표, 놓인 자리). */
+export function seatPt(state: GameState, b: BoothId, i: number): Pt {
+  const spot = boothSpot(state, b);
+  const s = spot.seats;
+  return s[i] ?? s[0] ?? spot.base;
 }
 
-/** 진행자 자리 role이 서는 점 (지도에 없으면 0번 자리). */
-export function hostPt(b: BoothId, role: number): Pt {
-  const h = BOOTH_SPOTS[b].hosts;
-  return h[role] ?? h[0] ?? BOOTH_SPOTS[b].base;
+/** 진행자 자리 role이 서는 점 (없으면 0번 자리). */
+export function hostPt(state: GameState, b: BoothId, role: number): Pt {
+  const spot = boothSpot(state, b);
+  const h = spot.hosts;
+  return h[role] ?? h[0] ?? spot.base;
 }
 
-/** 줄 i번째 자리. 지도에 놓인 줄보다 길면 마지막 두 점의 방향으로 늘인다. */
-export function queuePt(b: BoothId, i: number): Pt {
-  const q = BOOTH_SPOTS[b].queue;
+/** 줄 i번째 자리. 정해진 줄보다 길면 마지막 두 점의 방향으로 늘인다. */
+export function queuePt(state: GameState, b: BoothId, i: number): Pt {
+  const q = boothSpot(state, b).queue;
   const p = q[i];
   if (p !== undefined) return p;
-  const last = q[q.length - 1] ?? seatPt(b, 0);
-  const prev = q[q.length - 2] ?? seatPt(b, 0);
+  const last = q[q.length - 1] ?? seatPt(state, b, 0);
+  const prev = q[q.length - 2] ?? seatPt(state, b, 0);
   const k = i - (q.length - 1);
-  return { x: last.x + (last.x - prev.x) * k, y: last.y + (last.y - prev.y) * k };
+  return clampInto(state, b, { x: last.x + (last.x - prev.x) * k, y: last.y + (last.y - prev.y) * k });
 }
 
 export function queueCap(b: BoothId): number {
-  return Math.max(1, BOOTH_SPOTS[b].queue.length);
+  return Math.max(1, BOOTH_LAYOUT[b].spot.queue.length);
 }
 
 /** 한판에 드는 최소 코인 (참가비 + 건 코인 1). 재료 참가비 부스는 따로 (canPlay). */
@@ -165,6 +179,9 @@ export function chooseBooth(state: GameState, rng: Rng, m: Monster, avoid: Booth
     let w = fav.includes(b) ? TUNE.favoriteWeight : 1;
     w *= Math.max(0.2, 1 + (boothStat(state, b, 'welcome', TUNE.emptyWelcome) - 3) * TUNE.welcomePerPoint);
     w /= 1 + state.booths[b].queue.length * TUNE.queuePenalty;
+    // 가까운 부스를 더 (배치형 마을: 마을 끝에서 끝까지 걷는 데 한판보다 오래 걸린다). 단체 놀이는 덜 (큰 시설은 마을 가장자리에 놓이고, 여럿이 모여야 재미있다).
+    const d = walkCells(state, m.pos, b);
+    if (d > 0) w /= 1 + d / (TUNE.boothNearCells * (isGroupBooth(b) ? TUNE.groupNearMult : 1));
     // 단체 놀이: 모이는 중인 판은 손님을 더 끈다 (여럿이 같이 보고 싶다). 출발 조건이 아직 안 맞으면 (밀어내기 상대가 없음) 더, 많아야 groupPullMax배.
     const g = state.booths[b].group;
     if (g !== null && g.phase === 'gathering' && isGroupBooth(b)) {

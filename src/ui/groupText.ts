@@ -2,7 +2,9 @@
 // 부스 패널의 상태 줄·고른 것 판·참가자 결과·지난 판, 손님 카드, 다음 목표 칩이 같이 쓴다.
 
 import { BOAT, DIG, GROUP_RULES, KITE, RACE, SIDES, TUG, type GroupBoothId, type OutcomeTier } from '../data/defs.ts';
-import { BOAT_COURSE, BOOTH_SPOTS, DIG_FIELD, KITE_FIELD, RACE_TRACK, SSIREUM_RING, TUG_FIELD, type Pt } from '../data/map.ts';
+import { DIG_GEO } from '../data/catalog.ts';
+import type { Pt } from '../data/map.ts';
+import type { Village } from '../sim/village.ts';
 import { groupGame, raceOf, trackAt } from '../sim/group/index.ts';
 import { racePlace, raceStandings } from '../sim/race.ts';
 import { josa } from '../sim/text.ts';
@@ -21,7 +23,7 @@ const RACE_PICKS: readonly PickInfo[] = RACE.racers.map((r) => ({ name: r.name, 
 const BOAT_PICKS: readonly PickInfo[] = BOAT.boats.map((r) => ({ name: r.name, color: hex(r.flag), art: { group: 'racers', key: r.key } }));
 const SIDE_PICKS: readonly PickInfo[] = SIDES.map((s) => ({ name: s.name, color: hex(s.color), art: null }));
 const KITE_PICKS: readonly PickInfo[] = KITE.kites.map((k) => ({ name: k.name, color: hex(k.color), art: { group: 'objects', key: k.key } }));
-const DIG_PICKS: readonly PickInfo[] = DIG_FIELD.spots.map((_, i) => ({ name: `${i + 1}번`, color: '#c9995f', art: { group: 'map', key: 'dirt_mound' } }));
+const DIG_PICKS: readonly PickInfo[] = DIG_GEO.spots.map((_, i) => ({ name: `${i + 1}번`, color: '#c9995f', art: { group: 'map', key: 'dirt_mound' } }));
 
 /** 그 놀이에서 고를 수 있는 것 (pick 순서): 선수 넷·배 넷·홍청·연 넷·판 자리 여섯. */
 export function groupPicks(b: GroupBoothId): readonly PickInfo[] {
@@ -86,14 +88,14 @@ export const DIG_FIND_INFO: Readonly<Record<DigFind, { readonly name: string; re
   pebble: { name: '조약돌', group: 'objects', key: 'pebble', good: false },
 };
 
-/** 상자가 묻혔던 곳 글: '2번 땅' / '3·6번 땅 사이' / '1·2·4·5번 땅 가운데' (DIG_FIELD.chests 뒤 셋은 판 자리 사이). */
+/** 상자가 묻혔던 곳 글: '2번 땅' / '3·6번 땅 사이' / '1·2·4·5번 땅 가운데' (DIG_GEO.chests 뒤 셋은 판 자리 사이). */
 export function chestPlace(c: number): string {
-  const p = DIG_FIELD.chests[c];
+  const p = DIG_GEO.chests[c];
   if (p === undefined) return '어딘가';
-  const spot = DIG_FIELD.spots.findIndex((s) => s.x === p.x && s.y === p.y);
+  const spot = DIG_GEO.spots.findIndex((s) => s.x === p.x && s.y === p.y);
   if (spot >= 0) return `${spot + 1}번 땅`;
   // 가장 가까운 판 자리들 (판 자리 사이의 상자는 둘레 넷이 같은 거리: 다 말한다)
-  const ds = DIG_FIELD.spots.map((s, i) => ({ i, d: Math.hypot(s.x - p.x, s.y - p.y) }));
+  const ds = DIG_GEO.spots.map((s, i) => ({ i, d: Math.hypot(s.x - p.x, s.y - p.y) }));
   const min = Math.min(...ds.map((x) => x.d));
   const near = ds.filter((x) => x.d <= min + 1).map((x) => x.i + 1);
   return near.length > 2 ? `${near.join('·')}번 땅 가운데` : `${near.join('·')}번 땅 사이`;
@@ -175,8 +177,8 @@ export interface PhaseText {
  * 지금 판의 상태 줄. open = 부스가 손님을 받는 중 (꼭 있어야 하는 진행자 자리가 다 참), missing = 빈 꼭 필요한 자리 이름.
  * 빚 걸기 판(넷째 묶음, GroupState.mode 'debt')은 깃발이 '빚 걸기'이고 모이는 동안 불린 채무자를 기다린다. 다음 판이 예약됐으면 작은 글에 알린다.
  */
-export function phaseText(b: GroupBoothId, g: GroupState | null, open: boolean, missing: readonly string[]): PhaseText {
-  const t = basePhaseText(b, g, open, missing);
+export function phaseText(b: GroupBoothId, g: GroupState | null, open: boolean, missing: readonly string[], idle: 'stored' | 'road' | 'staff' | null = null): PhaseText {
+  const t = basePhaseText(b, g, open, missing, idle);
   if (g === null || !open) return t;
   if (g.mode === 'debt') {
     const ph = g.phase;
@@ -198,15 +200,19 @@ export function phaseText(b: GroupBoothId, g: GroupState | null, open: boolean, 
   return t;
 }
 
-function basePhaseText(b: GroupBoothId, g: GroupState | null, open: boolean, missing: readonly string[]): PhaseText {
+function basePhaseText(b: GroupBoothId, g: GroupState | null, open: boolean, missing: readonly string[], idle: 'stored' | 'road' | 'staff' | null): PhaseText {
   const ph = g?.phase ?? 'idle';
   const es = g?.participants ?? [];
   const n = es.length;
   const cd = Math.max(0, Math.ceil(g?.countdown ?? 0));
   const R = roundWord(b);
   const S = startWord(b);
-  // 꼭 있어야 하는 진행자가 빠졌으면 (진행 중인 판은 끝까지 간다) 손님을 받지 않는다.
-  if (!open && (ph === 'idle' || ph === 'gathering')) return { flag: '쉬어요', title: '쉬는 중', sub: `${missing.join('·')} 자리를 채우면 손님이 와요` };
+  // 닫혔으면 (진행 중인 판은 끝까지 간다) 손님을 받지 않는다: 보관함 → 입구 앞 길 → 꼭 있어야 하는 진행자.
+  if (!open && (ph === 'idle' || ph === 'gathering')) {
+    if (idle === 'stored') return { flag: '쉬어요', title: '보관함에 있어요', sub: '지도에 놓으면 손님이 와요' };
+    if (idle === 'road' || missing.length === 0) return { flag: '쉬어요', title: '길이 이어지지 않았어요', sub: '입구에서 마을 입구까지 길을 이어 주세요' };
+    return { flag: '쉬어요', title: '쉬는 중', sub: `${missing.join('·')} 자리를 채우면 손님이 와요` };
+  }
   const play = g === null ? null : g.play;
   switch (ph) {
     case 'idle':
@@ -460,36 +466,45 @@ export function raceOrderAt(g: GroupState | null): RacerIndex[] | null {
 
 // ── 지도에서 보기 ──
 
-/** 놀이가 보이는 지도 사각형 (세계 좌표): 가운데와 폭·높이. 연은 하늘까지. */
-export function groupWatchBox(b: GroupBoothId): { c: Pt; w: number; h: number } {
+/** 놀이가 보이는 지도 사각형 (세계 좌표, 놓인 자리 v = sim.village()): 가운데와 폭·높이. 연은 하늘까지. */
+export function groupWatchBox(v: Village, b: GroupBoothId): { c: Pt; w: number; h: number } {
   switch (b) {
-    case 'race':
-      return { c: { x: RACE_TRACK.center.x, y: RACE_TRACK.center.y + 60 }, w: RACE_TRACK.rx * 2 + 380, h: RACE_TRACK.ry * 2 + 520 };
-    case 'boat': {
-      const dock = BOOTH_SPOTS.boat.base;
-      const top = BOAT_COURSE.center.y - BOAT_COURSE.ry - 160;
-      return { c: { x: BOAT_COURSE.center.x, y: (top + dock.y + 60) / 2 }, w: BOAT_COURSE.rx * 2 + 420, h: dock.y + 60 - top };
+    case 'race': {
+      const T = v.race();
+      return { c: { x: T.center.x, y: T.center.y + 60 }, w: T.rx * 2 + 380, h: T.ry * 2 + 520 };
     }
-    case 'ssireum':
-      return { c: { x: SSIREUM_RING.center.x, y: SSIREUM_RING.center.y - 30 }, w: SSIREUM_RING.rx * 2 + 520, h: SSIREUM_RING.ry * 2 + 420 };
+    case 'boat': {
+      const dock = v.booth('boat').base;
+      const C = v.boat().course;
+      const top = C.center.y - C.ry - 160;
+      return { c: { x: C.center.x, y: (top + dock.y + 60) / 2 }, w: C.rx * 2 + 420, h: dock.y + 60 - top };
+    }
+    case 'ssireum': {
+      const R = v.ring();
+      return { c: { x: R.center.x, y: R.center.y - 30 }, w: R.rx * 2 + 520, h: R.ry * 2 + 420 };
+    }
     case 'kite': {
-      const s = KITE_FIELD.sky;
-      const bottom = KITE_FIELD.center.y + 200;
+      const K = v.kite();
+      const s = K.sky;
+      const bottom = K.center.y + 200;
       return { c: { x: s.x + s.w / 2, y: (s.y + bottom) / 2 }, w: s.w + 160, h: bottom - s.y };
     }
     case 'tug': {
-      const [a, z] = TUG_FIELD.flags;
+      const T = v.tug();
+      const [a, z] = T.flags;
       const w = a !== undefined && z !== undefined ? Math.abs(z.x - a.x) + 260 : 1300;
-      return { c: { x: TUG_FIELD.center.x, y: TUG_FIELD.center.y - 40 }, w, h: 560 };
+      return { c: { x: T.center.x, y: T.center.y - 40 }, w, h: 560 };
     }
-    case 'dig':
-      return { c: { x: DIG_FIELD.center.x, y: DIG_FIELD.center.y - 60 }, w: 860, h: 760 };
+    case 'dig': {
+      const D = v.dig();
+      return { c: { x: D.center.x, y: D.center.y - 60 }, w: 860, h: 760 };
+    }
   }
 }
 
 /** 화면 크기(CSS px)에 그 놀이가 다 들어오는 확대 (위·아래 UI를 뺀 높이). */
-export function groupWatchZoom(b: GroupBoothId, vw: number, vh: number): number {
-  const box = groupWatchBox(b);
+export function groupWatchZoom(v: Village, b: GroupBoothId, vw: number, vh: number): number {
+  const box = groupWatchBox(v, b);
   const z = Math.min(vw / box.w, Math.max(200, vh - 230) / box.h);
   return Math.max(0.12, Math.min(0.9, z));
 }

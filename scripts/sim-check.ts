@@ -5,11 +5,14 @@
 //   node scripts/sim-check.ts --auto --seeds 8   여러 시드의 이정표(처음 산 때) 표
 //   --minutes N, --seed N, --verbose (토스트 찍기), --detail (--seeds와 같이: 다음 회관 비용 항목마다 처음 모인 때),
 //   --first N (--seeds와 같이: 시드 N부터, 여러 프로세스로 나눠 돌릴 때)
-// 모든 모드에서 매 틱 불변식을 검사한다 (NaN, 음수 코인, 멈춘 손님, 자리·줄 어긋남). 어긋나면 바로 멈춘다.
+// 모든 모드에서 매 틱 불변식을 검사한다 (NaN, 음수 코인, 멈춘 손님, 자리·줄 어긋남, 놓인 것 겹침). 어긋나면 바로 멈춘다.
+// 배치형 마을 (DESIGN 6.1): sim-check의 Sim은 연 부스·지은 건물을 바로 자동 배치한다 (Sim.autoPlaceDefault). 욕심쟁이 촌장은 자리가 없으면 땅을 산다.
+// selftest의 시험 마을(testSim)은 땅을 다 가진 채 시작한다 (땅·배치 시험은 villageTests에서 따로).
 
 import { Rng } from '../src/core/rng.ts';
-import { ACCESSORIES, ACCESSORY_SPAWN, BANK, LABOR, PAWN, VAULT, type AccessoryId, BOOTHS, BOOTH_IDS, boothDef, BUILDINGS, DEBT_MATCH, DIG, GOODS, GROUP_BOOTHS, GROUP_RULES, HOST_PRESETS, isGroupBooth, KITE, MOOD, ODDS, RACE, RECIPES, SIM, SPECIES_IDS, SSIREUM, TUG, WHEEL, type BoothId, type BuildingId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type SpeciesId, type TraitId } from '../src/data/defs.ts';
-import { devOpenAll } from '../src/sim/dev.ts';
+import { catalogKind, footprint, type CatalogKey } from '../src/data/catalog.ts';
+import { ACCESSORIES, ACCESSORY_SPAWN, BANK, LABOR, PAWN, VAULT, type AccessoryId, BOOTHS, BOOTH_IDS, boothDef, BUILDINGS, DEBT_MATCH, DECOR, DECOR_IDS, DIG, GOODS, GROUP_BOOTHS, GROUP_RULES, HOST_PRESETS, isGroupBooth, KITE, MOOD, ODDS, RACE, RECIPES, SIM, SPECIES_IDS, SSIREUM, TUG, WHEEL, type BoothId, type BuildingId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type SpeciesId, type TraitId } from '../src/data/defs.ts';
+import { devAllLand, devOpenAll, devSeedDebtors } from '../src/sim/dev.ts';
 import { decideOutcome } from '../src/sim/games.ts';
 import { boothStat, minPlayCost } from '../src/sim/booths.ts';
 import { digNear, groupGame, raceOf, sideSign, trackAt, tugLineup } from '../src/sim/group/index.ts';
@@ -19,13 +22,17 @@ import { normalizeState } from '../src/sim/save.ts';
 import { bankLoan, bankOpenFor, canLend, laborRate, loanDebt, pairDebtors, pawnPrice, redeemCost, rollAccessories, wantMore, workSlots } from '../src/sim/debt.ts';
 import { createMonster } from '../src/sim/monsters.ts';
 import { presetPost } from '../src/sim/staff.ts';
-import { BOOTH_SPOTS, DISTRICTS, NODES, type DistrictId, type NodeId } from '../src/data/map.ts';
-import { crossesBooth, distancesFrom } from '../src/sim/path.ts';
+import { CELL, CHUNK, CHUNKS, GRID, LAND_START, cellAt, cellIndex } from '../src/data/map.ts';
+import { onRoad, route } from '../src/sim/path.ts';
+import { boothSpot, checkPlace, chunkInfo, findSpot, roadTo, startChunks, villageOf } from '../src/sim/village.ts';
 import { clearSave, loadGame, newGame, saveGame, Sim } from '../src/sim/sim.ts';
 import { TUNE } from '../src/sim/tuning.ts';
 import type { GameState, GroupEntry, GroupEvent, GroupKey, GroupPlay, GroupState, Monster, MonsterId, MonsterPhase, RacerIndex, RoundOutcome, SimEvents } from '../src/sim/types.ts';
 
-declare const process: { argv: string[]; exitCode?: number };
+declare const process: { argv: string[]; exitCode?: number; getBuiltinModule(id: 'node:fs'): { readFileSync(p: URL, enc: 'utf8'): string } };
+
+// 연 부스·지은 건물은 바로 알맞은 자리에 길까지 이어 놓는다 (게임에서는 보관함 → 촌장이 놓는다).
+Sim.autoPlaceDefault = true;
 
 const args = process.argv.slice(2);
 const flag = (name: string): boolean => args.includes(`--${name}`);
@@ -38,13 +45,8 @@ const verbose = flag('verbose');
 
 // ── 불변식 ────────────────────────────────────────────────────────────
 
-/** 길 그래프에서 가장 먼 두 노드 사이를 가장 느린 손님이 걷는 초 (모든 구역이 열렸을 때). 지도가 커지면 같이 늘어난다. */
-const WALK_MAX_SEC = (() => {
-  const all = Object.keys(DISTRICTS) as DistrictId[];
-  let far = 0;
-  for (const id of Object.keys(NODES) as NodeId[]) for (const v of distancesFrom(id, all).values()) far = Math.max(far, v);
-  return far / Math.min(SIM.walkSpeed, SIM.floatSpeed);
-})();
+/** 지도 끝에서 끝까지 길 칸으로 꺾어 걷는 거리 (가로 + 세로 칸)를 가장 느린 손님이 걷는 초. 지도가 커지면 같이 늘어난다. */
+const WALK_MAX_SEC = ((GRID.w + GRID.h) * CELL) / Math.min(SIM.walkSpeed, SIM.floatSpeed);
 /** 이 phase 말고는 한 phase에 STUCK_SEC 넘게 머물면 멈춘 것 (가장 먼 길을 걷는 시간보다 넉넉히). */
 const LONG_OK: ReadonlySet<MonsterPhase> = new Set(['queued', 'resting', 'working', 'waitWork']);
 const STUCK_SEC = Math.max(120, WALK_MAX_SEC * 1.25 + 20);
@@ -199,6 +201,123 @@ function checkInvariants(sim: Sim): void {
     spots.add(k);
   }
   for (const [k, v] of Object.entries(st.pawnCollection)) if (!(v !== undefined && v >= 1 && Number.isInteger(v))) fail(`전당포 컬렉션 ${k} = ${v}`, st);
+  checkVillage(sim);
+}
+
+/** 배치형 마을 불변식: 놓인 것끼리 겹치지 않고 가진 땅 안, 부스·건물은 하나씩, 놓인 부스·건물은 가진 것, 보관함 부스의 진행자는 쉰다, 길은 빈 가진 땅. */
+function checkVillage(sim: Sim): void {
+  const st = sim.state;
+  const v = villageOf(st);
+  if (v.stamp.place === lastPlaceStamp.get(st.village) && v.stamp.road === lastRoadStamp.get(st.village)) return;
+  lastPlaceStamp.set(st.village, v.stamp.place);
+  lastRoadStamp.set(st.village, v.stamp.road);
+  const occ = new Map<number, number>();
+  const keys = new Set<CatalogKey>();
+  for (const p of st.village.placed) {
+    const fp = footprint(p.key);
+    if (catalogKind(p.key) !== 'decor') {
+      if (keys.has(p.key)) fail(`${p.key}가 둘 놓였음`, st);
+      keys.add(p.key);
+      // 부스는 시험이 해금을 껐다 켜기도 해서 (손님을 한 부스로 모으기) 건물만 본다.
+      if (catalogKind(p.key) === 'building' && sim.owned(p.key) < 1) fail(`가지지 않은 ${p.key}가 놓였음`, st);
+    }
+    for (let y = p.y; y < p.y + fp.h; y++) {
+      for (let x = p.x; x < p.x + fp.w; x++) {
+        const i = cellIndex(x, y);
+        if (i < 0 || !v.isOwned(x, y)) fail(`${p.key}(${p.x},${p.y})가 가진 땅 밖`, st);
+        const o = occ.get(i);
+        if (o !== undefined) fail(`${p.key}와 놓인 것 ${o}가 칸 (${x},${y})에서 겹침`, st);
+        occ.set(i, p.id);
+        if (v.road[i] === 1) fail(`${p.key} 발자국 칸 (${x},${y})에 길`, st);
+      }
+    }
+  }
+  for (const i of st.village.roads) if (v.owned[i] !== 1) fail(`길 칸 ${i}가 가진 땅 밖`, st);
+  for (const b of BOOTH_IDS) {
+    if (v.placed(b) !== undefined) continue;
+    if (st.booths[b].staff.some((x) => x !== null)) fail(`보관함(안 놓인) 부스 ${b}에 진행자`, st);
+  }
+}
+const lastPlaceStamp = new WeakMap<object, number>();
+const lastRoadStamp = new WeakMap<object, number>();
+
+/**
+ * key를 놓을 땅 (욕심쟁이 촌장): 지금 살 수 있는 조각 가운데 사면 key가 들어가는 가장 싼 조각, 그런 조각이 없으면
+ * 가진 땅에 가장 많이 둘러싸인 조각 (빈 땅이 한 덩어리로 커지게, 같으면 싼 것). 없으면 null.
+ */
+function landFor(sim: Sim, key: CatalogKey): { index: number; price: number } | null {
+  const st = sim.state;
+  const cands = Array.from({ length: CHUNKS.w * CHUNKS.h }, (_, i) => chunkInfo(st, i))
+    .filter((c) => !c.owned && c.adjacent && c.hall <= sim.hallLevel())
+    .sort((a, b) => a.price - b.price);
+  for (const c of cands) {
+    // 그 조각을 산 셈 치고 자리를 찾아본다 (곧바로 되돌린다).
+    st.village.chunks.push(c.index);
+    st.village.rev.land++;
+    const fits = findSpot(st, key) !== null;
+    st.village.chunks.pop();
+    st.village.rev.land++;
+    if (fits) return { index: c.index, price: c.price };
+  }
+  // 한 조각으로 모자라면: key(+ 입구 줄)가 들어갈 조각 사각형 가운데 새로 살 조각이 가장 적은 것을 골라, 그 안의 살 수 있는 조각부터.
+  // 사각형 안 가진 조각은 아무것도 놓이지 않은 조각만 센다 (빈 땅이 한 덩어리가 되게).
+  const fp = footprint(key);
+  const cw = Math.ceil((fp.w + 1) / 8);
+  const ch = Math.ceil((fp.h + 1) / 8);
+  const v = villageOf(st);
+  const emptyOwned = (i: number): boolean => {
+    const c = chunkInfo(st, i);
+    if (!c.owned) return false;
+    for (let y = c.cy * 8; y < c.cy * 8 + 8; y++) for (let x = c.cx * 8; x < c.cx * 8 + 8; x++) if (v.isRoad(x, y) || v.at(x, y) !== undefined) return false;
+    return true;
+  };
+  const buyable = new Set(cands.map((c) => c.index));
+  let best: { index: number; price: number; need: number } | null = null;
+  for (let cy = 0; cy + ch <= CHUNKS.h; cy++) {
+    for (let cx = 0; cx + cw <= CHUNKS.w; cx++) {
+      let need = 0;
+      let ok = true;
+      let first: { index: number; price: number } | null = null;
+      for (let y = cy; y < cy + ch && ok; y++) {
+        for (let x = cx; x < cx + cw && ok; x++) {
+          const i = y * CHUNKS.w + x;
+          const c = chunkInfo(st, i);
+          if (c.owned) {
+            if (!emptyOwned(i)) ok = false;
+            continue;
+          }
+          if (c.hall > sim.hallLevel()) ok = false;
+          need++;
+          if (buyable.has(i) && (first === null || c.price < first.price)) first = { index: i, price: c.price };
+        }
+      }
+      if (!ok || first === null) continue;
+      if (best === null || need < best.need || (need === best.need && first.price < best.price)) best = { index: first.index, price: first.price, need };
+    }
+  }
+  if (best !== null) return best;
+  return cands[0] === undefined ? null : { index: cands[0].index, price: cands[0].price };
+}
+
+/** 이웃한 땅 가운데 지금 살 수 있는 가장 싼 조각 (값이 같으면 처음 땅에 가까운 것). 없으면 null. */
+function cheapestLand(sim: Sim): { index: number; price: number } | null {
+  let best: { index: number; price: number; ring: number; d: number } | null = null;
+  const cx0 = LAND_START.x + LAND_START.w / 2;
+  const cy0 = LAND_START.y + LAND_START.h / 2;
+  for (let i = 0; i < CHUNKS.w * CHUNKS.h; i++) {
+    const c = chunkInfo(sim.state, i);
+    if (c.owned || !c.adjacent || c.hall > sim.hallLevel()) continue;
+    const d = Math.hypot(c.cx + 0.5 - cx0, c.cy + 0.5 - cy0);
+    if (best === null || c.price < best.price || (c.price === best.price && (c.ring < best.ring || (c.ring === best.ring && d < best.d)))) best = { index: i, price: c.price, ring: c.ring, d };
+  }
+  return best;
+}
+
+/** 시험 마을: 땅을 다 가진 채 (연 부스·지은 건물이 자리를 못 찾는 일 없이 바로 놓이게). */
+function testSim(st: GameState): Sim {
+  const s = new Sim(st);
+  devAllLand(s);
+  return s;
 }
 
 // ── 공통: 이벤트 모으기 ─────────────────────────────────────────────────
@@ -261,6 +380,8 @@ function runReport(seed: number, minutes: number, chief: ((sim: Sim, log: (s: st
       sim.tick(SIM.dt);
       checkInvariants(sim);
       if (chief !== null && t % ticksPerSec === 0) chief(sim, log);
+      // 촌장이 길을 지우지 않으니 길 밖 손님은 없어야 한다.
+      if (t % 10 === 0) for (const m of strays(sim)) fail(`손님 ${m.id}가 길 밖 (${m.phase}, ${m.pos.x.toFixed(0)},${m.pos.y.toFixed(0)})`, sim.state);
     }
     const st = sim.state;
     const avg = minute.left > 0 ? (minute.moodSum / minute.left).toFixed(0) : '-';
@@ -299,6 +420,9 @@ function emptySlots(sim: Sim): { booth: BoothId; role: number; optional: boolean
   }
   return out;
 }
+
+/** 회관 코인을 모으는 중에도 여는 싼 부스: 다음 회관 코인의 이 비율 이하 (--cheap N, 기본 0 = 열지 않는다: 이정표 표는 회관 먼저인 촌장 기준). */
+const CHEAP_BOOTH = num('cheap', 0);
 
 /** 욕심쟁이 촌장. milestones에 처음 산 때(초)를 남긴다 (key: hall2, unlock-cups, first …). */
 function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map()): Chief {
@@ -358,6 +482,16 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
       return true;
     };
     if (buy(`hall${st.buildings.hall.level + 1}`, `회관 → ${st.buildings.hall.level + 1}`, () => sim.upgradeBuilding('hall'))) return;
+    // 배치형 마을: 보관함의 부스·건물을 놓는다. 자리가 없으면 이웃한 가장 싼 땅을 산다 (코인이 모자라면 모은다: 다른 것을 사지 않는다).
+    if (sim.storage().some((x) => catalogKind(x.key) !== 'decor')) {
+      for (const it of sim.storage()) if (catalogKind(it.key) !== 'decor' && sim.autoPlace(it.key).ok) log(`놓기 ${it.key}`);
+      if (sim.storage().some((x) => catalogKind(x.key) !== 'decor')) {
+        const want = sim.storage().find((x) => catalogKind(x.key) !== 'decor');
+        const land = want === undefined ? null : landFor(sim, want.key);
+        if (land !== null && buy(`land${st.village.chunks.length + 1}`, `땅 ${land.index} (${land.price}코인)`, () => sim.buyChunk(land.index))) return;
+        if (land !== null) return;
+      }
+    }
     // --debt-build: 전당포·일터·은행을 지을 수 있게 되면 바로 짓는다 (넷째 묶음 흐름이 돈에 미치는 영향 보기).
     if (flag('debt-build')) {
       for (const id of ['pawnshop', 'workyard', 'bank'] as BuildingId[]) {
@@ -383,10 +517,13 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
       if (!milestones.has(key)) milestones.set(key, st.time);
       saving ||= st.coins < hallNext.coins;
     }
-    if (!saving) {
+    // 회관 코인을 모으는 중에도 싼 부스(다음 회관 코인의 CHEAP_BOOTH 이하)는 연다 (사람 촌장처럼: 회관 재료가 일찍 모여 늘 모으는 중이어도 처음 부스들이 늦게까지 닫혀 있지 않게).
+    const cheap = (b: BoothId): boolean => hallNext !== null && (sim.boothUnlockCost(b)?.coins ?? Infinity) <= hallNext.coins * CHEAP_BOOTH;
+    if (!saving || BOOTH_IDS.some((b) => !st.booths[b].unlocked && sim.boothLockReason(b) === null && cheap(b))) {
       for (const b of BOOTH_IDS) {
         // 아직 닫힌 구역의 부스는 넘어간다 (회관 레벨이 모자람).
         if (st.booths[b].unlocked || sim.boothLockReason(b) !== null) continue;
+        if (saving && !cheap(b)) continue;
         if (buy(`unlock-${b}`, `부스 해금 ${b}`, () => sim.unlockBooth(b))) return;
         // 귀한 물건(재료)이 있으면 해금 코인을 모은다.
         const c = sim.boothUnlockCost(b);
@@ -421,6 +558,15 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
       if (r !== undefined && sim.craft(r.index).ok) log(`가공 ${GOODS[r.def.out].name}`);
     }
 
+    // 장식: 촌장은 코인을 모으는 중에도 가끔 (50초에 한 번쯤) 길가에 하나 놓는다 (손님 기분 둘레, village.ts findDecorSpot). 땅 조각마다 1.2개까지 (--no-decor: 사지 않는다).
+    const decorCount = st.village.placed.filter((p) => catalogKind(p.key) === 'decor').length;
+    if (!flag('no-decor') && st.coins >= 150 && decorCount < st.village.chunks.length * 1.2 && rng.chance(0.02)) {
+      const k = rng.weighted(DECOR_IDS.map((d) => [d, DECOR[d].aura / DECOR[d].cost] as const));
+      if (sim.buy(k).ok) {
+        once('decor', log, `★ 장식 ${k} (처음)`);
+        if (sim.autoPlace(k).ok) log(`장식 ${k}`);
+      }
+    }
     if (saving) return;
     const lines: [string, string, () => { ok: boolean }][] = [
       ['gate', '입구 업그레이드', () => sim.upgradeBuilding('gate')],
@@ -643,6 +789,16 @@ function tallyBooths(sim: Sim): BoothTally {
   return t;
 }
 
+/** --auto --seeds: 손님 시간 (떠다니는 종 포함, 채무자 빼고): 입구 오가기·걷기·놀기·줄·그 밖 (초). */
+const GUEST_TIME = new Map<string, number>();
+function guestTime(st: GameState, dt: number): void {
+  for (const m of st.monsters) {
+    if (m.bankrupt === true) continue;
+    const k = m.phase === 'arriving' || m.phase === 'leaving' ? (m.path.length > 0 ? '입구 오가기' : '떠나기') : m.path.length > 0 ? '걷기' : m.phase === 'playing' || m.phase === 'reacting' ? '놀기' : m.phase === 'queued' ? '줄' : '그 밖';
+    GUEST_TIME.set(k, (GUEST_TIME.get(k) ?? 0) + dt);
+  }
+}
+
 function runSeeds(count: number, minutes: number, detail = false, first = 1): void {
   const keys = ['first', 'hall2', 'unlock-cups', 'unlock-darts', 'unlock-wheel', 'unlock-ssireum', 'unlock-duck', 'unlock-ring', 'unlock-boat', 'ready-hall3', 'hall3', 'unlock-race', 'unlock-kite', 'ready-hall4', 'hall4', 'unlock-claw', 'unlock-pouch', 'ready-hall5', 'hall5', 'unlock-tug', 'unlock-dig'];
   const short = (k: string) => k.replace('unlock-', '').replace('ready-hall', 'rdy');
@@ -657,6 +813,9 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
   const groupAvg = new Map<GroupBoothId, { avg: number[]; fold: number[] }>();
   const needAll = new Map<string, number[]>();
   const debtRows: DebtRow[] = [];
+  const landAll: number[] = [];
+  let strayCount = 0;
+  const strayLog: string[] = [];
   for (let seed = first; seed < first + count; seed++) {
     const sim = new Sim(newGame(seed));
     // --open-all: 처음부터 다 열린 마을 (회관 5, 전당포·은행·일터 끝까지, devOpenAll). 넷째 묶음 수치를 큰 마을에서 본다.
@@ -674,6 +833,12 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
       sim.tick(SIM.dt);
       checkInvariants(sim);
       sampleDebt(dt, sim.state, SIM.dt);
+      guestTime(sim.state, SIM.dt);
+      if (i % 10 === 0) {
+        const off = strays(sim);
+        strayCount += off.length;
+        for (const m of off) if (strayLog.length < 5) strayLog.push(`시드 ${seed} t=${sim.state.time.toFixed(1)} 손님 ${m.id} ${m.phase} (${m.pos.x.toFixed(0)},${m.pos.y.toFixed(0)}) path ${m.path.length}`);
+      }
       if (i % Math.round(1 / SIM.dt) === 0) {
         chief(sim, () => {});
         for (const b of BOOTH_IDS) if (!openedAt.has(b) && sim.boothOpen(b)) openedAt.set(b, sim.state.time);
@@ -722,7 +887,9 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
     });
     const p = st.precious;
     const race = tb.races > 0 ? `${tb.races}판 ${(tb.runners / tb.races).toFixed(1)}/${tb.maxRunners}` : '-';
-    console.log(`${pad(seed, 4)} ${cells.join('')} ${pad(st.coins, 6)}  ${pad(`${p.gem}/${p.golden_acorn}/${p.star_piece}`, 10)}  ${pad((all.moodSum / Math.max(1, all.left)).toFixed(0), 4)}  ${pad(all.broke, 4)}  ${race}`);
+    const storedLeft = sim.storage().filter((x) => catalogKind(x.key) !== 'decor').map((x) => x.key);
+    console.log(`${pad(seed, 4)} ${cells.join('')} ${pad(st.coins, 6)}  ${pad(`${p.gem}/${p.golden_acorn}/${p.star_piece}`, 10)}  ${pad((all.moodSum / Math.max(1, all.left)).toFixed(0), 4)}  ${pad(all.broke, 4)}  ${race}  땅 ${st.village.chunks.length}${storedLeft.length > 0 ? ` 보관함 ${storedLeft.join(',')}` : ''}`);
+    landAll.push(st.village.chunks.length);
     if (flag('debt')) {
       console.log(`     ${debtLine(st)}`);
       const row = debtRow(sim, dt);
@@ -742,7 +909,14 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
     for (const [k, list] of [...needAll.entries()].sort()) console.log(`  ${k.padEnd(22)} ${fmt(quantile(list, 0.5))} / ${fmt(quantile(list, 0.75))} (${list.length})`);
   }
   if (runnerAvg.length > 0) console.log(`경주 한 번 평균 참가자 (시드 중간): ${fmt(quantile(runnerAvg, 0.5))}`);
+  {
+    const tot = [...GUEST_TIME.values()].reduce((a, b) => a + b, 0);
+    console.log(`손님 시간 (채무자 빼고): ${[...GUEST_TIME.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${((v / Math.max(1, tot)) * 100).toFixed(1)}%`).join(', ')}`);
+  }
+  console.log(`길 밖 손님 (10틱마다 잼): ${strayCount}${strayLog.length > 0 ? ` — ${strayLog.join(' / ')}` : ''}`);
+  if (strayCount > 0) process.exitCode = 1;
   console.log(`단체 놀이 한 판 평균 참가자 / 접힌 판 비율 (시드 중간, 판이 5번 넘은 시드 수): ${GROUP_BOOTHS.map((b) => { const r = groupAvg.get(b); return r === undefined ? `${b} -` : `${b} ${fmt(quantile(r.avg, 0.5))}/${(quantile(r.fold, 0.5) * 100).toFixed(0)}% (${r.avg.length})`; }).join('  ')}`);
+  console.log(`땅 조각 (처음 9, 시드 p25/중간/p75): ${fmt(quantile(landAll, 0.25))}/${fmt(quantile(landAll, 0.5))}/${fmt(quantile(landAll, 0.75))}`);
   if (debtRows.length > 0) debtSummary(debtRows);
 }
 
@@ -817,6 +991,9 @@ function runFor(sim: Sim, sec: number, check = true): void {
 }
 
 function selftest(): void {
+  // 0) 배치형 마을 (DESIGN 6.1): 처음 마을·놓기 검사·놓기·옮기기·보관하기·길·땅·길로만 걷기·옛 저장 옮기기·자동 배치.
+  villageTests();
+
   // 1) 결과 세부가 등급과 맞고 확률이 표와 비슷한가 (경주는 2)에서 따로).
   const rng = new Rng(42);
   const pool = SPECIES_IDS.slice(0, 9);
@@ -972,7 +1149,7 @@ function selftest(): void {
   }
 
   // 2) 저장·불러오기 왕복: 같은 상태에서 같은 미래.
-  const a = new Sim(newGame(7));
+  const a = testSim(newGame(7));
   runFor(a, 240);
   const text = JSON.stringify(a.state);
   const loaded = normalizeState(JSON.parse(text));
@@ -1022,7 +1199,7 @@ function selftest(): void {
   console.log('  localStorage OK');
 
   // 5) catchUp: 연출 이벤트 없이 요약 하나.
-  const c = new Sim(newGame(3));
+  const c = testSim(newGame(3));
   runFor(c, 60);
   const seen: string[] = [];
   const quietTypes: (keyof SimEvents)[] = ['monsterReact', 'monsterSpectate', 'roundStarted', 'roundFinished', 'potFestival', 'groupJoined', 'groupStarted', 'groupEvent', 'groupFinished', 'groupCancelled', 'coinsChanged', 'toast', 'itemsChanged', 'monsterSpawned', 'monsterLeft'];
@@ -1041,7 +1218,7 @@ function selftest(): void {
   c.catchUp(5);
   assert(!seen.includes('toast'), '잠깐(20초 미만) 비운 catchUp은 요약 토스트가 없다');
   // 경주장이 도는 마을에서도 catchUp 동안 경주 연출 이벤트가 없다 (경주는 그대로 흐른다).
-  const cr = new Sim(newGame(33));
+  const cr = testSim(newGame(33));
   devOpenAll(cr);
   runFor(cr, 120);
   const races0 = cr.state.totals.rounds;
@@ -1052,7 +1229,7 @@ function selftest(): void {
   assert(heard.length === 0 && cr.state.totals.rounds > races0, `경주장 catchUp 조용히 (${heard.join(',')})`);
 
   // 6) 행동과 실패 이유.
-  const d = new Sim(newGame(5));
+  const d = testSim(newGame(5));
   const st = d.state;
   const r1 = d.unlockBooth('cups');
   assert(!r1.ok && /모자라|필요/.test(r1.reason), `해금 실패 이유: ${r1.ok ? '' : r1.reason}`);
@@ -1081,7 +1258,7 @@ function selftest(): void {
   assert(d.assign(slotHost, 'darts').ok, '다시 배치');
   // 다른 구역 부스는 그 구역이 열릴 때까지 열 수 없다
   const lockWhy = d.unlockBooth('duck');
-  assert(!lockWhy.ok && lockWhy.reason.includes('마을회관 레벨 2'), `구역이 닫힌 부스: ${lockWhy.ok ? '' : lockWhy.reason}`);
+  assert(!lockWhy.ok && lockWhy.reason.includes('마을회관 Lv.2'), `구역이 닫힌 부스: ${lockWhy.ok ? '' : lockWhy.reason}`);
   assert(d.boothLockReason('wheel') === null && d.boothLockReason('race') !== null, '돌림판은 회관 1, 경주장은 회관 3부터');
   // 레벨업
   const s0 = st.staff[0]!;
@@ -1090,7 +1267,7 @@ function selftest(): void {
   // 건물·부스 업그레이드
   st.materials.mat_ember = 10;
   st.materials.mat_shell = 10;
-  assert(d.upgradeBuilding('hall').ok && st.districts.includes('east'), '회관 2 → 연못 동네');
+  assert(d.upgradeBuilding('hall').ok, '회관 2');
   assert(d.upgradeBooth('slot').ok && d.boothSeats('slot') === BOOTHS.slot.seats[1], '슬롯 업그레이드');
   assert(!d.upgradeBuilding('fountain').ok, '분수는 황금 도토리가 필요');
   // 가공
@@ -1126,13 +1303,13 @@ function selftest(): void {
   console.log('  행동·실패 이유 OK');
 
   // 6b) 진행자 자리 여럿 (경주장)·새 부스 규칙.
-  const f = new Sim(newGame(11));
+  const f = testSim(newGame(11));
   const fs = f.state;
   fs.coins = 50_000;
   fs.precious = { gem: 20, golden_acorn: 20, star_piece: 20 };
   for (const k of Object.keys(fs.materials) as MaterialId[]) fs.materials[k] = 20;
   while (f.upgradeBuilding('warehouse').ok) for (const k of Object.keys(fs.materials) as MaterialId[]) fs.materials[k] = f.materialCap();
-  assert(f.upgradeBuilding('hall').ok && f.upgradeBuilding('hall').ok && fs.districts.includes('north') && !fs.districts.includes('west'), '회관 3 → 북쪽 언덕 (숲 동네는 회관 4)');
+  assert(f.upgradeBuilding('hall').ok && f.upgradeBuilding('hall').ok, '회관 3');
   assert(fs.candidates.some((c) => c.art === 'race_starter') && !fs.candidates.some((c) => c.art === 'host_claw'), '회관 3이면 경주장 진행자가 후보로, 숲 동네 진행자는 아직');
   // 쉬는 진행자를 다 치워 두고 경주장을 연다 (자리 셋이 빈다).
   assert(f.unlockBooth('race').ok && fs.booths.race.staff.length === 3 && !fs.booths.race.staff.some((x) => x !== null), '경주장 해금 (자리 셋 비어 있음)');
@@ -1156,7 +1333,7 @@ function selftest(): void {
   checkInvariants(f);
   // 고용 순서가 달라도 진행자는 자기 자리로: 해설자를 먼저 고용 (경주장이 잠겨 있으면 쉰다) → 해금하면 해설자 자리 → 출발 신호는 출발 신호 자리.
   {
-    const g = new Sim(newGame(12));
+    const g = testSim(newGame(12));
     const gs = g.state;
     gs.coins = 50_000;
     gs.precious = { gem: 20, golden_acorn: 20, star_piece: 20 };
@@ -1180,7 +1357,7 @@ function selftest(): void {
     assert(boothStat(gs, 'race', 'pace') === 4 && boothStat(gs, 'race', 'charm') === 5, '경주장 진행·입담 = 출발 신호·해설자 능력치');
     assert(gs.booths.race.staff[2] === null, '사육사 자리는 비어 있다');
     fillMats();
-    assert(g.upgradeBuilding('hall').ok && gs.districts.includes('west'), '회관 4');
+    assert(g.upgradeBuilding('hall').ok, '회관 4');
     // 자기 부스가 잠긴 진행자는 다른 부스의 있으면 좋은 자리에 가지 않고 쉰다.
     const claw = hire('host_claw');
     assert(post(claw) === 'null', `인형 뽑기가 잠겼으면 수줍 소년은 사육사 자리에 가지 않고 쉰다 (${post(claw)})`);
@@ -1199,7 +1376,7 @@ function selftest(): void {
   }
   // 모이는 중에 출발 신호가 빠지면 경주를 접고 건 코인을 돌려준다.
   {
-    const r = new Sim(newGame(31));
+    const r = testSim(newGame(31));
     devOpenAll(r);
     const rs = r.state;
     let started = 0;
@@ -1228,8 +1405,6 @@ function selftest(): void {
     assert(r.assign(starterId, 'race', 0).ok && r.boothOpen('race'), '다시 연다');
     checkInvariants(r);
   }
-  // 부스 그림 뒤를 가로지르지 않는다: 돌림판 자리 → 다트 앞 길은 부스 그림 위를 지난다.
-  assert(crossesBooth({ x: 4020, y: 6700 }, NODES.darts_front) && !crossesBooth({ x: 4020, y: 6700 }, NODES.wheel_front), '부스 그림 땅 판정');
   // 복주머니: 재료가 없는 손님은 고르지 않고, 한판마다 손님 재료 1개가 마을 창고로.
   devOpenAll(f);
   assert(BOOTH_IDS.every((b) => f.boothOpen(b)), 'devOpenAll: 모든 부스가 열린다');
@@ -1288,7 +1463,7 @@ function selftest(): void {
       }
       assert(new Set(names).size === names.length, `${b} 반응 이름이 겹치지 않는다`);
     }
-    const probe = new Sim(newGame(2)).state.monsters[0]!;
+    const probe = testSim(newGame(2)).state.monsters[0]!;
     probe.traits = ['watcher'];
     assert(moodDelta('lose', false, probe, 0, 0, boothDef('duck').moodLossScale) === MOOD.delta.lose * (boothDef('duck').moodLossScale ?? 1), '오리 낚시: 지면 기분 하락이 작다');
     assert(moodDelta('win', false, probe, 0, 0, 0.5) === MOOD.delta.win, '오리 낚시: 이기면 그대로');
@@ -1297,7 +1472,7 @@ function selftest(): void {
 
   // 6d) 경주장 lifecycle: 손님 여럿이 한 경주, 출발 조건, 등수·등급·지급, 경주 중 응원, 구경꾼, 자리 비우기.
   {
-    const r = new Sim(newGame(31));
+    const r = testSim(newGame(31));
     const rs = r.state;
     devOpenAll(r);
     // 손님이 경주장으로만 가게 다른 부스를 닫아 둔다.
@@ -1476,7 +1651,7 @@ function selftest(): void {
     // 판이 끝날 때 놀이 근처에서 구경하는 손님 (판이 시작할 때 걷다가 발을 멈춘 손님 포함).
     let watching = 0;
     e.bus.on('groupFinished', (x) => {
-      const c = groupGame(x.booth).center;
+      const c = groupGame(x.booth).center(e.state);
       watching += e.state.monsters.filter((m) => m.phase === 'spectating' && Math.hypot(m.pos.x - c.x, m.pos.y - c.y) < TUNE.groupDrawRadius + 400).length;
     });
     const chief = makeGreedyChief(seed);
@@ -1517,7 +1692,7 @@ function selftest(): void {
 /** 참가자 n명 (자리 0부터, 고른 것은 그 놀이의 join 규칙으로). */
 function groupEntries(rng: Rng, b: GroupBoothId, n: number, seats: readonly number[] = Array.from({ length: n }, (_, i) => i)): GroupEntry[] {
   const game = groupGame(b);
-  const probe = new Sim(newGame(1)).state.monsters[0]!;
+  const probe = testSim(newGame(1)).state.monsters[0]!;
   const out: GroupEntry[] = [];
   for (const seat of seats.slice(0, n)) {
     const j = game.join(rng, seat, { ...probe, species: 'dragon' }, out);
@@ -1766,7 +1941,7 @@ function groupGenerators(rng: Rng): void {
   const digFind = (f: string): string[] => groupReactionLabels('dig', { kind: 'behind', key: cheerKey('find', 2, 2, f) }).cheer;
   assert(has(digFind('boot'), '장화네…') && !has(digFind('boot'), '에이 돌멩이') && has(digFind('pebble'), '에이 돌멩이') && !has(digFind('pebble'), '장화네…'), '보물찾기: 장화·조약돌마다 다른 응원');
   {
-    const probe = { ...new Sim(newGame(2)).state.monsters[0]!, traits: [] };
+    const probe = { ...testSim(newGame(2)).state.monsters[0]!, traits: [] };
     for (let i = 0; i < 400; i++) {
       const pl = pickReaction(rng, 'lose', probe, 1, 'ssireum', { kind: 'ssireum', side: 0, role: 'bettor', won: false, flip: false, close: false });
       assert(pl.label !== '벌러덩' && reactionLabels('lose', 'ssireum', 'bettor').includes(pl.label), '구경 손님은 벌러덩하지 않는다');
@@ -1781,7 +1956,7 @@ function groupGenerators(rng: Rng): void {
  * 단체 놀이의 고르기 (셋째 묶음 모듈의 순수 규칙): 자리 고르기(seatFor), 구경 손님의 고르기(join), 나서기(stepIn), 진행 중 구경꾼 들썩임(buzz).
  */
 function groupChoices(rng: Rng): void {
-  const base = new Sim(newGame(1)).state.monsters[0]!;
+  const base = testSim(newGame(1)).state.monsters[0]!;
   const mk = (species: SpeciesId, traits: TraitId[] = [], id = 1): Monster => ({ ...base, id, species, traits });
   const all = (n: number): number[] => Array.from({ length: n }, (_, i) => i);
   const rate = (n: number, f: () => boolean): number => {
@@ -1915,7 +2090,7 @@ function groupChoices(rng: Rng): void {
 
 /** 밀어내기: 선수 하나와 구경 손님 하나만 앉아 상대가 오지 않으면, 구경 손님이 모래판으로 나서 판이 열린다 (손님은 더 오지 않는다). */
 function ssireumStepIn(): void {
-  const r = new Sim(newGame(77));
+  const r = testSim(newGame(77));
   devOpenAll(r);
   const rs = r.state;
   for (const x of BOOTH_IDS) if (x !== 'ssireum') rs.booths[x].unlocked = false;
@@ -1930,7 +2105,7 @@ function ssireumStepIn(): void {
     m.seat = seat;
     m.phase = 'toSeat';
     m.phaseTime = 0;
-    m.path = [{ ...BOOTH_SPOTS.ssireum.seats[seat]! }];
+    m.path = [{ ...boothSpot(rs, 'ssireum').seats[seat]! }];
     bs.seats[seat] = m.id;
   };
   sit(a, 0);
@@ -1955,7 +2130,8 @@ function ssireumStepIn(): void {
 /** 부스 b 하나만 연 마을 (모든 진행자 고용, 그 밖의 부스는 닫는다)을 sec초. */
 function groupLifecycles(): void {
   for (const b of ['ssireum', 'boat', 'kite', 'tug', 'dig'] as const) {
-    const r = new Sim(newGame(40 + GROUP_BOOTHS.indexOf(b)));
+    // 줄다리기는 시드 45: 처음부터 다 열린 마을에서 줄다리기만 열면 판이 늘 꽉 차서 (짝수) 편 맞추기로 빠지는 손님이 없는 시드가 있다 (44: 자동 배치가 마을 입구 가까이).
+    const r = testSim(newGame(40 + GROUP_BOOTHS.indexOf(b) + (b === 'tug' ? 1 : 0)));
     devOpenAll(r);
     const rs = r.state;
     for (const x of BOOTH_IDS) if (x !== b) rs.booths[x].unlocked = false;
@@ -2116,7 +2292,7 @@ function groupLifecycles(): void {
   // 옛 저장(2) → 3: 경주장 race 칸이 group으로 옮겨지고 마을이 그대로 이어진다.
   // 셋째 묶음 전의 마을처럼: 회관 3까지, 경주장만 연다 (새 부스는 닫힌 채, 새 진행자는 후보로만).
   {
-    const a = new Sim(newGame(31));
+    const a = testSim(newGame(31));
     const as = a.state;
     as.coins = 50_000;
     as.precious = { gem: 20, golden_acorn: 20, star_piece: 20 };
@@ -2152,7 +2328,7 @@ function groupLifecycles(): void {
       bsv.race = race;
     }
     const back = normalizeState(old);
-    assert(back !== null && back.version === 4, '옛 저장(2)을 읽는다 (2 → 3 → 4)');
+    assert(back !== null && back.version === 5, '옛 저장(2)을 읽는다 (2 → 3 → 4 → 5)');
     const twin = new Sim(back);
     runFor(a, 40);
     runFor(twin, 40);
@@ -2173,7 +2349,7 @@ function groupLifecycles(): void {
 
 /** 부스 하나(b)만 열고 나머지는 닫은 마을 + 전당포·은행·일터 레벨 1, 금고 넉넉. */
 function debtVillage(seed: number, only: BoothId | null = 'slot'): Sim {
-  const s = new Sim(newGame(seed));
+  const s = testSim(newGame(seed));
   devOpenAll(s);
   if (only !== null) for (const b of BOOTH_IDS) if (b !== only) s.state.booths[b].unlocked = false;
   for (const id of ['pawnshop', 'bank', 'workyard'] as BuildingId[]) s.state.buildings[id].level = 1;
@@ -2188,7 +2364,8 @@ function debtVillage(seed: number, only: BoothId | null = 'slot'): Sim {
 function testGuest(s: Sim, opts: { wallet: number; mood?: number; acc?: { key: AccessoryId; value: number }[]; species?: SpeciesId; traits?: TraitId[]; patience?: number }): Monster {
   const st = s.state;
   const rng = new Rng(st.nextId * 31 + 7);
-  const m = createMonster(rng, st, st.nextId++, { x: 3200, y: 4600 }, null);
+  const at = s.village().entryPt('fountain') ?? s.village().gateSpawn();
+  const m = createMonster(rng, st, st.nextId++, { x: at.x, y: at.y }, null);
   if (opts.species !== undefined) m.species = opts.species;
   m.phase = 'wandering';
   m.timer = 0.2;
@@ -2419,9 +2596,15 @@ function debtFlows(): void {
       runFor(s, LABOR.secPerCoin * LABOR.coinsPerMat * 1.2);
       assert(m.debt < debt1 && ticks === debt1 - m.debt && outs >= 1 && st.materials.mat_veggie + st.materials.mat_ore > mats0 && st.debtTotals.laborMats >= 1, `일하면 빚이 줄고 (1코인마다 laborTick ${ticks}) 재료가 나온다 (${outs})`);
       assert([...debtReactionLabels('laborFarm'), ...debtReactionLabels('laborMine'), ...debtReactionLabels('cheered')].some((l) => labels.includes(l)), `일하며 한숨·영차 (${labels.join(', ')})`);
-      // 응원하면 잠깐 빨라진다.
+      // 응원하면 잠깐 빨라진다 (반장이 막 다독인 빠르기는 빼고 잰다: 다독임 1.3배 위에 응원 1.5배는 1.4배가 안 된다).
+      if (m.labor !== null && m.labor !== undefined) {
+        m.labor.boostSec = 0;
+        m.labor.boostMult = 1;
+      }
+      m.cheerCooldown = 0;
       const rate0 = laborRate(st, m);
-      assert(s.cheer(m.id).ok && laborRate(st, m) > rate0 * 1.4 - 1e-9, '응원 톡 = 잠깐 빨라진다');
+      const cheered = s.cheer(m.id);
+      assert(cheered.ok && laborRate(st, m) > rate0 * 1.4 - 1e-9, `응원 톡 = 잠깐 빨라진다 (${cheered.ok ? '' : cheered.reason} ${rate0.toFixed(3)} → ${laborRate(st, m).toFixed(3)}, ${m.phase})`);
       // 다 갚는다.
       m.debt = 2;
       let cleared: boolean | null = null;
@@ -2650,7 +2833,7 @@ function debtFlows(): void {
     runFor(s, 30);
     st.pawnCollection.acc_ribbon = 2;
     const back = normalizeState(JSON.parse(JSON.stringify(st)));
-    assert(back !== null && back.version === 4, '저장 4를 읽는다');
+    assert(back !== null && back.version === 5, '저장 5를 읽는다');
     const twin = new Sim(back);
     runFor(s, 30);
     runFor(twin, 30);
@@ -2679,7 +2862,7 @@ function debtFlows(): void {
       delete m.debt;
     }
     const up = normalizeState(old);
-    assert(up !== null && up.version === 4 && up.buildings.pawnshop.level === 0 && up.materials.mat_veggie === 0 && up.debtTotals.forgiven === 0 && up.monsters.every((m) => Array.isArray(m.accessories) && m.debt === 0), '옛 저장(3) → 4');
+    assert(up !== null && up.version === 5 && up.buildings.pawnshop.level === 0 && up.materials.mat_veggie === 0 && up.debtTotals.forgiven === 0 && up.monsters.every((m) => Array.isArray(m.accessories) && m.debt === 0), '옛 저장(3) → 5');
     const us = new Sim(up);
     runFor(us, 60);
     // 기초 작업 때의 저장 4 (forgiven·since·foremanTimer가 없다)도 읽는다.
@@ -2688,14 +2871,14 @@ function debtFlows(): void {
     delete early.foremanTimer;
     for (const m of early.monsters as Record<string, unknown>[]) if (m.labor !== null && typeof m.labor === 'object') delete (m.labor as Record<string, unknown>).since;
     const es = normalizeState(early);
-    assert(es !== null && es.debtTotals.forgiven === 0, '기초 작업 때의 저장 4');
+    assert(es !== null && es.debtTotals.forgiven === 0, '칸이 빠진 저장');
     runFor(new Sim(es), 60);
-    console.log('  저장 4 (빚 걸기 판 중 포함)·옛 저장(3 → 4) OK');
+    console.log('  저장 5 (빚 걸기 판 중 포함)·옛 저장(3 → 5) OK');
   });
 
   // h) 전당포·은행·일터 짓기: 회관 레벨, 레벨 0 = 빈 부지.
   {
-    const s = new Sim(newGame(18));
+    const s = testSim(newGame(18));
     const st = s.state;
     assert(st.buildings.pawnshop.level === 0 && st.buildings.bank.level === 0 && st.buildings.workyard.level === 0, '처음엔 빈 부지');
     st.coins = 2000;
@@ -2715,12 +2898,14 @@ function debtFlows(): void {
   // j) 오래 돌리기 (넷째 묶음 건물이 있는 마을, 촌장 있음): 장부 (맡김 = 되찾음 + 컬렉션 + 아직 맡긴 것, 둘로 끝나지 않음),
   //    빚·금고가 음수가 아니고 (불변식), 파산한 손님은 모두 풀려나거나 아직 일하는 중 (BANKRUPT_MAX 안: 불변식).
   for (const seed of [7, 8]) {
-    const s = new Sim(newGame(seed));
+    const s = testSim(newGame(seed));
     const st = s.state;
     st.coins = 600;
     st.buildings.hall.level = 2;
-    for (const d of Object.keys(DISTRICTS) as DistrictId[]) if (DISTRICTS[d].hall <= 2 && !st.districts.includes(d)) st.districts.push(d);
-    for (const id of ['pawnshop', 'bank', 'workyard'] as BuildingId[]) st.buildings[id].level = 1;
+    for (const id of ['pawnshop', 'bank', 'workyard'] as BuildingId[]) {
+      st.buildings[id].level = 1;
+      assert(s.autoPlace(id).ok, `${id} 자동 배치`);
+    }
     const t = tallyDebt(s);
     const chief = makeGreedyChief(seed);
     const n = Math.round((45 * 60) / SIM.dt);
@@ -2740,12 +2925,625 @@ function debtFlows(): void {
   }
 }
 
+// ── 배치형 마을 (DESIGN 6.1) 시험 ─────────────────────────────────────────
+
+/** 길 밖에 있는 손님 (걷든 서 있든: 걸을 수 있는 길 칸도, 입구가 있는 건물 발자국 안도 아닌 곳). 촌장이 길을 지우지 않는 한 늘 없어야 한다. */
+function strays(sim: Sim): Monster[] {
+  return sim.state.monsters.filter((m) => !onRoad(sim.state, m.pos));
+}
+
+/** 걷는 손님(길이 남은 손님)이 걸을 수 있는 길 칸이나 입구가 있는 건물 발자국 밖에 있는 수 (길로만 걷는가). */
+function offRoad(sim: Sim): number {
+  const v = villageOf(sim.state);
+  let n = 0;
+  for (const m of sim.state.monsters) {
+    if (m.path.length === 0) continue;
+    const c = cellAt(m.pos);
+    const i = cellIndex(c.x, c.y);
+    if (v.isWalkable(i)) continue;
+    const p = v.at(c.x, c.y);
+    if (p !== undefined && footprint(p.key).entry !== undefined) continue;
+    n++;
+  }
+  return n;
+}
+
+function villageTests(): void {
+  // a) 처음 마을: 놓인 것마다 자리가 맞고 (겹침·땅 밖·길 위 없음), 손님이 드나드는 곳은 길로 이어지고, 빈 부스 자리 둘 + 전당포 자리.
+  {
+    const s = new Sim(newGame(1));
+    const st = s.state;
+    const v = s.village();
+    for (const p of st.village.placed) assert(checkPlace(st, p.key, p.x, p.y, p.id).ok, `처음 마을 ${p.key} 자리 (${p.x},${p.y})`);
+    for (const k of ['gate', 'fountain', 'slot', 'oddeven'] as const) assert(v.connected(k), `처음 마을: ${k} 입구가 길로 이어짐`);
+    assert(st.village.chunks.length === LAND_START.w * LAND_START.h, '처음 땅 3×3 조각');
+    assert(s.canPlace('cups', { x: 24, y: 53 }).ok && s.canPlace('cups', { x: 36, y: 53 }).ok && s.canPlace('pawnshop', { x: 29, y: 54 }).ok, '빈 땅: 부스 자리 둘, 전당포 자리');
+    assert(s.storage().length === 0 && BOOTH_IDS.every((b) => st.booths[b].unlocked === (v.placed(b) !== undefined)), '처음 마을: 연 부스 = 놓인 부스');
+    console.log(`  처음 마을 OK (놓인 것 ${st.village.placed.length}, 길 ${st.village.roads.length}칸, 걸을 수 있는 길 ${v.walkable.length}칸)`);
+  }
+
+  // b) 놓기 검사 이유: 지도 밖·안 산 땅·다른 건물·길 위·입구 막기·입구 앞 막힘.
+  {
+    const s = new Sim(newGame(2));
+    const st = s.state;
+    const why = (key: CatalogKey, x: number, y: number): string => s.canPlace(key, { x, y }).reason ?? 'ok';
+    assert(why('flowers', -1, 50).includes('지도 밖'), `지도 밖 (${why('flowers', -1, 50)})`);
+    assert(why('flowers', 10, 10).includes('사지 않은'), '안 산 땅');
+    assert(why('flowers', 33, 41).includes('다른 건물'), '다른 건물 (마을회관)');
+    assert(why('flowers', 35, 55).includes('길 위'), '길 위');
+    // 입구가 풀밭인 부스 (길을 지운 왼쪽 빈 자리): 그 입구 칸에는 아무것도 놓을 수 없다.
+    assert(s.place('cups', { x: 24, y: 53 }).ok === false, '구슬 찾기는 아직 못 연다 (황금 도토리)');
+    st.coins = 9000;
+    st.precious.golden_acorn = 3;
+    assert(s.eraseRoad([{ x: 26, y: 58 }]).ok, '길 한 칸 지우기');
+    assert(s.place('cups', { x: 24, y: 53 }).ok && st.booths.cups.unlocked, '놓으면서 연다 (산다)');
+    assert(!s.village().connected('cups') && !s.boothOpen('cups'), '입구 앞이 길이 아니면 이어지지 않아 닫힘');
+    assert(why('flowers', 26, 58).includes('입구'), `다른 건물의 입구를 막지 못한다 (${why('flowers', 26, 58)})`);
+    assert(why('cups', 30, 55) !== 'ok', '이미 놓인 부스는 또 놓을 수 없다');
+    assert(s.paintRoad([{ x: 26, y: 58 }]).ok && s.village().connected('cups'), '길을 다시 깔면 이어진다');
+    console.log('  놓기 검사 OK');
+  }
+
+  // c) 놓기·옮기기·보관하기: 진행자는 보관하면 쉬고 놓으면 선다, 옮기면 앉은 손님도 같이, 보관함 장식 개수.
+  {
+    const s = testSim(newGame(3));
+    const st = s.state;
+    st.coins = 9000;
+    st.materials.mat_caramel = 2;
+    // 돌림판은 열면 바로 자동 배치 (sim-check), 진행자를 고용해 세운다.
+    assert(s.unlockBooth('wheel').ok && s.village().placed('wheel') !== undefined && s.village().connected('wheel'), '돌림판: 열면 자동 배치 + 길');
+    const hi = st.candidates.findIndex((c) => c.art === 'host_wheel');
+    assert(hi >= 0 && s.hire(hi).ok && s.boothOpen('wheel'), '돌림판 진행자');
+    // 손님이 돌림판에 앉을 때까지.
+    for (const b of BOOTH_IDS) if (b !== 'wheel') st.booths[b].unlocked = false;
+    let sat: Monster | undefined;
+    for (let i = 0; i < 6000 && sat === undefined; i++) {
+      s.tick(SIM.dt);
+      sat = st.monsters.find((m) => m.booth === 'wheel' && m.phase === 'playing');
+    }
+    for (const b of BOOTH_IDS) st.booths[b].unlocked = b === 'wheel' || b === 'slot' || b === 'oddeven';
+    assert(sat !== undefined, '돌림판에 손님이 앉는다');
+    const p = { ...s.village().placed('wheel')! };
+    const pos0 = { ...sat.pos };
+    const free = (() => {
+      for (let y = 30; y < 60; y++) for (let x = 2; x < 60; x++) if (s.canPlace('wheel', { x, y }, p.id).ok && s.canPlace('wheel', { x, y }, p.id).entryRoad && (x !== p.x || y !== p.y)) return { x, y };
+      return null;
+    })();
+    assert(free !== null, '옮길 자리 (입구가 길에 닿는 곳)');
+    assert(s.move(p.id, free).ok, '옮기기');
+    const p2 = s.village().placed('wheel')!;
+    assert(p2.x === free.x && p2.y === free.y && Math.abs(sat.pos.x - pos0.x - (free.x - p.x) * CELL) < 1e-6 && Math.abs(sat.pos.y - pos0.y - (free.y - p.y) * CELL) < 1e-6, `앉은 손님도 같이 옮겨진다 (${JSON.stringify([p.x, p.y, free, pos0, sat.pos, sat.phase])})`);
+    runFor(s, 20);
+    const host = st.booths.wheel.staff[0];
+    assert(host !== null && host !== undefined && s.store(p2.id).ok && s.village().placed('wheel') === undefined, '보관하기');
+    assert(!st.booths.wheel.staff.some((x) => x !== null) && st.staff.find((x) => x.id === host)?.post === null && !s.boothOpen('wheel'), '보관하면 진행자가 쉬고 닫힌다');
+    assert(st.monsters.every((m) => m.booth !== 'wheel'), '보관한 부스에 손님이 없다');
+    assert(s.storage().some((x) => x.key === 'wheel') && !s.assign(host, 'wheel').ok, '보관함의 부스엔 진행자를 세울 수 없다');
+    runFor(s, 10);
+    assert(s.autoPlace('wheel').ok && st.booths.wheel.staff.indexOf(host) === 0 && s.boothOpen('wheel'), '다시 놓으면 진행자가 선다');
+    // 장식: 사서 놓고, 보관하면 개수가 는다.
+    const n0 = s.stored('flowers');
+    assert(s.buy('flowers').ok && s.stored('flowers') === n0 + 1, '장식 사기 = 보관함 +1');
+    assert(s.autoPlace('flowers').ok && s.stored('flowers') === n0, '장식 놓기');
+    const fl = st.village.placed.filter((q) => q.key === 'flowers').at(-1)!;
+    assert(s.store(fl.id).ok && s.stored('flowers') === n0 + 1, '장식 보관');
+    assert(!s.store(s.village().placed('gate')!.id).ok && !s.move(s.village().placed('gate')!.id, { x: 30, y: 30 }).ok, '마을 입구는 옮기거나 보관할 수 없다');
+    for (const k of ['hall', 'workshop', 'office', 'warehouse', 'fountain'] as const) assert(!s.store(s.village().placed(k)!.id).ok && s.village().placed(k) !== undefined, `${k}는 보관할 수 없다 (옮기기만)`);
+    checkInvariants(s);
+    console.log('  놓기·옮기기·보관하기 OK');
+  }
+
+  // d) 길이 끊기면 손님이 오지 않고 (줄이 풀리고), 다시 이으면 온다. 걷던 손님은 길을 다시 찾는다.
+  {
+    const s = new Sim(newGame(4));
+    const st = s.state;
+    runFor(s, 120);
+    const e = s.village().entryPt('slot')!;
+    const ec = cellAt(e);
+    assert(s.boothOpen('slot') && s.eraseRoad([ec]).ok && !s.boothOpen('slot'), '슬롯 입구 앞 길을 지우면 닫힌다');
+    runFor(s, 30);
+    assert(st.booths.slot.queue.length === 0, '닫힌 슬롯의 줄이 풀린다');
+    let rounds = 0;
+    s.bus.on('roundStarted', (x) => {
+      if (x.booth === 'slot') rounds++;
+    });
+    runFor(s, 60);
+    const still = rounds;
+    assert(s.paintRoad([ec]).ok && s.boothOpen('slot'), '다시 깔면 열린다');
+    runFor(s, 120);
+    assert(rounds > still, `다시 이으면 손님이 온다 (${still} → ${rounds})`);
+    console.log('  길 끊기·잇기 OK');
+  }
+
+  // e) 땅: 이웃한 땅만, 회관 레벨, 값이 오른다, 사면 그 칸에 놓을 수 있다.
+  {
+    const s = new Sim(newGame(5));
+    const st = s.state;
+    st.coins = 99999;
+    const far = st.village.chunks.includes(0) ? -1 : 0;
+    assert(far === 0 && !s.buyChunk(0).ok && (s.chunkLockReason(0) ?? '').includes('붙은'), '떨어진 땅은 못 산다');
+    const ring1 = cheapestLand(s)!;
+    const p0 = s.chunk(ring1.index).price;
+    assert(s.buyChunk(ring1.index).ok && st.village.chunks.includes(ring1.index), '이웃한 땅 사기');
+    const next = cheapestLand(s)!;
+    assert(s.chunk(next.index).price > p0 - 1e-9, `값이 오른다 (${p0} → ${s.chunk(next.index).price})`);
+    const ring2 = Array.from({ length: CHUNKS.w * CHUNKS.h }, (_, i) => s.chunk(i)).find((c) => !c.owned && c.adjacent && c.hall > 1);
+    if (ring2 !== undefined) assert(!s.buyChunk(ring2.index).ok && (s.chunkLockReason(ring2.index) ?? '').includes('마을회관'), '먼 땅은 회관 레벨이 모자라면 못 산다');
+    const c = s.chunk(ring1.index);
+    assert(s.canPlace('flowers', { x: c.cx * 8 + 3, y: c.cy * 8 + 3 }).ok, '산 땅에 놓을 수 있다');
+    console.log(`  땅 OK (첫 땅 ${p0}코인, 다음 ${s.chunk(next.index).price}코인)`);
+  }
+
+  // f) 길로만 걷기: 다 열린 마을 (자동 배치, 큰 시설 포함) 10분 + 처음 마을 10분, 걷는 손님은 늘 길 칸이나 건물 안.
+  {
+    let samples = 0;
+    let off = 0;
+    for (const make of [() => new Sim(newGame(6)), () => {
+      const r = new Sim(newGame(7));
+      devOpenAll(r);
+      return r;
+    }]) {
+      const s = make();
+      for (let i = 0; i < 6000; i++) {
+        s.tick(SIM.dt);
+        checkInvariants(s);
+        if (i % 5 === 0) {
+          off += offRoad(s);
+          samples += s.state.monsters.filter((m) => m.path.length > 0).length;
+        }
+      }
+    }
+    assert(off === 0, `길 밖을 걷는 손님 ${off} / ${samples}`);
+    // 길찾기: 마을 입구 → 슬롯 자리는 문을 지나 들어간다 (길 칸만 밟는다).
+    const s = new Sim(newGame(8));
+    const v = s.village();
+    const path = route(s.state, v.gateSpawn(), boothSpot(s.state, 'slot').seats[0]!, 'slot');
+    let ok = true;
+    let at = v.gateSpawn();
+    for (const q of path) {
+      // 점 사이를 촘촘히 재서 길 칸·건물 발자국 밖으로 나가지 않는지.
+      for (let k = 0; k <= 10; k++) {
+        const x = at.x + ((q.x - at.x) * k) / 10;
+        const y = at.y + ((q.y - at.y) * k) / 10;
+        const c = cellAt({ x, y });
+        const p = v.at(c.x, c.y);
+        if (!v.isWalkable(cellIndex(c.x, c.y)) && !(p !== undefined && footprint(p.key).entry !== undefined)) ok = false;
+      }
+      at = q;
+    }
+    assert(ok && path.length >= 3, `입구 → 슬롯 길 (${path.length}점)`);
+    console.log(`  길로만 걷기 OK (걷는 손님 ${samples}번 재어 길 밖 0)`);
+  }
+
+  // g) 옛 저장(4) 옮기기: 열린 부스·지은 건물은 놓였거나 보관함, 레벨·진행자·도감·컬렉션은 그대로, 손님은 마을 입구에서 다시.
+  for (const name of ['save-v4-early', 'save-v4-mid', 'save-v4-all']) {
+    const raw = JSON.parse(process.getBuiltinModule('node:fs').readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), 'utf8')) as Record<string, unknown>;
+    const before = JSON.parse(JSON.stringify(raw)) as GameState & { districts?: unknown };
+    const st = normalizeState(raw);
+    assert(st !== null && st.version === 5 && (st as unknown as Record<string, unknown>).districts === undefined, `${name}: 저장 5로`);
+    const s = new Sim(st);
+    const v = s.village();
+    for (const b of BOOTH_IDS) {
+      assert(st.booths[b].unlocked === before.booths[b].unlocked && st.booths[b].level === before.booths[b].level, `${name}: ${b} 해금·레벨 그대로`);
+      if (st.booths[b].unlocked) assert(v.placed(b) !== undefined || s.stored(b) === 1, `${name}: 연 ${b}는 놓였거나 보관함`);
+    }
+    for (const id of Object.keys(st.buildings) as BuildingId[]) {
+      assert(st.buildings[id].level === before.buildings[id].level, `${name}: ${id} 레벨 그대로`);
+      if (st.buildings[id].level >= 1) assert(v.placed(id) !== undefined || s.stored(id) === 1, `${name}: ${id}는 놓였거나 보관함`);
+    }
+    assert(st.staff.length === before.staff.length && JSON.stringify(st.dex) === JSON.stringify(before.dex) && JSON.stringify(st.pawnCollection) === JSON.stringify(before.pawnCollection) && st.coins >= before.coins, `${name}: 진행자·도감·컬렉션 그대로`);
+    for (const b of BOOTH_IDS) if (v.placed(b) !== undefined && st.booths[b].unlocked) assert(v.connected(b), `${name}: 놓인 ${b}는 길로 이어짐`);
+    const gate = v.gateSpawn();
+    assert(st.monsters.every((m) => Math.hypot(m.pos.x - gate.x, m.pos.y - gate.y) < 200 && m.booth === null), `${name}: 손님은 마을 입구에서`);
+    let off = 0;
+    for (let i = 0; i < 3000; i++) {
+      s.tick(SIM.dt);
+      checkInvariants(s);
+      if (i % 5 === 0 && i > 300) off += offRoad(s);
+    }
+    assert(off === 0, `${name}: 옮긴 뒤 길 밖을 걷는 손님 ${off}`);
+    // 땅은 놓을 만큼만 (처음 땅 말고 건물·길이 하나도 없는 조각이 없다).
+    const start = new Set(startChunks());
+    const empty = st.village.chunks.filter((ci) => {
+      if (start.has(ci)) return false;
+      const x0 = (ci % CHUNKS.w) * CHUNK;
+      const y0 = Math.floor(ci / CHUNKS.w) * CHUNK;
+      for (let y = y0; y < y0 + CHUNK; y++) for (let x = x0; x < x0 + CHUNK; x++) if (v.at(x, y) !== undefined || v.isRoad(x, y)) return false;
+      return true;
+    });
+    assert(empty.length === 0, `${name}: 빈 땅 조각 ${empty.length}`);
+    console.log(`  옛 저장 옮기기 OK: ${name} (놓인 것 ${st.village.placed.length}, 땅 ${st.village.chunks.length}, 보관함 ${s.storage().map((x) => x.key).join(',') || '-'}, 손님 ${st.monsters.length})`);
+  }
+
+  // h) 자동 배치 + 땅 넓히기: 땅이 모자라면 실패하고, 땅을 사면 큰 시설까지 길로 이어 놓인다.
+  {
+    const s = new Sim(newGame(9));
+    const st = s.state;
+    st.coins = 999_999;
+    st.precious = { gem: 30, golden_acorn: 30, star_piece: 30 };
+    s.autoPlaceOnBuy = false;
+    const fill = (): void => {
+      for (const k of Object.keys(st.materials) as MaterialId[]) st.materials[k] = s.materialCap();
+    };
+    fill();
+    while (s.upgradeBuilding('warehouse').ok) fill();
+    fill();
+    while (s.upgradeBuilding('hall').ok) fill();
+    for (const b of BOOTH_IDS) {
+      fill();
+      assert(s.buy(b).ok || st.booths[b].unlocked, `${b} 사기`);
+    }
+    for (const id of ['pawnshop', 'bank', 'workyard'] as BuildingId[]) {
+      fill();
+      assert(s.buy(id).ok, `${id} 짓기`);
+    }
+    let bought = 0;
+    for (let guard = 0; guard < 80 && s.storage().length > 0; guard++) {
+      const left = s.storage().sort((a, b) => footprint(b.key).w * footprint(b.key).h - footprint(a.key).w * footprint(a.key).h);
+      let placed = false;
+      for (const it of left) if (s.autoPlace(it.key).ok) placed = true;
+      if (placed) continue;
+      const land = cheapestLand(s);
+      assert(land !== null && s.buyChunk(land.index).ok, '땅을 산다');
+      bought++;
+    }
+    assert(s.storage().length === 0, `다 놓였다 (남은 것 ${s.storage().map((x) => x.key).join(',')})`);
+    const v = s.village();
+    for (const b of BOOTH_IDS) assert(v.connected(b), `${b} 길로 이어짐`);
+    for (const id of ['pawnshop', 'bank', 'workyard', 'fountain'] as BuildingId[]) assert(v.connected(id), `${id} 길로 이어짐`);
+    checkInvariants(s);
+    console.log(`  자동 배치 + 땅 넓히기 OK (땅 ${bought}조각 더, 모두 ${st.village.chunks.length}조각)`);
+  }
+  villageRobustness();
+}
+
+/**
+ * 배치형 마을 튼튼함 (촌장이 손님 발밑 길을 지우고, 손님이 노는 건물을 옮기고 치운다):
+ * i) 마을 입구 앞 길은 못 지운다, ii) 경주장 구경 손님은 경주로를 가로지르지 않는다,
+ * iii) 큰길을 끊으면 위쪽 손님은 끊긴 데까지 길을 따라 걷다 풀밭을 짧게 건너 돌아오고, 다시 이으면 위쪽 부스가 다시 열린다,
+ * iv) 일터를 치우면 채무자는 길에서 기다리다 (LABOR.noYardSec) 반장이 빚을 덜어 준다, 다시 놓으면 일하러 간다,
+ * v) 15분 동안 아무렇게나 길 지우기·다시 깔기·옮기기(새 입구 길은 곧 또는 10초 뒤)·보관하기: 불변식, 길 밖 손님은 서 있지 않고 걸어서 돌아오고
+ *    (끊긴 길 조각은 따라 걷고 풀밭은 짧게), 건물(장식 포함)을 지나지 않는다.
+ */
+function villageRobustness(): void {
+  // i) 마을 입구 앞 길.
+  {
+    const s = new Sim(newGame(11));
+    const v = s.village();
+    const e = v.entryPt('gate')!;
+    const r = s.eraseRoad([cellAt(e)]);
+    assert(!r.ok && r.reason.includes('마을 입구') && s.village().isWalkable(cellIndex(cellAt(e).x, cellAt(e).y)), '마을 입구 앞 길은 지울 수 없다');
+    console.log('  마을 입구 앞 길 OK');
+  }
+  // ii) 경주장: 마을 입구 → 구경 자리(경주로 아래 바깥)는 오른쪽 변 입구로 들어가 경주로를 돌아간다.
+  {
+    const s = testSim(newGame(12));
+    devOpenAll(s);
+    const st = s.state;
+    const v = s.village();
+    const T = v.race();
+    const o = ((T.lanes - 1) / 2 + 0.5) * T.laneWidth;
+    const inTrack = (p: { x: number; y: number }): boolean => ((p.x - T.center.x) / (T.rx + o)) ** 2 + ((p.y - T.center.y) / (T.ry + o * T.squash)) ** 2 < 1;
+    const rng = new Rng(5);
+    let bad = 0;
+    let n = 0;
+    const from = v.gateSpawn();
+    for (let k = 0; k < 40; k++) {
+      const to = groupGame('race').watchPoint(st, rng);
+      assert(!inTrack(to), '구경 자리는 경주로 밖');
+      for (const [start, path] of [[from, route(st, from, to, 'race')], [to, route(st, to, from, 'gate')]] as const) {
+        let at = start;
+        for (const q of path) {
+          for (let t = 0; t <= 20; t++) {
+            const x = at.x + ((q.x - at.x) * t) / 20;
+            const y = at.y + ((q.y - at.y) * t) / 20;
+            n++;
+            if (inTrack({ x, y })) bad++;
+          }
+          at = q;
+        }
+      }
+    }
+    assert(bad === 0, `경주장 구경 손님이 경주로를 가로지른다 (${bad}/${n})`);
+    console.log('  경주장 둘레 길 OK');
+  }
+  // iii) 큰길을 끊었다가 다시 잇기.
+  {
+    const s = new Sim(newGame(13));
+    const st = s.state;
+    runFor(s, 150);
+    const cut = [{ x: 35, y: 55 }, { x: 35, y: 56 }];
+    assert(s.eraseRoad(cut).ok, '큰길 두 칸 지우기');
+    assert(!s.boothOpen('slot') && !s.boothOpen('oddeven'), '큰길이 끊기면 위쪽 부스가 닫힌다');
+    let maxStray = 0;
+    const streak = new Map<number, number>();
+    for (let i = 0; i < 600; i++) {
+      s.tick(SIM.dt);
+      checkInvariants(s);
+      const off = new Set(strays(s).map((m) => m.id));
+      for (const m of st.monsters) {
+        const k = off.has(m.id) ? (streak.get(m.id) ?? 0) + SIM.dt : 0;
+        streak.set(m.id, k);
+        maxStray = Math.max(maxStray, k);
+      }
+    }
+    assert(maxStray < 25, `길 밖에 남은 손님 (${maxStray.toFixed(1)}초)`);
+    assert(strays(s).length === 0, `60초 뒤 길 밖 손님 ${strays(s).length}`);
+    assert(s.paintRoad(cut).ok && s.boothOpen('slot'), '다시 이으면 열린다');
+    let rounds = 0;
+    s.bus.on('roundStarted', (e) => {
+      if (e.booth === 'slot' || e.booth === 'oddeven') rounds++;
+    });
+    runFor(s, 120);
+    assert(rounds > 0, '다시 이은 뒤 위쪽 부스에서 논다');
+    console.log(`  큰길 끊기·잇기 OK (길 밖에 가장 오래 ${maxStray.toFixed(1)}초)`);
+  }
+  // iv) 일터 치우기.
+  {
+    const s = testSim(newGame(14));
+    devOpenAll(s);
+    const st = s.state;
+    devSeedDebtors(s, 3);
+    runFor(s, 40);
+    const yard = s.village().placed('workyard')!;
+    const debtors = st.monsters.filter((m) => m.bankrupt === true);
+    assert(debtors.length === 3 && s.store(yard.id).ok, `일터 보관하기 (채무자 ${debtors.length})`);
+    runFor(s, 30);
+    // (빚 걸기 판에 불려 가 있던 채무자는 판에서 빚을 다 없앴을 수도 있다: 아직 파산한 손님만 본다.)
+    const waiting = debtors.filter((m) => st.monsters.includes(m) && m.bankrupt === true && m.labor?.match === null);
+    assert(waiting.length > 0 && waiting.every((m) => m.phase === 'waitWork' && onRoad(st, m.pos) && m.path.length === 0), `일터가 없으면 길에서 기다린다 (${debtors.map((m) => `${m.phase}:${onRoad(st, m.pos)}:${m.path.length}`).join(' ')})`);
+    assert(s.autoPlace('workyard').ok, '일터 다시 놓기');
+    runFor(s, 60);
+    assert(debtors.every((m) => !st.monsters.includes(m) || m.bankrupt !== true || m.phase === 'working' || m.phase === 'waitWork' || m.phase === 'toWork'), '다시 놓으면 일하러 간다');
+    assert(debtors.every((m) => !st.monsters.includes(m) || m.bankrupt !== true || m.labor?.wait !== -1 || m.labor?.spot !== -1), '다시 놓으면 일하는 자리나 기다리는 자리가 생긴다');
+    const yard2 = s.village().placed('workyard')!;
+    const still = st.monsters.filter((m) => m.bankrupt === true);
+    assert(still.length > 0 && s.store(yard2.id).ok, '또 보관하기');
+    let relieved = 0;
+    s.bus.on('debtCleared', (e) => {
+      if (e.forgiven) relieved++;
+    });
+    runFor(s, LABOR.noYardSec + 40);
+    assert(relieved >= still.length && st.monsters.every((m) => m.bankrupt !== true), `일터에 못 가면 반장이 빚을 덜어 준다 (${relieved}/${still.length})`);
+    console.log(`  일터 치우기 OK (덜어 줌 ${relieved})`);
+  }
+  // v) 아무렇게나 15분.
+  {
+    const s = testSim(newGame(15));
+    devOpenAll(s);
+    const st = s.state;
+    const rng = new Rng(77);
+    const streak = new Map<number, number>();
+    const grass = new Map<number, number>();
+    let maxStray = 0;
+    let maxGrass = 0;
+    let standing = 0;
+    let through = 0;
+    let erased = 0;
+    let moved = 0;
+    let stored = 0;
+    const pending: { at: number; cells: { x: number; y: number }[] }[] = [];
+    const storedKeys: CatalogKey[] = [];
+    for (let i = 0; i < 9000; i++) {
+      s.tick(SIM.dt);
+      checkInvariants(s);
+      const v = s.village();
+      // 걷는 손님 발밑 길 지우기 (나중에 반쯤은 다시 깐다).
+      if (i % 100 === 0) {
+        const walkers = st.monsters.filter((m) => m.path.length > 0 && v.isWalkable(cellIndex(cellAt(m.pos).x, cellAt(m.pos).y)));
+        const walker = walkers.length > 0 ? rng.pick(walkers) : undefined;
+        if (walker !== undefined) {
+          const c = cellAt(walker.pos);
+          const cells = [c, { x: c.x + 1, y: c.y }, { x: c.x, y: c.y + 1 }, { x: c.x - 1, y: c.y }].filter((q) => v.isRoad(q.x, q.y));
+          if (cells.length > 0 && s.eraseRoad(cells).ok) {
+            erased++;
+            // 지운 길은 10초 뒤 (가끔 1분 뒤) 다시 깐다 (마을이 살아 있게).
+            pending.push({ at: i + (rng.chance(0.7) ? 100 : 600), cells });
+          }
+        }
+      }
+      // 손님이 앉거나 줄 선 부스의 입구 앞 길 지우기.
+      if (i % 300 === 150) {
+        const busy = BOOTH_IDS.filter((b) => v.connected(b) && (st.booths[b].seats.some((x) => x !== null) || st.booths[b].queue.length > 0));
+        const b = busy.length > 0 ? rng.pick(busy) : undefined;
+        const e = b === undefined ? null : v.entryPt(b);
+        if (e !== null && s.eraseRoad([cellAt(e)]).ok) {
+          erased++;
+          pending.push({ at: i + (rng.chance(0.5) ? 150 : 600), cells: [cellAt(e)] });
+        }
+      }
+      for (let k = pending.length - 1; k >= 0; k--) {
+        const p = pending[k]!;
+        if (p.at > i) continue;
+        s.paintRoad(p.cells);
+        pending.splice(k, 1);
+      }
+      // 손님이 있는 부스를 옮기거나 보관했다가 다시 놓기.
+      if (i % 400 === 200) {
+        const busy = BOOTH_IDS.filter((b) => v.placed(b) !== undefined && st.booths[b].seats.some((x) => x !== null));
+        const b = busy.length > 0 ? rng.pick(busy) : undefined;
+        if (b !== undefined && rng.chance(0.5)) {
+          const p = v.placed(b)!;
+          const fp = footprint(b);
+          const spots: { x: number; y: number }[] = [];
+          for (let y = 0; y + fp.h <= GRID.h; y += 2) {
+            for (let x = 0; x + fp.w <= GRID.w; x += 2) {
+              const chk = s.canPlace(b, { x, y }, p.id);
+              if (chk.ok && (x !== p.x || y !== p.y)) spots.push({ x, y });
+            }
+          }
+          const to = spots.length > 0 ? rng.pick(spots) : undefined;
+          if (to !== undefined && s.move(p.id, to).ok) {
+            moved++;
+            // 옮긴 자리 입구에서 길까지 (반쯤은 곧, 반쯤은 10초 뒤에 깐다: 그동안 손님은 끊긴 입구로 나와 길로 돌아간다).
+            const q = s.village().placed(b)!;
+            const road = roadTo(st, s.village().entryCellIndex(q), q.x, q.y, fp.w, fp.h);
+            if (road !== null && road.length > 0) {
+              if (rng.chance(0.5)) s.paintRoad(road);
+              else pending.push({ at: i + 100, cells: road });
+            }
+          }
+        } else if (b !== undefined && s.store(v.placed(b)!.id).ok) {
+          stored++;
+          storedKeys.push(b);
+        }
+      }
+      if (i % 400 === 350 && storedKeys.length > 0) s.autoPlace(storedKeys.shift()!);
+      const off = new Set(strays(s).map((m) => m.id));
+      for (const m of st.monsters) {
+        const k = off.has(m.id) ? (streak.get(m.id) ?? 0) + SIM.dt : 0;
+        streak.set(m.id, k);
+        maxStray = Math.max(maxStray, k);
+        // 길 칸(끊긴 길 조각 포함)도 건물 안도 아닌 풀밭.
+        const c1 = cellAt(m.pos);
+        const g = off.has(m.id) && !s.village().isRoad(c1.x, c1.y) ? (grass.get(m.id) ?? 0) + SIM.dt : 0;
+        grass.set(m.id, g);
+        maxGrass = Math.max(maxGrass, g);
+        if (!off.has(m.id)) continue;
+        // 길을 지우거나 건물을 치운 그 틱은 빼고 (다음 틱에 backToRoad가 걷게 한다).
+        if (m.path.length === 0 && k > SIM.dt * 1.5) standing++;
+        // 길 밖 손님은 건물(장식 포함)을 지나지 않는다.
+        const c = cellAt(m.pos);
+        if (s.village().at(c.x, c.y) !== undefined) through++;
+      }
+    }
+    for (const p of pending) s.paintRoad(p.cells);
+    // 끊긴 길 조각을 따라 끊긴 데까지 걷는 것은 길 위라 괜찮다 (오래 걸릴 수 있다). 풀밭은 되도록 짧게 건너지만,
+    // 길에서 먼 큰 시설(경주장 등)을 손님이 있는 채 보관하면 빈 땅 한가운데에서 길까지 꽤 걸을 수 있다 (건물은 지나지 않는다).
+    assert(maxStray < 120 && maxGrass < 45, `길 밖에 가장 오래 ${maxStray.toFixed(1)}초 (풀밭 ${maxGrass.toFixed(1)}초)`);
+    assert(standing === 0, `길 밖에 서 있는 손님 ${standing}번`);
+    assert(through === 0, `길 밖 손님이 건물을 지남 ${through}번`);
+    console.log(`  아무렇게나 15분 OK (길 지우기 ${erased}, 옮기기 ${moved}, 보관 ${stored}, 길 밖에 가장 오래 ${maxStray.toFixed(1)}초, 풀밭 ${maxGrass.toFixed(1)}초)`);
+  }
+  storeAndMoveRefunds();
+}
+
+/**
+ * 옮기기·보관하기 리뷰 고침: vi) 결과가 난 단체 놀이(done)를 보관해도 건 코인을 또 돌려주지 않는다, vii) 보통 부스의 하던 한판을 보관하면 건 코인을 돌려준다,
+ * viii) 입구 길이 끊겨 덜 걷던 손님은 가게를 옮기고 길을 이으면 새 자리에서 볼일을 본다 (옛 자리 풀밭이 아니라), ix) 일터 입구 길만 끊기면 안에서 일하던 채무자는 그대로 일한다.
+ */
+function storeAndMoveRefunds(): void {
+  // vi)
+  {
+    const s = new Sim(newGame(21));
+    devOpenAll(s);
+    const st = s.state;
+    let done: GroupBoothId | null = null;
+    for (let i = 0; i < 40000 && done === null; i++) {
+      s.tick(SIM.dt);
+      for (const b of GROUP_BOOTHS) {
+        const g = st.booths[b].group;
+        if (g !== null && g.phase === 'done' && g.participants.length >= 2 && g.mode !== 'debt') done = b;
+      }
+    }
+    assert(done !== null, '결과가 난 단체 놀이');
+    const g = st.booths[done].group!;
+    const parts = g.participants.map((e) => st.monsters.find((m) => m.id === e.monster)!);
+    const before = parts.map((m) => m.wallet);
+    const pot0 = st.booths[done].pot;
+    assert(s.store(s.village().placed(done)!.id).ok, '결과가 난 판 보관하기');
+    assert(parts.every((m, k) => m.wallet === before[k]) && st.booths[done].pot === pot0, `결과가 난 판은 건 코인을 또 돌려주지 않는다 (${parts.map((m, k) => m.wallet - (before[k] ?? 0)).join(',')})`);
+    console.log(`  결과가 난 판 보관하기 OK (${done})`);
+  }
+  // vii)
+  {
+    const s = testSim(newGame(23));
+    const st = s.state;
+    let m: Monster | undefined;
+    for (let i = 0; i < 6000 && m === undefined; i++) {
+      s.tick(SIM.dt);
+      const r = st.booths.slot.rounds[0];
+      if (r !== null && r !== undefined && r.elapsed < r.duration * 0.5) m = st.monsters.find((x) => x.id === r.monster);
+    }
+    assert(m !== undefined, '슬롯 한판 중');
+    const r = st.booths.slot.rounds[0]!;
+    const w0 = m.wallet;
+    const pot0 = st.booths.slot.pot;
+    const back = Math.min(r.bet, pot0);
+    assert(s.store(s.village().placed('slot')!.id).ok, '한판 중 보관하기');
+    assert(m.wallet === w0 + back && st.booths.slot.pot === pot0 - back && st.booths.slot.rounds.every((x) => x === null), `하던 한판의 건 코인을 돌려준다 (+${m.wallet - w0}/${back})`);
+    console.log('  한판 중 보관하기 OK');
+  }
+  // viii)
+  {
+    const s = new Sim(newGame(31));
+    devOpenAll(s);
+    const st = s.state;
+    let m: Monster | undefined;
+    for (let i = 0; i < 60000 && m === undefined; i++) {
+      s.tick(SIM.dt);
+      m = st.monsters.find((x) => x.phase === 'toPawnshop' && x.path.length >= 3 && x.dest?.via === 'pawnshop');
+    }
+    assert(m !== undefined, '전당포로 가는 손님');
+    const v = s.village();
+    assert(s.eraseRoad([cellAt(v.entryPt('pawnshop')!)]).ok, '전당포 입구 길 지우기');
+    const p = v.placed('pawnshop')!;
+    const fp = footprint('pawnshop');
+    let to: { x: number; y: number } | null = null;
+    let far = -1;
+    for (let y = 0; y + fp.h <= GRID.h; y++) {
+      for (let x = 0; x + fp.w <= GRID.w; x++) {
+        if (!s.canPlace('pawnshop', { x, y }, p.id).ok) continue;
+        const d = Math.abs(x - p.x) + Math.abs(y - p.y);
+        if (d > far) {
+          far = d;
+          to = { x, y };
+        }
+      }
+    }
+    assert(to !== null && s.move(p.id, to).ok, '전당포 옮기기');
+    const q = s.village().placed('pawnshop')!;
+    const road = roadTo(st, s.village().entryCellIndex(q), q.x, q.y, fp.w, fp.h);
+    if (road !== null && road.length > 0) s.paintRoad(road);
+    const inside = (pt: { x: number; y: number }): boolean => {
+      const c = cellAt(pt);
+      return s.village().at(c.x, c.y)?.key === 'pawnshop';
+    };
+    let ok: boolean | null = null;
+    for (let i = 0; i < 9000 && ok === null && st.monsters.includes(m); i++) {
+      s.tick(SIM.dt);
+      if (m.phase === 'atPawnshop' && m.path.length === 0) ok = inside(m.pos);
+      else if (m.phase !== 'toPawnshop') ok = m.dest === null || m.dest === undefined || inside(m.dest) || m.dest.via !== 'pawnshop';
+    }
+    assert(ok !== false, `옮긴 전당포의 새 자리에서 볼일을 본다 (${m.phase} ${JSON.stringify(m.pos)})`);
+    console.log('  끊긴 입구 → 옮기고 잇기 OK');
+  }
+  // ix)
+  {
+    const s = testSim(newGame(14));
+    devOpenAll(s);
+    const st = s.state;
+    // 빚 걸기 판이 채무자를 데려가지 않게.
+    for (const b of DEBT_MATCH.booths) st.booths[b].unlocked = false;
+    devSeedDebtors(s, 4);
+    assert(runUntil(s, 120, () => st.monsters.some((m) => m.bankrupt === true && m.phase === 'working')), '일터에서 일한다');
+    const v = s.village();
+    assert(s.eraseRoad([cellAt(v.entryPt('workyard')!)]).ok, '일터 입구 길 지우기');
+    const working = st.monsters.filter((m) => m.bankrupt === true && m.phase === 'working');
+    let noYard = 0;
+    s.bus.on('toast', (e) => {
+      if (e.text.includes('일터로 가는 길이 없어서')) noYard++;
+    });
+    runFor(s, LABOR.noYardSec + 20);
+    const inYard = (m: Monster): boolean => {
+      const c = cellAt(m.pos);
+      return s.village().at(c.x, c.y)?.key === 'workyard';
+    };
+    assert(working.every((m) => !st.monsters.includes(m) || m.bankrupt !== true || (inYard(m) && (m.phase === 'working' || m.phase === 'waitWork' || m.phase === 'toWork'))), '입구 길만 끊기면 안의 채무자는 그대로 일한다');
+    assert(noYard === 0, `일터 안 채무자에게 '길이 없어서' 덜어 주기 ${noYard}`);
+    console.log('  일터 입구 길 끊기 OK');
+  }
+}
+
 // ── 실행 ───────────────────────────────────────────────────────────────
 
 const seed = num('seed', 1);
 const minutes = num('minutes', 30);
 if (flag('selftest')) {
   selftest();
+} else if (flag('village')) {
+  villageTests();
+  console.log('\n배치형 마을 시험 통과');
 } else if (flag('auto') && flag('seeds')) {
   runSeeds(num('seeds', 8), minutes, flag('detail'), num('first', 1));
 } else if (flag('auto')) {

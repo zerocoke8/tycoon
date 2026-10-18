@@ -12,7 +12,8 @@
 
 import { Container, Graphics, GraphicsContext } from 'pixi.js';
 import { RACE } from '../data/defs.ts';
-import { BOOTH_SPOTS, RACE_TRACK, trackPoint } from '../data/map.ts';
+import { RACE_GEO, type RaceGeo } from '../data/catalog.ts';
+import { lanePoint } from '../data/map.ts';
 import type { SimApi } from '../sim/api.ts';
 import { raceProgress } from '../sim/race.ts';
 import { raceOf } from '../sim/group/core.ts';
@@ -20,7 +21,7 @@ import type { GroupState, RaceResult, RacerIndex } from '../sim/types.ts';
 import { ArtNode, artMeta } from './art.ts';
 import type { BuildingsView } from './buildings.ts';
 import type { FxLayer } from './fx.ts';
-import { RACE_LAP_P, RACE_START_P, boxHits, clamp, districtAt, follow, onTrack, raceTrackP, type Box, type ViewRect } from './mapUtil.ts';
+import { RACE_LAP_P, RACE_START_P, boxHits, clamp, follow, onTrack, raceTrackP, type Box, type ViewRect } from './mapUtil.ts';
 
 /** 선수 그림 배율 (세계 px / 캔버스 px): 손님(약 105px)보다 작게 약 60~80px 폭 (레인 46px보다 조금 커서 출발선에서는 살짝 겹친다). */
 const RACER_K = 0.15;
@@ -105,8 +106,8 @@ function backOut(t: number): number {
 
 /** 레인 lane의 p 자리에서 p 한 단위당 세계 px (경주로 위 빠르기 바꾸기). */
 function trackSpeed(lane: number, p: number): number {
-  const a = trackPoint(lane, p);
-  const b = trackPoint(lane, p + 0.002);
+  const a = lanePoint(RACE_GEO, lane, p);
+  const b = lanePoint(RACE_GEO, lane, p + 0.002);
   return Math.max(1, Math.hypot(b.x - a.x, b.y - a.y) / 0.002);
 }
 
@@ -123,7 +124,9 @@ export class RaceTrackView {
   private readonly shadowCtx: GraphicsContext;
   private readonly cushions = new Graphics();
   private readonly cushionBox: Box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
-  private readonly district = districtAt(RACE_TRACK.center.x, RACE_TRACK.center.y);
+  /** 경주로 (세계 좌표, 만들 때 놓인 자리: 경주장을 옮기면 world.ts가 새로 만든다). */
+  private readonly T: RaceGeo;
+  private readonly placed: boolean;
   private shown = false;
   private initialized = false;
   /** 지금 화면이 따라가는 경주 (sim GroupState.play.race와 같은 객체). */
@@ -138,6 +141,9 @@ export class RaceTrackView {
     this.sim = sim;
     this.fx = fx;
     this.buildings = buildings;
+    const v = sim.village();
+    this.T = v.race();
+    this.placed = v.placed('race') !== undefined;
     this.shadowCtx = new GraphicsContext().ellipse(0, 0, 1, 1).fill({ color: 0x000000, alpha: 0.13 });
 
     // 관중석 방석 (바닥에 깔리는 것이라 그림자층 맨 아래: 손님 그림자가 방석 위에).
@@ -165,7 +171,7 @@ export class RaceTrackView {
       layers.objects.addChild(node);
       layers.shadows.addChild(shadow);
       const m = artMeta('racers', def.key);
-      const start = trackPoint(i, RACE_START_P);
+      const start = lanePoint(this.T, i, RACE_START_P);
       const face: 1 | -1 = start.dx > 0 ? -1 : 1;
       this.racers.push({
         index, lane: i, node, body, art, shadow, gait: GAITS[def.key] ?? DEFAULT_GAIT,
@@ -180,7 +186,7 @@ export class RaceTrackView {
 
   private drawCushions(): void {
     const g = this.cushions;
-    const seats = BOOTH_SPOTS.race.seats;
+    const seats = this.sim.village().booth('race').seats;
     seats.forEach((s, i) => {
       const x = s.x - CUSHION_W / 2;
       const y = s.y - CUSHION_H * 0.62;
@@ -198,8 +204,8 @@ export class RaceTrackView {
 
   /** 누른 곳이 경주로(모래 띠)나 선수인가 (구역이 열렸을 때만). 그러면 경주장을 연다. */
   hitTest(wx: number, wy: number): boolean {
-    if (this.district !== null && !this.sim.state.districts.includes(this.district)) return false;
-    if (onTrack(wx, wy, 10)) return true;
+    if (!this.placed) return false;
+    if (onTrack(this.T, wx, wy, 10)) return true;
     if (!this.shown) return false;
     for (const r of this.racers) {
       const hw = Math.max(30, r.halfW + 10);
@@ -214,7 +220,7 @@ export class RaceTrackView {
     this.time += dt;
     const st = this.sim.state;
     const bs = st.booths.race;
-    const open = this.district === null || st.districts.includes(this.district);
+    const open = this.placed;
     this.cushions.visible = open;
     this.cushions.alpha = bs.unlocked ? 1 : LOCKED_ALPHA;
     this.cushions.culled = !boxHits(this.cushionBox, view);
@@ -289,7 +295,7 @@ export class RaceTrackView {
     if (rs !== null && rs.phase === 'gathering') {
       const c = Math.ceil(rs.countdown - 1e-6);
       if (c >= 1 && c <= COUNT_FROM && c !== this.lastCount) {
-        const g = RACE_TRACK.gate;
+        const g = this.T.gate;
         this.fx.floatText(g.x, g.y - 210, `${c}`, 'win', c === 1);
         this.buildings.hostHop('race', 0, 0.6);
       }
@@ -307,7 +313,7 @@ export class RaceTrackView {
 
   /** 1등이 결승선을 지났다: 색종이, 해설자 통통, 1등 선수 반짝. */
   private finishedRace(res: RaceResult): void {
-    const f = trackPoint(1, 1);
+    const f = lanePoint(this.T, 1, 1);
     this.fx.confetti(f.x, f.y - 20, 34);
     this.buildings.hostHop('race', 1, 1.5);
     const w = this.racers[res.finishOrder[0] ?? 0];
@@ -341,7 +347,7 @@ export class RaceTrackView {
     } else {
       r.p = RACE_START_P;
     }
-    const pt = trackPoint(r.lane, r.p);
+    const pt = lanePoint(this.T, r.lane, r.p);
     const moved = Math.hypot(pt.x - r.x, pt.y - r.y);
     // 순간이동(돌아가다 경주가 시작됨)은 걸음으로 치지 않는다.
     const step = moved > 200 ? 0 : moved;
@@ -374,7 +380,7 @@ export class RaceTrackView {
     let sx = 1 - g.squash * 0.6 * (hop - 0.4) * run;
     let rot = s * g.rock * run;
     // 달리는 쪽으로 살짝 기울기 (위아래로 달릴 때).
-    const pt = trackPoint(r.lane, r.p);
+    const pt = lanePoint(this.T, r.lane, r.p);
     const head = r.face === -1 ? Math.atan2(pt.dy, pt.dx) : Math.atan2(-pt.dy, -pt.dx);
     rot += clamp(head, -0.5, 0.5) * 0.3 * run;
 

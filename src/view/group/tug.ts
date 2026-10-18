@@ -9,7 +9,8 @@
 
 import { Graphics } from 'pixi.js';
 import { SIDES } from '../../data/defs.ts';
-import { TUG_FIELD, type Pt } from '../../data/map.ts';
+import type { TugGeo } from '../../data/catalog.ts';
+import type { Pt } from '../../data/map.ts';
 import { ease } from '../../core/tween.ts';
 import { trackAt } from '../../sim/group/core.ts';
 import type { GroupEntry, GroupPlay, GroupState, Pose } from '../../sim/types.ts';
@@ -50,6 +51,8 @@ interface Grip {
 const grip = (): Grip => ({ has: false, dropped: false, x: 0, y: 0, fx: 0, fy: 0 });
 
 export class TugMapView extends GroupMapBase {
+  /** 줄다리기 마당 (세계 좌표, 만들 때 놓인 자리). */
+  private readonly F: TugGeo = this.ctx.sim.village().tug();
   private readonly bodies: PuppetSet;
   private readonly lie = new LieShadows();
   private readonly lines = new Graphics();
@@ -74,11 +77,11 @@ export class TugMapView extends GroupMapBase {
     super(ctx);
     this.bodies = new PuppetSet(ctx.monsters);
     this.own(ctx.layers.floor, this.lines);
-    const c = TUG_FIELD.center;
+    const c = this.F.center;
     // 가운데 흰 점선과 홍·청 승리 선.
     for (let y = c.y - 64; y < c.y + 60; y += 22) this.lines.roundRect(c.x - 3, y, 6, 12, 3).fill({ color: CHALK, alpha: 0.8 });
     for (let s = 0; s < 2; s++) {
-      const x = c.x + (s === 0 ? -1 : 1) * TUG_FIELD.lineHalf;
+      const x = c.x + (s === 0 ? -1 : 1) * this.F.lineHalf;
       this.lines.roundRect(x - 5, c.y - 70, 10, 134, 5).fill({ color: CHALK, alpha: 0.9 });
       this.lines.roundRect(x - 2.5, c.y - 66, 5, 126, 2.5).fill({ color: SIDES[s as 0 | 1].color, alpha: 0.9 });
     }
@@ -88,8 +91,8 @@ export class TugMapView extends GroupMapBase {
   }
 
   private flashLine(side: 0 | 1): Graphics {
-    const c = TUG_FIELD.center;
-    const x = c.x + (side === 0 ? -1 : 1) * TUG_FIELD.lineHalf;
+    const c = this.F.center;
+    const x = c.x + (side === 0 ? -1 : 1) * this.F.lineHalf;
     const g = new Graphics().roundRect(x - 14, c.y - 78, 28, 150, 14).fill({ color: 0xfff3b0, alpha: 0.85 });
     g.alpha = 0;
     return this.own(this.ctx.layers.floor, g);
@@ -109,7 +112,7 @@ export class TugMapView extends GroupMapBase {
   }
 
   private seatPt(seat: number): Pt {
-    return this.spot.seats[seat] ?? TUG_FIELD.center;
+    return this.spot.seats[seat] ?? this.F.center;
   }
 
   protected draw(dt: number, view: ViewRect): void {
@@ -119,7 +122,7 @@ export class TugMapView extends GroupMapBase {
     const prev = this.prevClock;
     this.prevClock = t;
     // 시작 숫자 3·2·1 (심판대 위).
-    this.startCount(TUG_FIELD.center.x, this.spot.base.y - 250, REFEREE);
+    this.startCount(this.F.center.x, this.spot.base.y - 250, REFEREE);
     for (let s = 0; s < 2; s++) for (let r = 0; r < RANKS; r++) ((this.grips[s] as Grip[])[r] as Grip).has = false;
     this.lie.begin();
     const tug = play !== null && play.kind === 'tug' ? play : null;
@@ -132,7 +135,7 @@ export class TugMapView extends GroupMapBase {
     this.flashT = Math.max(0, this.flashT - dt);
     for (let s = 0; s < 2; s++) (this.flash[s] as Graphics).alpha = s === this.flashSide ? Math.sin(Math.min(1, this.flashT / 1.6) * Math.PI) * (0.6 + 0.4 * Math.sin(this.time * 18)) : 0;
     // 밧줄: 보일 때만.
-    const c = TUG_FIELD.center;
+    const c = this.F.center;
     const onScreen = view.x1 >= c.x - 620 && view.x0 <= c.x + 620 && view.y1 >= c.y - 160 && view.y0 <= c.y + 120;
     this.rope.visible = onScreen;
     if (!onScreen) {
@@ -151,8 +154,8 @@ export class TugMapView extends GroupMapBase {
    * 줄 잡은 손님마다 몸을 맡기고 손 자리를 grips에 적는다. 돌려주는 값 = 리본(밧줄 가운데)의 x.
    */
   private pull(g: GroupState, play: Extract<GroupPlay, { kind: 'tug' }> | null, t: number, prev: number): number {
-    const c = TUG_FIELD.center;
-    const R = TUG_FIELD.reach;
+    const c = this.F.center;
+    const R = this.F.reach;
     const fx = this.ctx.fx;
     const cv = play === null ? 0 : t < play.crossAt ? trackAt(play.tracks[0] ?? NO_KEYS, t) : play.winner === 0 ? 1 : -1;
     const vel = play === null || t >= play.crossAt ? 0 : (cv - trackAt(play.tracks[0] ?? NO_KEYS, t - 0.15)) / 0.15;
@@ -329,12 +332,12 @@ export class TugMapView extends GroupMapBase {
       const x1 = p[i + 2] as number;
       if ((x0 - x) * (x1 - x) <= 0 && x0 !== x1) return (p[i + 1] as number) + ((p[i + 3] as number) - (p[i + 1] as number)) * ((x - x0) / (x1 - x0));
     }
-    return TUG_FIELD.center.y + GROUND;
+    return this.F.center.y + GROUND;
   }
 
   /** 아무도 없을 때: 땅에 놓인 밧줄 (한 번만 그린다). */
   private drawRest(): void {
-    const c = TUG_FIELD.center;
+    const c = this.F.center;
     this.n = 0;
     const y = c.y + GROUND + 4;
     for (let i = 0; i <= 24; i++) {
@@ -349,7 +352,7 @@ export class TugMapView extends GroupMapBase {
 
   /** 줄 잡은 손을 지나는 밧줄 (판 중에는 팽팽, 모이는 중에는 처진다). */
   private drawRope(ribbonX: number): void {
-    const c = TUG_FIELD.center;
+    const c = this.F.center;
     const red = this.grips[0];
     const blue = this.grips[1];
     const play = this.play;
@@ -456,7 +459,7 @@ export class TugMapView extends GroupMapBase {
   private events(play: Extract<GroupPlay, { kind: 'tug' }>, t: number): void {
     const fx = this.ctx.fx;
     const b = this.ctx.buildings;
-    const c = TUG_FIELD.center;
+    const c = this.F.center;
     while (this.evi < play.events.length) {
       const ev = play.events[this.evi];
       if (ev === undefined || ev.t > t) break;
@@ -473,11 +476,11 @@ export class TugMapView extends GroupMapBase {
         case 'flip':
           // 역전 시작: 응원단장이 크게, 리본에서 반짝.
           b.hostHop(this.booth, CHEER, 1.6);
-          fx.sparkles(c.x - trackAt(play.tracks[0] ?? NO_KEYS, t) * TUG_FIELD.reach, c.y - 60, 6, 50);
+          fx.sparkles(c.x - trackAt(play.tracks[0] ?? NO_KEYS, t) * this.F.reach, c.y - 60, 6, 50);
           break;
         case 'finish': {
           // 선을 넘었다: 리본 자리 먼지, 그 편 선이 번쩍, 심판·응원단장 들썩. 역전이면 색종이.
-          const x = c.x + (play.winner === 0 ? -1 : 1) * TUG_FIELD.reach;
+          const x = c.x + (play.winner === 0 ? -1 : 1) * this.F.reach;
           fx.puff(x, c.y - 20, 7, 62);
           this.flashSide = play.winner;
           this.flashT = 1.6;
@@ -493,7 +496,7 @@ export class TugMapView extends GroupMapBase {
   }
 
   override hitTest(wx: number, wy: number): boolean {
-    const c = TUG_FIELD.center;
+    const c = this.F.center;
     return wx >= c.x - 560 && wx <= c.x + 560 && wy >= c.y - 120 && wy <= c.y + 60;
   }
 
