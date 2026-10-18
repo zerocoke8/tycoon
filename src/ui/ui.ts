@@ -1,8 +1,12 @@
-// HTML 오버레이 본체: HUD, 아래 탭, 시트(짓기·주민·공방·도감·가방·설정·건물), 손님 카드, 부스 패널, 토스트.
+// HTML 오버레이 본체: HUD, 아래 탭, 시트(짓기·주민·공방·도감·가방·설정·건물·가게), 손님 카드, 부스 패널, 토스트.
+// 가게 시트(다섯째 묶음)가 열리면 지도 카메라는 시트 위 띠에 그 가게를 맞춘다 (손님 카드처럼).
 // sim은 SimApi로만 쓰고, 화면 쪽은 UiHooks로만 부른다. main.ts가 매 프레임 update(dt)를 부른다.
 
 import './ui.css';
-import { isGroupBooth, type BoothId, type BuildingId } from '../data/defs.ts';
+import { catalogKind, footprint, type CatalogKey } from '../data/catalog.ts';
+import { isGroupBooth, type BoothId, type BuildingId, type ShopId } from '../data/defs.ts';
+import { CELL } from '../data/map.ts';
+import { truckPos } from '../sim/shops.ts';
 import type { Result, SimApi } from '../sim/api.ts';
 import type { MonsterId } from '../sim/types.ts';
 import type { BuildMode, BuildState, UiApi, UiHooks } from '../view/contracts.ts';
@@ -17,11 +21,13 @@ import { BuildingPanel, BuildPanel, isBuildCat, LockedBoothPanel, PlacedPanel } 
 import { BankPanel, DebtLog, PawnshopPanel, WorkyardPanel, type DebtBuildingId } from './panels/debt.ts';
 import { GoalChip } from './goal.ts';
 import { DexPanel } from './panels/dex.ts';
+import { ShopPanel } from './panels/shop.ts';
 import { BagPanel, SettingsPanel } from './panels/misc.ts';
 import { StaffPanel } from './panels/staff.ts';
 import { WorkshopPanel } from './panels/workshop.ts';
 import { loadPicIndex } from './pics.ts';
 import { Sheet } from './sheet.ts';
+import { ShopLog } from './shopLog.ts';
 
 /** 숫자 갱신 간격 (초): 4Hz. */
 const REFRESH_SEC = 0.25;
@@ -43,6 +49,7 @@ export class Ui implements UiApi, UiCtx {
   readonly sim: SimApi;
   readonly hooks: UiHooks;
   readonly menu: Menu;
+  readonly shopLog: ShopLog;
   private readonly root: HTMLElement;
   private readonly readInsets: () => { top: number; bottom: number };
   private readonly hud: Hud;
@@ -63,6 +70,8 @@ export class Ui implements UiApi, UiCtx {
   private readonly building: BuildingPanel;
   private readonly lockedBooth: LockedBoothPanel;
   private readonly placedPanel: PlacedPanel;
+  /** 가게 시트 (다섯째 묶음). */
+  private readonly shopPanel: ShopPanel;
   /** 짓기 모드 ✓/✕ 띠. */
   private readonly buildBar: BuildBar;
   /** 넷째 묶음 건물 시트 (전당포 진열장·은행 대출·일터 일꾼). */
@@ -79,6 +88,7 @@ export class Ui implements UiApi, UiCtx {
     this.root = root;
     this.sim = sim;
     this.hooks = hooks;
+    this.shopLog = new ShopLog(sim);
     injectHead();
     root.classList.add('mpv-ui');
     root.replaceChildren();
@@ -118,6 +128,7 @@ export class Ui implements UiApi, UiCtx {
     this.building = new BuildingPanel(this);
     this.lockedBooth = new LockedBoothPanel(this);
     this.placedPanel = new PlacedPanel(this);
+    this.shopPanel = new ShopPanel(this);
     this.debtSheets = { pawnshop: new PawnshopPanel(this), bank: new BankPanel(this), workyard: new WorkyardPanel(this, new DebtLog(sim)) };
 
     const bus = sim.bus;
@@ -163,8 +174,14 @@ export class Ui implements UiApi, UiCtx {
     // 토스트는 HUD·다음 목표 칩 바로 아래에 (칩의 비용 줄을 가리지 않게).
     this.root.style.setProperty('--toast-top', `${Math.round(top + 4)}px`);
     const h = this.root.clientHeight;
-    // 짓기 모드 띠가 떠 있으면 그 위까지 (유령·✓/✕가 띠에 가리지 않게).
-    const bottom = this.card.isOpen ? h - this.card.el.offsetTop + 8 : this.buildBar.visible ? h - this.buildBar.el.offsetTop + 6 : this.nav.el.offsetHeight;
+    // 짓기 모드 띠가 떠 있으면 그 위까지 (유령·✓/✕가 띠에 가리지 않게), 가게 시트가 열려 있으면 시트 위까지 (그 가게가 시트 위에 보이게).
+    const bottom = this.card.isOpen
+      ? h - this.card.el.offsetTop + 8
+      : this.buildBar.visible
+        ? h - this.buildBar.el.offsetTop + 6
+        : this.shopSheetOpen()
+          ? h - this.sheet.el.offsetTop + 6
+          : this.nav.el.offsetHeight;
     this.hooks.world.setViewInset(top, Math.max(0, bottom));
     this.buildBar.setBand(top, h - Math.max(0, bottom));
   }
@@ -241,9 +258,39 @@ export class Ui implements UiApi, UiCtx {
   }
 
   showPlaced(id: number): void {
-    if (this.sim.village().byId.get(id) === undefined) return;
+    const p = this.sim.village().byId.get(id);
+    if (p === undefined) return;
+    if (catalogKind(p.key) === 'shop') {
+      this.showShop(p.key as ShopId);
+      return;
+    }
     this.placedPanel.id = id;
     this.openSheet(this.placedPanel, `placed:${id}`, null, true);
+  }
+
+  showShop(s: ShopId): void {
+    this.shopPanel.shop = s;
+    this.openSheet(this.shopPanel, `shop:${s}`, null, false);
+    // 놓인 가게: 시트를 조금 낮게 (위 띠에 가게가 보이게, 짧은 폰은 더: shops.css .mpv-shopsheet).
+    const v = this.sim.village();
+    this.sheet.el.classList.toggle('mpv-shopsheet', v.placed(s) !== undefined);
+    this.syncInsets();
+    // 놓인 가게면 시트 위 띠에 맞춘다 (트럭은 길에 나가 있으면 트럭).
+    if (v.placed(s) === undefined) return;
+    const fp = footprint(s);
+    const o = v.origin(s);
+    const out = s === 'icecream_truck' && this.sim.state.shops.icecream_truck.truck?.parked === false;
+    // 그림이 발자국 위로 1~2칸 삐져나오니 가운데를 조금 위로, 가게 전체 (+ 지붕)가 띠에 들어오게.
+    const at = out ? truckPos(this.sim.state) : { x: o.x + (fp.w * CELL) / 2, y: o.y + fp.h * CELL * 0.3 };
+    const band = Math.max(120, this.root.clientHeight - this.sheet.el.offsetHeight - this.hud.el.getBoundingClientRect().bottom);
+    // 너무 멀리 빼면 마을 가장자리 가게는 카메라 울타리에 걸려 띠에 오지 못한다 (0.42 아래로는 빼지 않는다).
+    const z = out ? 0.6 : Math.min(0.6, Math.max(0.42, Math.min(band / (fp.h * CELL + 60), (this.root.clientWidth * 0.95) / (fp.w * CELL))));
+    this.hooks.world.focusOn(out ? { x: at.x, y: at.y - 40 } : at, z);
+  }
+
+  /** 가게 시트가 열려 있나. */
+  private shopSheetOpen(): boolean {
+    return this.sheet.isOpen && this.sheetPanel === this.shopPanel;
   }
 
   showLand(chunk: number): void {
@@ -259,8 +306,9 @@ export class Ui implements UiApi, UiCtx {
     this.markDirty();
   }
 
-  openBuild(category?: string): void {
+  openBuild(category?: string, focus?: CatalogKey): void {
     if (isBuildCat(category)) this.buildPanel.cat = category;
+    this.buildPanel.focus = focus ?? null;
     const key = 'tab:build';
     if (this.sheetKey === key && this.sheet.isOpen) {
       this.buildPanel.refresh(true);
@@ -350,6 +398,7 @@ export class Ui implements UiApi, UiCtx {
     this.sheetKey = key;
     this.sheet.setTitle(title);
     this.sheet.el.classList.toggle('fit', fit);
+    this.sheet.el.classList.remove('mpv-shopsheet');
     if (!same) {
       this.sheet.body.replaceChildren(panel.el);
       this.sheet.body.scrollTop = 0;

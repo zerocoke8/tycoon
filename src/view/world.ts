@@ -4,7 +4,7 @@
 // 사지 않은 땅의 구름(land.ts)은 물체층 안에서 땅 조각 한 줄(띠)의 아래 변 y로 정렬한다: 구름 바로 아래 키 큰 건물이 구름 앞에 선다.
 // 짓기 모드(땅 사기 빼고)에서는 바닥에 칸 금을 깐다 (ground.ts setGrid: 건물 아래).
 // 조작: 한 손가락 끌기 = 이동(관성), 두 손가락 = 확대·축소(두 손가락 가운데 기준), 휠 = 확대·축소(커서 기준).
-//       짧게 누르기(8px 안, 350ms 안) = 누르기: 손님 → 부스 → 건물 → 단체 놀이 마당(경주로·모래판·밧줄·연…) → 장식 → 구름(사지 않은 땅) → 빈 땅.
+//       짧게 누르기(8px 안, 350ms 안) = 누르기: 손님 → 아이스크림 트럭 → 부스 → 건물 → 단체 놀이 마당(경주로·모래판·밧줄·연…) → 가게 → 놀이기구 → 장식 → 구름(사지 않은 땅) → 빈 땅.
 // 짓기 모드 (DESIGN 6.1, view/buildMode.ts): 놓기·옮기기 = 유령을 잡고 끌면 유령이 칸에 붙어 따라오고, 유령 밖을 끌면 지도 이동, 누르면 유령이 그리로.
 //       길 깔기·지우기 = 한 손가락이 길을 칠한다. 두 손가락은 언제나 지도 이동·확대. 유령·붓을 끄는 손가락이 화면 가장자리에 닿으면 지도가 그쪽으로 (edgePan).
 //       땅 사기 모드에서는 한 손가락 끌기 = 이동, 누르기 = 조각 고르기. UI가 setBuildMode·confirmBuild·cancelBuild·undoBuild를 부르고 buildAnchor로 ✓/✕를 유령 옆에 띄운다.
@@ -12,6 +12,9 @@
 // 단체 놀이 화면(경주장 racetrack.ts, 씨름·오리배·연·줄다리기·보물찾기 view/group/<booth>.ts)은 view/group/registry.ts가 부스마다 만든다.
 // 손님을 그리기 전에 단체 놀이 화면을 먼저 돌린다 (손님 몸을 그 프레임에 맡길 수 있게).
 // 넷째 묶음 (DESIGN 3.7) 연출(빚 게이지·표, 전당포·은행 볼일, 일터 먼지·재료, 다 갚음, 빚 걸기 판)은 debtMap.ts: 손님을 그린 뒤 돌린다.
+// 다섯째 묶음 (DESIGN 3.8) 가게: 그림·주인은 shops.ts (ShopsView), 먹거리·꾸미기·선물 가게 연출(주인 몸짓·건네기·식당 테이블·배 터짐·미용실)과
+//   아이스크림 트럭은 shopsFood.ts (ShopLifeView → truck.ts TruckView), 회전목마·관람차 그림과 탄 손님은 rides.ts (RidesView),
+//   여관·온천·점집·사진관 연출은 rest.ts (RestView). 손님 몸을 맡기니 이 순서로 손님보다 먼저 돌린다. 가게·트럭·놀이기구를 누르면 onTapPlaced(Placed.id).
 // sim은 읽기만 한다 (sim.state를 매 프레임 읽고, sim.bus 이벤트로 연출). 세계 크기는 map.ts WORLD를 따른다.
 
 import { Container, Graphics, Rectangle, type Application, type FederatedPointerEvent, type FederatedWheelEvent } from 'pixi.js';
@@ -33,6 +36,10 @@ import { LandView } from './land.ts';
 import { clamp, follow, makeViewRect, type ViewRect } from './mapUtil.ts';
 import { GROUP_MAP, type GroupMapRenderer } from './group/registry.ts';
 import { MonstersView } from './monsterView.ts';
+import { ShopsView } from './shops.ts';
+import { ShopLifeView } from './shopsFood.ts';
+import { RestView } from './rest.ts';
+import { RidesView } from './rides.ts';
 
 export const ZOOM_MIN = 0.35;
 export const ZOOM_MAX = 1.6;
@@ -116,6 +123,13 @@ export class VillageView implements VillageViewApi {
   private readonly land: LandView;
   private readonly buildings: BuildingsView;
   private readonly monsters: MonstersView;
+  /** 가게 그림·주인 (다섯째 묶음, shops.ts). */
+  private readonly shops: ShopsView;
+  /** 먹거리·꾸미기·선물 가게 연출·아이스크림 트럭 (shopsFood.ts·truck.ts: shops.ts 다음, 손님 전). */
+  private readonly shopLife: ShopLifeView;
+  /** 놀이기구 (rides.ts: 회전목마·관람차)와 쉼·재미 가게 연출 (rest.ts: 여관·온천·점집·사진관): shops.ts 다음, 손님 전. */
+  private readonly rides: RidesView;
+  private readonly rest: RestView;
   /** 단체 놀이 화면 (부스마다 하나, view/group/registry.ts). 놓인 자리가 바뀌면 새로 만든다. */
   private groups: { readonly booth: GroupBoothId; readonly r: GroupMapRenderer }[] = [];
   private readonly groupLayers: { floor: Container; shadows: Container; objects: Container; effects: Container; sky: Container };
@@ -217,6 +231,10 @@ export class VillageView implements VillageViewApi {
     this.buildings = new BuildingsView(sim, { objects: this.objectLayer, floor: this.floorLayer }, this.fx, renderer);
     this.land = new LandView(sim, this.objectLayer, renderer, this.fx);
     this.monsters = new MonstersView(sim, { objects: this.objectLayer, shadows: this.shadowLayer, effects: this.emoteLayer }, this.fx);
+    this.shops = new ShopsView(sim, { objects: this.objectLayer, floor: this.floorLayer });
+    this.shopLife = new ShopLifeView({ sim, layers: { objects: this.objectLayer, shadows: this.shadowLayer, effects: this.effectLayer }, fx: this.fx, shops: this.shops, monsters: this.monsters });
+    this.rides = new RidesView(sim, { objects: this.objectLayer, effects: this.effectLayer }, this.fx, this.monsters, this.shops);
+    this.rest = new RestView(sim, { objects: this.objectLayer, effects: this.effectLayer }, this.fx, this.monsters, this.shops);
     this.groupLayers = { floor: this.floorLayer, shadows: this.shadowLayer, objects: this.objectLayer, effects: this.effectLayer, sky: this.skyLayer };
     this.syncGroups();
     this.debt = new DebtMapView({ sim, layer: this.debtLayer, fx: this.fx, buildings: this.buildings, monsters: this.monsters });
@@ -286,6 +304,11 @@ export class VillageView implements VillageViewApi {
         this.landBought = e.chunk;
       }),
       bus.on('staffChanged', () => this.buildings.refresh()),
+      // 다섯째 묶음: 팁 (코인이 손님에게서 진행자에게 톡). 꽃 선물 (꽃다발이 친구 손으로·하트)·트럭이 섰다 (음표 말풍선)는 shopsFood.ts·truck.ts, 사진 (찰칵)은 rest.ts.
+      bus.on('tip', (e) => {
+        const v = this.monsters.get(e.id);
+        if (v !== undefined) this.fx.coinArc(v.x, v.y - v.headH * 0.5, e.at.x, e.at.y - 90, Math.min(6, 2 + Math.round(e.amount / 6)));
+      }),
     );
 
     // VillageView는 무대 맨 아래 (확대 화면·다른 층이 위에 온다).
@@ -384,6 +407,10 @@ export class VillageView implements VillageViewApi {
     if (this.debugNode !== null && this.debugNode.visible && this.debugStamp !== village.stamp.place + village.stamp.road * 1e6) this.setDebug(true);
     // 단체 놀이 화면 먼저 (그 프레임의 손님 몸을 맡긴다), 그다음 손님.
     for (const g of this.groups) g.r.update(dt, this.view);
+    this.shops.update(dt, this.view);
+    this.shopLife.update(dt, this.view, this.zoom);
+    this.rides.update(dt, this.view);
+    this.rest.update(dt, this.view);
     this.monsters.update(dt, this.time, this.view, this.zoom);
     this.debt.update(dt, this.view, this.zoom);
     if (this.debugGuests.g.visible && this.debugGuests.g.parent !== null) this.debugGuests.update(this.sim.state, dt, this.zoom);
@@ -584,6 +611,10 @@ export class VillageView implements VillageViewApi {
     for (const g of this.groups) g.r.destroy();
     this.build.destroy();
     this.debt.destroy();
+    this.shopLife.destroy();
+    this.rides.destroy();
+    this.rest.destroy();
+    this.shops.destroy();
     this.monsters.destroy();
     this.buildings.destroy();
     this.land.destroy();
@@ -716,9 +747,9 @@ export class VillageView implements VillageViewApi {
           const f = follow(5, dt);
           this.zoom += (this.focusZoom - this.zoom) * f;
           this.computeBounds(this.zoom);
-          this.camX += (clamp(v.x, this.bx0, this.bx1) - this.camX) * f;
-          // 손님(몸 가운데)이 보이는 띠의 가운데에 (카드가 열리면 카드 위).
-          this.camY += (clamp(v.y - v.headH * 0.5 + this.bandShift(this.zoom), this.by0, this.by1) - this.camY) * f;
+          // 그린 몸 가운데 (곤돌라·목마에 탄 손님은 탄 자리)가 보이는 띠의 가운데에 (카드가 열리면 카드 위).
+          this.camX += (clamp(v.centerX, this.bx0, this.bx1) - this.camX) * f;
+          this.camY += (clamp(v.centerY + this.bandShift(this.zoom), this.by0, this.by1) - this.camY) * f;
         }
       } else if (this.focusing) {
         const f = follow(6, dt);
@@ -1029,7 +1060,7 @@ export class VillageView implements VillageViewApi {
     }
   }
 
-  /** 누르기: 손님(앞쪽) → 부스 → 건물 → 단체 놀이 마당 → 장식 → 구름 덮인 땅 → 빈 땅. 땅 사기 모드에서는 조각 고르기. */
+  /** 누르기: 손님(앞쪽) → 아이스크림 트럭 → 부스 → 건물 → 단체 놀이 마당 → 가게 → 놀이기구 → 장식 → 구름 덮인 땅 → 빈 땅. 땅 사기 모드에서는 조각 고르기. */
   private tap(sx: number, sy: number): void {
     const w = this.screenToWorld(sx, sy, this.tmp);
     const wx = w.x;
@@ -1038,6 +1069,12 @@ export class VillageView implements VillageViewApi {
     const m = this.monsters.hitTest(wx, wy);
     if (m !== null) {
       this.onTapMonster(m);
+      return;
+    }
+    // 길 위를 다니는 아이스크림 트럭 (truck.ts): 건물 앞을 지날 때도 트럭이 먼저.
+    const truck = this.shopLife.hitTest(wx, wy);
+    if (truck !== 0) {
+      this.onTapPlaced(truck);
       return;
     }
     if (!this.buildings.covered(wx, wy)) {
@@ -1054,6 +1091,18 @@ export class VillageView implements VillageViewApi {
           this.onTapBooth(g.booth);
           return;
         }
+      }
+      // 가게 (다섯째 묶음): 가게 시트.
+      const shop = this.shops.hitTest(wx, wy);
+      if (shop !== 0) {
+        this.onTapPlaced(shop);
+        return;
+      }
+      // 놀이기구 (회전목마 판·관람차 바퀴, rides.ts).
+      const ride = this.rides.hitTest(wx, wy);
+      if (ride !== 0) {
+        this.onTapPlaced(ride);
+        return;
       }
       // 장식 (옮기기·보관하기).
       const p = this.buildings.placedAt(wx, wy);

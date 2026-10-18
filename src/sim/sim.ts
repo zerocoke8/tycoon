@@ -5,11 +5,12 @@
 // 넷째 묶음 (DESIGN 3.7): 돈이 떨어진 손님 → 전당포(장신구 맡기기)·은행(대출) 볼일 (toPawnshop·atPawnshop·toBank·atBank) → 지갑이 넉넉해지면 되찾기·갚기,
 // 떠날 때 빚을 못 갚으면 파산 → 일터 (toWork → working | waitWork) → 다 갚으면 relieved → 떠나 단골. 빚 걸기 판은 '단체 놀이' 묶음의 mode 'debt'.
 // 배치형 마을 (DESIGN 6.1): 건물·부스·장식은 GameState.village에 놓인 자리 (sim/village.ts), 손님은 길 칸으로만 걷는다 (sim/path.ts route).
+// 다섯째 묶음 (DESIGN 3.8): 가게 (toShop → shopQueue → buying → (머무는 가게) toShopSeat → atShop), 아이스크림 트럭, 놀이기구, 꽃 선물 (toFriend), 진행자 팁.
 // 놓이지 않았거나(보관함) 입구가 길로 마을 입구와 이어지지 않은 곳엔 손님이 가지 않는다 (booths.ts boothOpen, shopOpen). 촌장의 짓기 행동은 '배치형 마을' 묶음.
 
 import { Emitter } from '../core/events.ts';
 import { Rng } from '../core/rng.ts';
-import { ACCESSORIES, BANK, BOOTHS, BOOTH_IDS, boothDef, BUILD_HALL, BUILDINGS, DEBT_MATCH, DECOR, GROUP_RULES, isGroupBooth, LAND, LABOR, MATERIALS, MOOD, PAWN, PRECIOUS, RECIPES, SIDES, SIM, SPECIES, SPECIES_IDS, STAFF_STAT_NAMES, VAULT, WORK_FACILITIES, type AccessoryId, type BoothId, type BuildingId, type DecorId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type PreciousId, type SpeciesId } from '../data/defs.ts';
+import { ACCESSORIES, BANK, BOOTHS, BOOTH_IDS, boothDef, BUILD_HALL, BUILDINGS, DEBT_MATCH, DECOR, FLOWER, FOOD_LIKE, FORTUNE, GROUP_RULES, isGroupBooth, LAND, LABOR, MATERIALS, MOOD, PAWN, PRECIOUS, RECIPES, RIDE, SALON, SHOP_IDS, SHOP_ITEMS, SHOP_URGE, SHOP_VISIT, SHOPS, SIDES, SIM, SPECIES, SPECIES_FOOD, SPECIES_IDS, SPRING, STAFF_STAT_NAMES, TIP, TRUCK, URGE_SHOPS, VAULT, WORK_FACILITIES, type AccessoryId, type BoothId, type BuildingId, type DecorId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type PreciousId, type ShopId, type SpeciesId } from '../data/defs.ts';
 import { CATALOG_KEYS, catalogKind, catalogName, footprint, storable, type CatalogKey } from '../data/catalog.ts';
 import { CELL, CHUNKS, DEFAULT_LOTS, cellAt, cellIndex, type Cell, type Pt } from '../data/map.ts';
 import type { CatalogEntry, Cost, Result, SimApi, StorageItem } from './api.ts';
@@ -20,12 +21,13 @@ import { decideOutcome } from './games.ts';
 import { betFraction, createMonster, displayName, faceToward, nameSubject, speedOf, stepMove } from './monsters.ts';
 import { dist, gateDistance, laneOffset, onRoad, pathLength, roadPoint, route, walkCells } from './path.ts';
 import { groupGame, groupGatherSec, groupStartSoonSec, idleGroup, type GroupReadiness } from './group/index.ts';
-import { cheerKey, debtReaction, groupBuzzReaction, groupCheerReaction, groupSpectateReaction, moodDelta, pickReaction, snackReaction, spectateReaction, type DebtReactKind } from './reactions.ts';
+import { cheerKey, debtReaction, groupBuzzReaction, groupCheerReaction, groupSpectateReaction, moodDelta, pickReaction, shopReaction, snackReaction, spectateReaction, type DebtReactKind, type ShopReactKind } from './reactions.ts';
 import { clearSave, newGame, saveGame } from './save.ts';
-import { fillCandidates, hirePost, levelUpCost, presetCandidates, presetPost, raiseStat, suits } from './staff.ts';
+import { addFriends, chooseShop, fitShop, fortuneLuck, giftTarget, hasSlots, isFood, isRide, itemArt, newShops, nextStreak, orderItemKey, pickOrder, rollFortune, salonSparkleSec, shopCounterPt, shopHasRoom, shopPickupPt, shopIsOpen, shopOwned, shopQueuePt, shopServiceSec, shopSlotLook, shopSlotPt, shopSlots, shopStat, shopStaySec, sparkling, springBonus, startWallet, stepTruck, tipFor, truckCell, truckPlan, truckReroute, truckRouteOk, urgeAfter, urgeOf, visited } from './shops.ts';
+import { fillCandidates, hirePost, isIdle, levelUpCost, presetCandidates, presetPost, raiseStat, suits } from './staff.ts';
 import { josa } from './text.ts';
 import { TUNE } from './tuning.ts';
-import type { ActiveRound, DebtChange, Errand, GameState, GroupBuzz, GroupCancelReason, GroupCheer, GroupEntry, GroupPlay, GroupState, LaborState, Monster, MonsterId, MonsterPhase, Pose, Reaction, Regular, RoundOutcome, SimBus, SimEvents, Staff, StaffId, StaffPost } from './types.ts';
+import type { ActiveRound, DebtChange, Errand, GameState, GroupBuzz, GroupCancelReason, GroupCheer, GroupEntry, GroupPlay, GroupState, LaborState, Monster, MonsterId, MonsterPhase, Pose, Reaction, Regular, RoundOutcome, ShopOrder, SimBus, SimEvents, Staff, StaffId, StaffPost } from './types.ts';
 import { addChunk, addPlaced, checkPlace, chunkInfo, findSpot, isPlaced, movePlaced, removePlaced, setRoads, villageOf, type ChunkInfo, type PlaceCheck, type Village } from './village.ts';
 
 export { clearSave, loadGame, newGame, saveGame } from './save.ts';
@@ -40,9 +42,55 @@ const CATCHUP_TOAST_SEC = 20;
 const QUIET_EVENTS: ReadonlySet<string> = new Set([
   'monsterReact', 'monsterSpectate', 'monsterCheered', 'roundStarted', 'roundFinished', 'potFestival', 'groupJoined', 'groupStarted', 'groupEvent', 'groupFinished', 'groupCancelled', 'coinsChanged', 'itemsChanged', 'toast',
   'pawned', 'redeemed', 'pawnCollected', 'vaultEmpty', 'loanTaken', 'loanRepaid', 'bankrupt', 'laborTick', 'laborOutput', 'foremanCheer', 'debtCleared', 'debtMatchCalled', 'debtSettled',
+  'shopVisit', 'shopServed', 'shopConsumed', 'giftGiven', 'photoTaken', 'tip', 'rideStarted', 'rideFinished', 'truckStopped',
 ]);
 
+/** 가게 phase (Monster.shop이 있어야 한다). */
+const SHOP_PHASES: ReadonlySet<MonsterPhase> = new Set(['toShop', 'shopQueue', 'buying', 'toShopSeat', 'atShop']);
+/** 가게 볼일 뒤 다음 놀이까지 (Monster.shopTrip이 남는 phase): 가게 반응, 고르기, 부스 줄·자리로 걷기, 가게·꽃. */
+const SHOP_TRIP_PHASES: ReadonlySet<MonsterPhase> = new Set(['reacting', 'wandering', 'toBooth', 'toSeat', 'toFriend', ...SHOP_PHASES]);
+
 const samePost = (a: StaffPost | null, b: StaffPost | null): boolean => (a === null || b === null ? a === b : a.booth === b.booth && a.role === b.role);
+
+/** 들고 가는 가게의 산 뒤 반응. 꽃집이 여기 오면 건넬 친구가 없다 (그새 떠났다): 꽃만 들고 시무룩. 새 가게는 여기에 꼭 넣는다 (never). */
+function takeAwayReact(s: ShopId, fortune: 'great' | 'good' | 'bad' | undefined): ShopReactKind {
+  switch (s) {
+    case 'snack_stall':
+      return 'snack';
+    case 'drink_stand':
+      return 'drink';
+    case 'bakery':
+      return 'bread';
+    case 'icecream_truck':
+      return 'icecream';
+    case 'accessory_shop':
+      return 'accessory';
+    case 'fortune_teller':
+      return fortune === 'bad' ? 'fortuneBad' : 'fortuneGood';
+    case 'souvenir_shop':
+      return 'souvenir';
+    case 'flower_shop':
+      return 'lonely';
+    // 머무는 가게·놀이기구는 finishStay로 간다 (안전망).
+    case 'restaurant':
+      return 'feast';
+    case 'beauty_salon':
+      return 'salon';
+    case 'inn':
+      return 'innWake';
+    case 'hot_spring':
+      return 'soak';
+    case 'photo_studio':
+      return 'photo';
+    case 'carousel':
+    case 'ferris_wheel':
+      return 'ride';
+    default: {
+      const never: never = s;
+      return never;
+    }
+  }
+}
 
 export class Sim implements SimApi {
   /**
@@ -72,6 +120,11 @@ export class Sim implements SimApi {
     state.foremanTimer ??= LABOR.foreman.everySec;
     state.debtMatchAt ??= {};
     state.debtCheck ??= DEBT_MATCH.checkSec;
+    // 다섯째 묶음 (옛 상태·시험용 상태에 칸이 없으면).
+    state.shops ??= newShops();
+    for (const [k, v] of Object.entries(newShops()) as [ShopId, GameState['shops'][ShopId]][]) state.shops[k] ??= v;
+    state.photoAlbum ??= {};
+    state.shopTotals ??= { visits: 0, served: 0, revenue: 0, tips: 0, tipCoins: 0, gifts: 0, photos: 0, innStays: 0, accessories: 0, byShop: {} };
     // 난수 상태를 GameState.rng에 바로 읽고 쓴다 (저장·불러오기 뒤에도 같은 흐름).
     const rng = new Rng(0);
     Object.defineProperty(rng, 'state', {
@@ -84,6 +137,7 @@ export class Sim implements SimApi {
     });
     this.rng = rng;
     for (const b of BOOTH_IDS) B.fitSeats(state, b);
+    for (const s of SHOP_IDS) fitShop(state, s);
   }
 
   // ── 이벤트 ──────────────────────────────────────────────────────────
@@ -215,10 +269,12 @@ export class Sim implements SimApi {
     this.tickCandidates(dt);
     this.tickCrafting(dt);
     this.tickBooths(dt);
+    this.tickShops(dt);
     this.tickDebtMatches(dt);
     this.tickForeman(dt);
     for (const m of st.monsters.slice()) this.tickMonster(m, dt);
     for (const b of BOOTH_IDS) this.pump(b);
+    for (const s of SHOP_IDS) this.pumpShop(s);
   }
 
   catchUp(sec: number): void {
@@ -265,7 +321,9 @@ export class Sim implements SimApi {
     st.spawnTimer -= dt;
     if (st.spawnTimer > 0) return;
     // 입구에서 걸어 들어오는 손님과 일터의 채무자는 세지 않는다 (지도가 커도, 채무자가 많아도 노는 손님 수가 그대로).
-    const present = st.monsters.filter((m) => m.phase !== 'leaving' && m.phase !== 'arriving' && m.bankrupt !== true).length;
+    // 다섯째 묶음: 가게 볼일 중인 손님 (가게로 걷기·줄·계산대·자리·꽃 건네기)도 세지 않는다 (가게가 노는 손님 자리를 잡아먹어 마을이 느려지지 않게).
+    // 가게에서 나와 다음 놀이로 걸어가는 길 (Monster.shopTrip)도: 가게가 먼 곳에 있어도 노는 손님 수가 그대로.
+    const present = st.monsters.filter((m) => m.phase !== 'leaving' && m.phase !== 'arriving' && m.bankrupt !== true && !SHOP_PHASES.has(m.phase) && m.phase !== 'toFriend' && m.shopTrip !== true).length;
     if (present >= hallVisitors(st)) {
       st.spawnTimer = TUNE.spawnRetrySec;
       return;
@@ -385,7 +443,8 @@ export class Sim implements SimApi {
     else if ((m.phase === 'toPawnshop' || m.phase === 'toBank') && m.errand !== null && m.errand !== undefined && isPlaced(st, errandShop(m.errand))) {
       const shop = errandShop(m.errand);
       this.go(m, counterPt(st, shop, m.counter ?? 0), shop);
-    } else this.decideSoon(m);
+    } else if (m.shop !== null && m.shop !== undefined && SHOP_PHASES.has(m.phase)) this.reShop(m);
+    else this.decideSoon(m);
   }
 
   private tickCandidates(dt: number): void {
@@ -449,15 +508,17 @@ export class Sim implements SimApi {
   private setPhase(m: Monster, p: MonsterPhase): void {
     m.phase = p;
     m.phaseTime = 0;
+    // 가게 볼일 뒤 다음 놀이로 걸어가는 길 (반응·고르기·부스로 걷기)이 아니면 가게 길은 끝났다 (손님 수 한도에 다시 센다).
+    if (m.shopTrip === true && !SHOP_TRIP_PHASES.has(p)) m.shopTrip = false;
   }
 
   private age(m: Monster): number {
-    return this.state.time - (m.born ?? this.state.time);
+    return this.state.time - (m.born ?? this.state.time) - (m.bonusSec ?? 0);
   }
 
   /** 머문 시간: 첫 한판부터 (아직 안 놀았으면 온 때부터). 입구에서 걸어오는 시간은 뺀다. */
   private visitAge(m: Monster): number {
-    return this.state.time - (m.firstPlay ?? m.born ?? this.state.time);
+    return this.state.time - (m.firstPlay ?? m.born ?? this.state.time) - (m.bonusSec ?? 0);
   }
 
   /** 반응이 끝난 뒤의 포즈: 파산한 손님은 늘 축 처짐, 빈털터리로 떠나는 손님은 시무룩. */
@@ -483,6 +544,20 @@ export class Sim implements SimApi {
       const c = cellAt(m.pos);
       const a = villageOf(st).auraAt(cellIndex(c.x, c.y));
       if (f + a > 0) m.mood = clampMood(m.mood + ((f + a) / 60) * dt);
+    }
+    // 다섯째 묶음: 손에 든 것·가게 효과 시계, 트럭 따라가기·꽃 건네러 가기 (걷는 중에도 길을 고친다).
+    this.tickHeld(m, dt);
+    // 배 터지게 먹고 드러누운 손님: 다 누웠으면 일어난다 (반응하는 동안만: 다른 일로 바뀌었으면 그냥 선다).
+    if ((m.lying ?? 0) > 0) {
+      if (m.phase !== 'reacting') m.lying = 0;
+      else if ((m.lying = (m.lying ?? 0) - dt) <= 0) this.getUp(m);
+    }
+    if (m.phase === 'toShop' && m.shop === 'icecream_truck') {
+      this.followTruck(m);
+      if (m.phase !== 'toShop' || m.path.length === 0) return;
+    } else if (m.phase === 'toFriend') {
+      this.tickGift(m);
+      if (m.phase !== 'toFriend' || m.path.length === 0) return;
     }
     if (m.path.length > 0) {
       // 길 칸 위에서는 조금 빨리 (건물 안 자리로 들어갈 때는 보통 걸음).
@@ -564,6 +639,24 @@ export class Sim implements SimApi {
         m.timer -= dt;
         if (m.timer <= 0) this.leave(m);
         break;
+      case 'toShop':
+        this.arriveShopQueue(m);
+        break;
+      case 'shopQueue':
+        this.tickShopQueue(m);
+        break;
+      case 'buying':
+        m.timer -= dt;
+        if (m.timer <= 0) this.finishBuy(m);
+        break;
+      case 'toShopSeat':
+        this.arriveShopSeat(m);
+        break;
+      case 'atShop':
+        this.tickAtShop(m, dt);
+        break;
+      case 'toFriend':
+        break;
     }
   }
 
@@ -610,6 +703,12 @@ export class Sim implements SimApi {
       this.goWork(m);
       return;
     }
+    // 떠나는 길에 들른 가게 (기념품)가 끝났거나 접혔다: 다시 집으로.
+    if (m.shopHome === true) {
+      m.shopHome = false;
+      this.goHome(m);
+      return;
+    }
     // 지갑이 넉넉해졌으면 은행 빚을 갚거나 맡긴 장신구를 되찾으러 간다.
     if (this.goSettle(m, false)) return;
     // 거의 다 잃었지만 더 놀고 싶다: 전당포·은행 (끈기·머문 시간이 남았을 때, 더 놀고 싶은지는 seekMoney가 묻는다).
@@ -622,6 +721,8 @@ export class Sim implements SimApi {
       this.leave(m);
       return;
     }
+    // 다섯째 묶음: 가게 (지면 먹거리, 따면 장신구·놀이기구 …: shops.ts chooseShop).
+    if (this.goShopping(m)) return;
     const newcomer = m.stats.rounds === 0;
     if (!newcomer && m.traits.includes('watcher') && rng.chance(0.25) && this.goWatch(m)) return;
     const b = B.chooseBooth(st, rng, m, last);
@@ -642,6 +743,7 @@ export class Sim implements SimApi {
   private goWander(m: Monster): void {
     const walk = villageOf(this.state).walkable;
     this.setPhase(m, 'wandering');
+    m.shopTrip = false;
     m.timer = this.rng.range(TUNE.wanderPauseSec[0], TUNE.wanderPauseSec[1]);
     if (walk.length === 0) {
       m.path = [];
@@ -729,6 +831,8 @@ export class Sim implements SimApi {
       this.goBankrupt(m);
       return;
     }
+    // 다섯째 묶음: 딴 적이 있고 기분이 좋으면 떠나는 길에 기념품 가게에 들른다 (인형을 안고 떠난다).
+    if (this.goSouvenir(m)) return;
     this.goHome(m);
   }
 
@@ -759,6 +863,7 @@ export class Sim implements SimApi {
     }
     m.booth = null;
     m.seat = null;
+    this.leaveShop(m);
   }
 
   /** 줄 선 손님들을 제자리로 (앞이 비면 한 칸씩 앞으로). */
@@ -893,7 +998,17 @@ export class Sim implements SimApi {
     m.stats.spent += fee + bet;
     const pace = B.boothStat(st, b, 'pace');
     const cheer = B.boothCheer(bs);
-    const luck = (m.traits.includes('lucky') ? TUNE.luckTrait : 0) + (cheer?.luck ?? 0);
+    // 점괘 (다섯째 묶음): 한동안 운 ±.
+    const luck = (m.traits.includes('lucky') ? TUNE.luckTrait : 0) + (cheer?.luck ?? 0) + fortuneLuck(m);
+    // 같은 부스에 앉은 손님끼리 친해진다 (꽃 선물).
+    const mates = bs.seats.filter((x): x is MonsterId => x !== null && x !== m.id);
+    if (mates.length > 0) {
+      addFriends(m, mates);
+      for (const id of mates) {
+        const o = this.monster(id);
+        if (o !== undefined) addFriends(o, [m.id]);
+      }
+    }
     const outcome = decideOutcome(rng, b, luck, { level: bs.level, pace, species: m.species, plushPool: this.plushPool(), raceSec: B.boothRoundSec(st, b) });
     const duration = B.boothRoundSec(st, b) / Math.max(0.5, 1 + (pace - 3) * TUNE.pacePerPoint);
     const round: ActiveRound = { monster: m.id, bet, fee, outcome, elapsed: 0, duration };
@@ -946,6 +1061,8 @@ export class Sim implements SimApi {
       st.totals.jackpots += 1;
     }
     if (tier === 'jackpot' || festival) m.hadJackpot = true;
+    // 다섯째 묶음: 최근 흐름 (가게 고르기).
+    m.streak = nextStreak(m.streak ?? 0, festival ? 'jackpot' : tier);
     st.totals.rounds += 1;
     m.patience = Math.max(0, m.patience - 1);
     const cheer = B.boothCheer(bs);
@@ -954,7 +1071,11 @@ export class Sim implements SimApi {
     if (broke) m.broke = true;
     const charm = B.boothStat(st, b, 'charm');
     const def = boothDef(b);
-    m.mood = clampMood(m.mood + moodDelta(tier, broke, m, charm, cheer?.moodPerRound ?? 0, def.moodLossScale ?? 1) + (festival ? 10 : 0) + (def.moodPerRound ?? 0));
+    // 미용실에서 반짝이는 손님은 진 판에 덜 속상하다.
+    const lossScale = (def.moodLossScale ?? 1) * (sparkling(m) ? SALON.moodLossScale : 1);
+    m.mood = clampMood(m.mood + moodDelta(tier, broke, m, charm, cheer?.moodPerRound ?? 0, lossScale) + (festival ? 10 : 0) + (def.moodPerRound ?? 0));
+    // 다섯째 묶음: 결과가 남긴 마음 (지면 달래기, 아깝게 놓치면 단 것, 크게 따면 축하: 가게 고르기).
+    if (m.bankrupt !== true) m.urge = urgeAfter(m, festival ? 'jackpot' : tier, festival, st.time);
     const d = r.outcome.detail;
     // 인형 뽑기: 뽑은 인형은 도감의 인형 칸에 모인다.
     if (d.kind === 'claw' && (d.result === 'win' || d.result === 'double')) {
@@ -965,7 +1086,10 @@ export class Sim implements SimApi {
     if (d.kind === 'pouch' && d.content === 'jackpot') m.surePrecious = true;
     const shown: OutcomeTier = festival ? 'jackpot' : tier;
     // 축제로 받은 대박은 부스 대박 반응('종이다 종!' 등)이 아니라 공용 대박 반응으로.
-    const reaction = react ?? pickReaction(rng, broke ? 'broke' : shown, m, cheer?.reactionBoost ?? 1, festival && tier !== 'jackpot' ? null : b, d);
+    let reaction = react ?? pickReaction(rng, broke ? 'broke' : shown, m, cheer?.reactionBoost ?? 1, festival && tier !== 'jackpot' ? null : b, d);
+    // 점괘가 붙은 손님의 한판이 점괘대로면 가끔 '점괘대로다!'·'점괘가 맞았어…' (빈털터리·빚 걸기 판은 그 반응대로).
+    const luck = fortuneLuck(m);
+    if (react === null && !broke && luck !== 0 && (luck > 0 ? won : tier === 'lose' || tier === 'nearMiss') && rng.chance(FORTUNE.trueChance)) reaction = shopReaction(rng, luck > 0 ? 'fortuneTrue' : 'fortuneCurse', m, luck > 0 ? (m.buffs?.fortune ?? 'good') : undefined);
     this.setPhase(m, 'reacting');
     m.pose = reaction.pose;
     m.poseTime = 0;
@@ -976,6 +1100,8 @@ export class Sim implements SimApi {
       this.emit('potFestival', { booth: b, monster: m.id, amount: payout });
       this.toast(`항아리 축제! ${nameSubject(m)} ${BOOTHS[b].name} 항아리를 통째로 받았어요.`, 'good');
     }
+    // 다섯째 묶음: 크게 딴 손님은 결과 뒤 진행자에게 팁 (마을 수입).
+    if (payout > 0 && r.bet > 0 && m.bankrupt !== true) this.tipHost(b, m, payout, r.bet, tier, festival);
     this.emit('monsterReact', { id: m.id, reaction });
     if (crowd) this.spectate(b, seat, m, shown);
   }
@@ -985,6 +1111,11 @@ export class Sim implements SimApi {
     const st = this.state;
     const wasAgony = m.pose === 'agony';
     m.pose = m.bankrupt === true ? 'sad' : 'base';
+    // 다섯째 묶음: 진행자에게 팁을 줬으면 결과 반응 뒤 고마워요 (걸어가며).
+    if (m.tipped === true) {
+      m.tipped = false;
+      this.sideShopReact(m, 'tip');
+    }
     // 파산한 손님 (빚 걸기 판이 끝났다·파산 반응이 끝났다): 다 갚았으면 홀가분, 아니면 일터로.
     if (m.bankrupt === true) {
       if (m.debt <= 0) this.relieve(m, false);
@@ -995,6 +1126,12 @@ export class Sim implements SimApi {
     if (m.homeward === true) {
       m.homeward = false;
       this.leave(m);
+      return;
+    }
+    // 떠나는 길에 기념품을 샀다: 집으로.
+    if (m.shopHome === true) {
+      m.shopHome = false;
+      this.goHome(m);
       return;
     }
     if (m.broke === true) {
@@ -1009,6 +1146,9 @@ export class Sim implements SimApi {
     // 거의 다 잃었다 (아직 놀 수는 있다): 같은 자리에서 다시 하기 전에 더 놀고 싶은지 묻는다 (전당포·은행). 빚이 있으면 갚으려고 한판만 더.
     if (this.shortOfMoney(m) && this.seekMoney(m)) return;
     this.chaseDebt(m);
+    // 다섯째 묶음: 계속 져서 달래고 싶은 손님 (comfort)·크게 딴 손님 (celebrate)은 가끔 자리를 털고 가게로 (SHOP_URGE.leaveSeat, 갈 가게가 없으면 하던 대로).
+    const urge = urgeOf(st, m);
+    if ((urge === 'comfort' || urge === 'celebrate') && !this.shouldLeave(m) && this.rng.chance(SHOP_URGE.leaveSeat) && this.goShopping(m, true)) return;
     const b = m.booth;
     const seat = m.seat;
     if (b !== null && seat !== null && st.booths[b].seats[seat] === m.id && B.boothOpen(st, b) && B.canPlay(st, b, m) && !this.shouldLeave(m) && !this.debtHeld(b, seat)) {
@@ -1032,7 +1172,7 @@ export class Sim implements SimApi {
     const rng = this.rng;
     const at = B.seatPt(this.state, b, seat);
     for (const o of this.state.monsters) {
-      if (o === m || o.phase === 'leaving' || o.phase === 'playing' || o.phase === 'reacting' || o.bankrupt === true) continue;
+      if (o === m || o.phase === 'leaving' || o.phase === 'playing' || o.phase === 'reacting' || o.bankrupt === true || o.hidden === true) continue;
       if (dist(o.pos, at) > TUNE.spectateRadius) continue;
       const watcher = o.traits.includes('watcher');
       if (tier === 'win' && !watcher) continue;
@@ -1348,7 +1488,8 @@ export class Sim implements SimApi {
     let lucky = -1;
     for (let i = 0; i < g.participants.length; i++) {
       const m = this.monster((g.participants[i] as GroupEntry).monster);
-      const luck = (m?.traits.includes('lucky') === true ? TUNE.luckTrait : 0) + (cheer?.luck ?? 0);
+      const fortune = m !== undefined && (m.buffs?.luckSec ?? 0) > 0 ? Math.max(0, m.buffs?.luck ?? 0) : 0;
+      const luck = (m?.traits.includes('lucky') === true ? TUNE.luckTrait : 0) + (cheer?.luck ?? 0) + fortune;
       if (luck > 0 && this.rng.chance(luck)) {
         lucky = i;
         break;
@@ -1445,7 +1586,7 @@ export class Sim implements SimApi {
     const look = game.face(this.state, -1);
     const center = game.center(this.state);
     for (const o of this.state.monsters) {
-      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving' || o.phase === 'reacting' || o.bankrupt === true || (o.poseTime ?? 0) > 0) continue;
+      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving' || o.phase === 'reacting' || o.bankrupt === true || o.hidden === true || (o.poseTime ?? 0) > 0) continue;
       if (o.phase === 'playing' && o.booth !== b) continue;
       if (dist(o.pos, center) > TUNE.groupSpectateRadius) continue;
       if (!rng.chance((o.traits.includes('watcher') ? TUNE.groupWatcherBuzzChance : TUNE.groupBuzzChance) + charm * TUNE.groupBuzzPerCharm)) continue;
@@ -1478,6 +1619,14 @@ export class Sim implements SimApi {
       if (r !== null && r !== undefined && r.monster === e.monster) done.push({ e, r });
     }
     const pays = this.settleGroup(b, done);
+    // 같은 판에서 논 손님끼리 친해진다 (꽃 선물: 단체 놀이 친구는 따로 적어 꽃을 더 주고 싶다).
+    const ids = done.map(({ e }) => e.monster);
+    for (const id of ids) {
+      const m = this.monster(id);
+      if (m === undefined) continue;
+      addFriends(m, ids);
+      m.groupFriends = [...ids.filter((x) => x !== id), ...(m.groupFriends ?? []).filter((x) => !ids.includes(x))].slice(0, FLOWER.friendsMax);
+    }
     // 빚 걸기 판: 채무자 선수들의 빚을 먼저 정산한다 (이기면 반·대박이면 0, 지면 상대 빚만큼 더). 채무자의 반응은 빚 반응으로.
     const debts = g.mode === 'debt' && play !== null ? this.settleDebts(b, g, play) : [];
     done.forEach(({ e, r }, i) => {
@@ -1539,7 +1688,7 @@ export class Sim implements SimApi {
     const center = game.center(st);
     const look = game.face(st, -1);
     for (const o of st.monsters) {
-      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving' || o.bankrupt === true) continue;
+      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving' || o.bankrupt === true || o.hidden === true) continue;
       // 다른 부스에서 노는 손님은 빼고, 이 부스 자리에서 기다리던 손님은 넣는다.
       if ((o.phase === 'playing' || o.phase === 'reacting') && o.booth !== b) continue;
       if (dist(o.pos, center) > TUNE.groupSpectateRadius) continue;
@@ -2362,6 +2511,936 @@ export class Sim implements SimApi {
     return true;
   }
 
+  // ── 다섯째 묶음: 손님이 돈을 쓰는 가게 (DESIGN 3.8) ─────────────────────────────
+  // decide → goShopping (shops.ts chooseShop: 기분·흐름·지갑·거리, 살 것은 그때 정한다) → toShop (줄로) → shopQueue
+  //   → (계산대가 비고, 머무는 가게는 자리가 나면) buying (계산대에서 serviceSec초) → finishBuy: 낸다 (마을 수입, shopServed)
+  //   → 들고 가는 가게 = 효과 + 손에 든 것 (held, 먹으며 걷기) + 반응 / 머무는 가게 = toShopSeat → atShop (stay초) → finishStay
+  //   / 놀이기구 = 자리에 서서 한 바퀴를 같이 (tickRide: boarding → running → 탄 손님 모두 finishStay).
+  // 아이스크림 트럭은 길 위를 다니다 선다 (tickTruck). 손님은 트럭을 따라가 (followTruck) 트럭 둘레 줄에 선다. 꽃다발을 산 손님은 친한 손님에게 걸어가 건넨다 (toFriend).
+  // 떠나기 전에는 기념품 가게 (goSouvenir, shopHome: 끝나면 집으로). 크게 딴 손님은 진행자에게 팁 (tipHost, finishRound).
+  // 가게 주인 = Staff.shop (짓으면 그 가게의 주인이 같이 온다: buyShop). 주인이 없거나 길이 끊기면 닫힌다 (shopOpen).
+
+  /** 가게마다: 자리 수 맞추기, 트럭·놀이기구 돌리기. */
+  private tickShops(dt: number): void {
+    const st = this.state;
+    for (const s of SHOP_IDS) {
+      const ss = st.shops[s];
+      if (ss.level < 1) continue;
+      fitShop(st, s);
+      if (ss.truck !== null) this.tickTruck(dt);
+      if (ss.ride !== null) this.tickRide(s, dt);
+    }
+  }
+
+  /** 손에 든 것 (먹으며 걷기: 다 먹으면 shopConsumed)과 가게 효과 (걸음·운·반짝이)의 남은 초. */
+  private tickHeld(m: Monster, dt: number): void {
+    const h = m.held;
+    if (h !== null && h !== undefined) {
+      h.left -= dt;
+      if (h.left <= 0) {
+        m.held = null;
+        if (h.eat && h.shop !== null) this.emit('shopConsumed', { id: m.id, shop: h.shop, item: h.item, at: { x: m.pos.x, y: m.pos.y }, react: null });
+      }
+    }
+    const b = m.buffs;
+    if (b === undefined) return;
+    if (b.speedSec !== undefined && (b.speedSec -= dt) <= 0) {
+      delete b.speedSec;
+      delete b.speed;
+    }
+    if (b.luckSec !== undefined && (b.luckSec -= dt) <= 0) {
+      delete b.luckSec;
+      delete b.luck;
+      delete b.fortune;
+    }
+    if (b.sparkleSec !== undefined && (b.sparkleSec -= dt) <= 0) delete b.sparkleSec;
+  }
+
+  /**
+   * 가게에 갈까 (decide에서, sure = 확률 없이: 자리를 털고 먹으러 갈 때): 다녀온 뒤 SHOP_VISIT.cooldownSec가 지났고 한 방문 maxPerVisit곳 안이면 확률 (기분이 낮거나 흐름이 크면 더, 마음이 남았으면 더, 아직 안 논 손님은 덜)로
+   * 갈 가게와 살 것을 고른다 (shops.ts chooseShop). 갔으면 true.
+   */
+  private goShopping(m: Monster, sure = false): boolean {
+    const st = this.state;
+    if (m.bankrupt === true || m.broke === true) return false;
+    if ((m.shopsVisited?.length ?? 0) >= SHOP_VISIT.maxPerVisit) return false;
+    if (st.time - (m.shopAt ?? -Infinity) < SHOP_VISIT.cooldownSec) return false;
+    // 열린 가게가 없으면 난수도 쓰지 않는다 (가게가 없는 마을의 흐름이 예전과 같게).
+    if (!SHOP_IDS.some((s) => shopIsOpen(st, s))) return false;
+    // 결과가 남긴 마음 (달래기·단 것·축하)이 있으면 더 자주 떠올린다.
+    const urge = urgeOf(st, m);
+    let p = SHOP_VISIT.chance + (m.mood < 40 ? SHOP_VISIT.lowMoodBonus : 0) + Math.min(SHOP_VISIT.streakMax, Math.abs(m.streak ?? 0)) * SHOP_VISIT.streakBonus + (urge !== null ? SHOP_URGE.chance : 0);
+    if (m.stats.rounds === 0) p *= SHOP_VISIT.newcomer;
+    if (!sure && !this.rng.chance(p)) return false;
+    const pick = chooseShop(st, this.rng, m, this.visitAge(m));
+    if (pick === null) return false;
+    this.goToShop(m, pick.shop, pick.order, false);
+    return true;
+  }
+
+  /** 떠나는 길의 기념품 가게 (딴 적이 있거나 지갑이 넉넉하고, 기분 SHOP_VISIT.souvenirMood 이상, 대박·남은 코인이 많으면 더 자주). 갔으면 true. */
+  private goSouvenir(m: Monster): boolean {
+    const st = this.state;
+    const s: ShopId = 'souvenir_shop';
+    // 딴 적이 없어도 지갑이 넉넉하면 (souvenirWallet 이상) 즐거웠던 기념으로.
+    if (m.broke === true || m.bankrupt === true || m.wasBankrupt === true || visited(m, s) || (m.stats.wins === 0 && m.wallet < SHOP_VISIT.souvenirWallet) || m.mood < SHOP_VISIT.souvenirMood) return false;
+    if (!shopIsOpen(st, s) || !shopHasRoom(st, s)) return false;
+    // 지갑에 남은 코인이 많을수록 '남은 코인으로 기념품 하나'.
+    const p = SHOP_VISIT.souvenirChance * ((m.hadJackpot ? 1.5 : 1) + (0.5 * Math.max(0, m.wallet)) / SHOP_VISIT.souvenirWallet);
+    if (!this.rng.chance(Math.min(0.95, p))) return false;
+    const order = pickOrder(st, this.rng, m, s, 0);
+    if (order === null) return false;
+    this.goToShop(m, s, order, true);
+    return true;
+  }
+
+  /** 가게 줄 끝에 선다 (살 것 order는 지금 값: 계산대에서 낼 수 없으면 사지 않는다). home = 떠나는 길 (볼일 뒤 집으로). */
+  private goToShop(m: Monster, s: ShopId, order: ShopOrder, home: boolean): void {
+    const st = this.state;
+    const ss = st.shops[s];
+    this.detach(m);
+    m.shop = s;
+    m.shopSlot = -1;
+    m.order = order;
+    m.shopHome = home;
+    ss.queue.push(m.id);
+    st.shopTotals.visits += 1;
+    this.setPhase(m, 'toShop');
+    this.goShopSpot(m, s, ss.queue.length - 1);
+    m.pose = 'base';
+    m.poseTime = 0;
+    // 걸어가며 작게: 마음이 있으면 더 자주, 그 마음대로 ('배고파…'·'한턱 쏜다!').
+    const urge = home ? null : urgeOf(st, m);
+    if (this.rng.chance(urge !== null ? 0.6 : 0.4)) this.sideShopReact(m, urge === 'celebrate' ? 'goShopHappy' : urge !== null ? 'goShopSad' : 'goShop');
+    this.emit('shopVisit', { id: m.id, shop: s, order: { ...order } });
+  }
+
+  /** 줄 i번째 자리로 걷는다 (트럭은 길 위의 트럭 둘레). */
+  private goShopSpot(m: Monster, s: ShopId, i: number): void {
+    const p = shopQueuePt(this.state, s, i);
+    if (s === 'icecream_truck') this.go(m, p);
+    else this.go(m, p, s);
+  }
+
+  /** 줄 선 손님들을 제자리로 (앞이 비면 한 칸씩 앞으로). */
+  private layoutShopQueue(s: ShopId): void {
+    const st = this.state;
+    const ss = st.shops[s];
+    ss.queue.forEach((id, i) => {
+      const m = this.monster(id);
+      if (m === undefined) return;
+      const spot = shopQueuePt(st, s, i);
+      if (m.phase === 'shopQueue') {
+        if (dist(m.pos, spot) > 2) {
+          m.path = [{ x: spot.x, y: spot.y }];
+          m.dest = { x: spot.x, y: spot.y, via: s === 'icecream_truck' ? null : s };
+        }
+      } else if (m.phase === 'toShop' && s !== 'icecream_truck') this.go(m, spot, s);
+    });
+  }
+
+  /** 가게 줄·계산대·자리에서 빼고 가게 칸을 지운다 (낸 코인은 돌려주지 않는다: 머무는 중에 접히면 효과는 finishStay·storeShop이 먼저 준다). */
+  private leaveShop(m: Monster): void {
+    const s = m.shop;
+    if (s !== null && s !== undefined) {
+      const ss = this.state.shops[s];
+      const qi = ss.queue.indexOf(m.id);
+      if (qi >= 0) {
+        ss.queue.splice(qi, 1);
+        this.layoutShopQueue(s);
+      }
+      if (ss.serving === m.id) ss.serving = null;
+      for (let i = 0; i < ss.slots.length; i++) if (ss.slots[i] === m.id) ss.slots[i] = null;
+      const r = ss.ride;
+      if (r !== null) {
+        const k = r.riders.indexOf(m.id);
+        if (k >= 0) r.riders.splice(k, 1);
+      }
+    }
+    if (m.shop !== undefined) m.shop = null;
+    if (m.shopSlot !== undefined) m.shopSlot = -1;
+    if (m.order !== undefined) m.order = null;
+    if (m.hidden === true) m.hidden = false;
+  }
+
+  /** 가게 볼일을 접는다 (닫혔음·줄이 너무 김·낼 수 없음·트럭을 놓침): 떠나는 길이면 집으로, 아니면 곧 다른 걸 한다. */
+  private dropShop(m: Monster): void {
+    const home = m.shopHome === true;
+    this.leaveShop(m);
+    m.shopTrip = !home;
+    m.shopHome = false;
+    m.shopAt = this.state.time;
+    if (home) this.goHome(m);
+    else this.decideSoon(m);
+  }
+
+  /** 가게를 잃은 손님 (옮겼거나 보관함): phase에 맞게 새 자리로 (보관했으면 접는다). */
+  private reShop(m: Monster): void {
+    const st = this.state;
+    const s = m.shop;
+    if (s === null || s === undefined || !shopOwned(st, s) || !isPlaced(st, s)) {
+      this.dropShop(m);
+      return;
+    }
+    const ss = st.shops[s];
+    if (m.phase === 'toShop' || m.phase === 'shopQueue') this.goShopSpot(m, s, Math.max(0, ss.queue.indexOf(m.id)));
+    else if (m.phase === 'buying') this.go(m, shopCounterPt(st, s), s === 'icecream_truck' ? null : s);
+    else this.go(m, shopSlotPt(st, s, Math.max(0, m.shopSlot ?? 0)), s);
+  }
+
+  /** 줄 자리에 닿았다 (트럭은 followTruck이 본다). 가게가 닫혔으면 접는다. */
+  private arriveShopQueue(m: Monster): void {
+    const st = this.state;
+    const s = m.shop;
+    if (s === null || s === undefined || !shopIsOpen(st, s) || !st.shops[s].queue.includes(m.id)) {
+      this.dropShop(m);
+      return;
+    }
+    if (s === 'icecream_truck') return;
+    this.setPhase(m, 'shopQueue');
+    faceToward(m, shopCounterPt(st, s).x);
+  }
+
+  /** 줄에서 기다린다: 너무 오래면 (SHOP_VISIT.queueGiveUpSec) 다른 걸 한다. 트럭이 떠나면 다시 따라간다. */
+  private tickShopQueue(m: Monster): void {
+    const st = this.state;
+    const s = m.shop;
+    if (s === null || s === undefined || !st.shops[s].queue.includes(m.id)) {
+      this.dropShop(m);
+      return;
+    }
+    if ((m.phaseTime ?? 0) > SHOP_VISIT.queueGiveUpSec) {
+      m.mood = clampMood(m.mood - 2);
+      this.dropShop(m);
+      return;
+    }
+    const t = st.shops[s].truck;
+    if (t !== null && (t.parked || t.stop <= 0)) this.setPhase(m, 'toShop');
+  }
+
+  /** 트럭을 따라간다: 트럭 둘레 줄 자리로 (트럭이 움직이면 1초마다 길을 고친다), 닿았고 트럭이 서 있으면 줄에 선다. TRUCK.followSec 안에 못 닿으면 그만. */
+  private followTruck(m: Monster): void {
+    const st = this.state;
+    const ss = st.shops.icecream_truck;
+    const t = ss.truck;
+    if (t === null || t.parked || !shopIsOpen(st, 'icecream_truck') || !ss.queue.includes(m.id) || (m.phaseTime ?? 0) > TRUCK.followSec) {
+      this.dropShop(m);
+      return;
+    }
+    const spot = shopQueuePt(st, 'icecream_truck', Math.max(0, ss.queue.indexOf(m.id)));
+    if (m.path.length === 0 && dist(m.pos, spot) <= 14) {
+      if (t.stop > 0) {
+        this.setPhase(m, 'shopQueue');
+        faceToward(m, t.x);
+      }
+      return;
+    }
+    const d = m.dest ?? null;
+    const stale = d === null || dist(d, spot) > 40;
+    if (m.path.length === 0 || (stale && ((m.phaseTime ?? 0) % 1 < SIM.dt + 1e-6 || (m.phaseTime ?? 0) < SIM.dt * 2))) this.go(m, spot);
+  }
+
+  /** 계산대가 비었으면 줄 맨 앞 손님 (줄 자리에 서 있는 손님)을 계산대로. 머무는 가게는 빈 자리가 있어야 (놀이기구는 달리는 중이 아니어야). 닫혔으면 줄을 푼다. */
+  private pumpShop(s: ShopId): void {
+    const st = this.state;
+    const ss = st.shops[s];
+    if (ss.level < 1 && ss.queue.length === 0) return;
+    // 안전망: 없어졌거나 다른 걸 하는 손님은 지운다.
+    for (let i = ss.queue.length - 1; i >= 0; i--) {
+      const m = this.monster(ss.queue[i] as MonsterId);
+      if (m === undefined || m.shop !== s || (m.phase !== 'toShop' && m.phase !== 'shopQueue')) ss.queue.splice(i, 1);
+    }
+    if (ss.serving !== null) {
+      const m = this.monster(ss.serving);
+      if (m === undefined || m.shop !== s || m.phase !== 'buying') ss.serving = null;
+    }
+    for (let i = 0; i < ss.slots.length; i++) {
+      const id = ss.slots[i] ?? null;
+      if (id === null) continue;
+      const m = this.monster(id);
+      if (m === undefined || m.shop !== s || m.shopSlot !== i || (m.phase !== 'buying' && m.phase !== 'toShopSeat' && m.phase !== 'atShop')) ss.slots[i] = null;
+    }
+    if (!shopIsOpen(st, s)) {
+      // 닫힌 가게: 아직 내지 않은 손님 (줄·계산대)은 다른 걸 하러 간다. 낸 손님 (자리)은 마저 머문다.
+      for (const id of [...ss.queue, ...(ss.serving === null ? [] : [ss.serving])]) {
+        const m = this.monster(id);
+        if (m !== undefined) this.dropShop(m);
+      }
+      return;
+    }
+    if (ss.serving !== null || ss.queue.length === 0) return;
+    const t = ss.truck;
+    if (t !== null && (t.parked || t.stop <= 0)) return;
+    // 산 손님이 아직 계산대 가까이에서 반응 중이면 (비켜서는 중이거나 비켜설 곳이 없었다) 다음 손님은 기다린다: 둘이 겹치지 않게.
+    if (!hasSlots(s)) {
+      const at = shopCounterPt(st, s);
+      if (st.monsters.some((o) => o.phase === 'reacting' && dist(o.pos, at) <= 44)) return;
+    }
+    const m = this.monster(ss.queue[0] as MonsterId);
+    if (m === undefined || m.phase !== 'shopQueue' || m.path.length > 0) return;
+    let slot = -1;
+    if (hasSlots(s)) {
+      // 놀이기구가 도는 동안은 줄에서 기다린다 (다음 바퀴: 판 위에 서서 기다리지 않게).
+      if (ss.ride !== null && ss.ride.phase === 'running') return;
+      const n = shopSlots(st, s);
+      for (let i = 0; i < n; i++) {
+        if ((ss.slots[i] ?? null) === null) {
+          slot = i;
+          break;
+        }
+      }
+      if (slot < 0) return;
+    }
+    ss.queue.shift();
+    ss.serving = m.id;
+    if (slot >= 0) ss.slots[slot] = m.id;
+    m.shopSlot = slot;
+    this.setPhase(m, 'buying');
+    m.timer = shopServiceSec(st, s);
+    const at = shopCounterPt(st, s);
+    m.path = [{ x: at.x, y: at.y }];
+    m.dest = null;
+    this.layoutShopQueue(s);
+  }
+
+  /** 계산대에서 다 샀다: 낸다 (마을 수입) → 들고 가는 가게는 효과·손에 든 것·반응, 머무는 가게는 자리로. 낼 수 없으면 (지갑이 줄었다) 사지 않는다. */
+  private finishBuy(m: Monster): void {
+    const st = this.state;
+    const s = m.shop;
+    if (s === null || s === undefined) {
+      this.decideSoon(m);
+      return;
+    }
+    const ss = st.shops[s];
+    if (ss.serving === m.id) ss.serving = null;
+    const o = m.order ?? null;
+    if (o === null || !(o.price > 0) || m.wallet < o.price || !shopIsOpen(st, s)) {
+      this.dropShop(m);
+      return;
+    }
+    m.wallet -= o.price;
+    m.stats.spent += o.price;
+    const at = shopCounterPt(st, s);
+    this.earn(o.price, at);
+    ss.revenue += o.price;
+    ss.served += 1;
+    const T = st.shopTotals;
+    T.served += 1;
+    T.revenue += o.price;
+    T.byShop[s] = (T.byShop[s] ?? 0) + 1;
+    (m.shopsVisited ??= []).push(s);
+    // 그 마음을 달래 줄 가게에서 샀으면 마음이 풀린다. 먹거리면 배고픔이 처음부터.
+    const urge = urgeOf(st, m);
+    if (urge !== null && URGE_SHOPS[urge].includes(s)) m.urge = null;
+    if (isFood(s)) m.ateAt = st.time;
+    this.emit('shopServed', { id: m.id, shop: s, item: o.item, price: o.price, at: { x: at.x, y: at.y } });
+    if (hasSlots(s)) {
+      const i = m.shopSlot ?? -1;
+      if (i >= 0 && ss.slots[i] === m.id) {
+        this.setPhase(m, 'toShopSeat');
+        this.go(m, shopSlotPt(st, s, i), s);
+        return;
+      }
+      // 안전망: 자리가 없어졌다 (레벨이 내려간 일은 없지만): 머문 셈 친다.
+      this.finishStay(m);
+      return;
+    }
+    this.takeAway(m, s, o);
+  }
+
+  /** 들고 가는 가게 (간식·음료·빵·트럭·장신구·점괘·기념품·꽃): 효과, 손에 든 것, 작은 반응 (꽃은 친한 손님에게 걸어간다). */
+  private takeAway(m: Monster, s: ShopId, o: ShopOrder): void {
+    const st = this.state;
+    this.applyShopEffect(m, s, o);
+    const d = SHOPS[s] as { hold?: number };
+    const hold = d.hold ?? 0;
+    if (o.accessory !== undefined) {
+      // 새 장신구를 단다 (자리가 그새 찼으면 못 단다: 고를 때 빈 자리만 골랐다).
+      if (!m.accessories.some((a) => a.slot === o.accessory?.slot) && !m.pawned.some((a) => a.slot === o.accessory?.slot)) {
+        m.accessories.push({ key: o.accessory.key, slot: o.accessory.slot, value: o.accessory.value });
+        st.shopTotals.accessories += 1;
+      }
+    } else if (o.item !== null && hold > 0) {
+      const key = orderItemKey(o.item);
+      m.held = { item: o.item, left: hold, total: hold, eat: key !== null && SHOP_ITEMS[key].hold === 'eat', shop: s };
+    }
+    if (s === 'flower_shop' && this.goGift(m)) return;
+    // 점괘: 대길·길 = fortuneGood (열쇠로 '오늘 운수 대통!'·'좋은 점괘!'), 흉 = fortuneBad.
+    const fortune = m.buffs?.fortune;
+    this.endShop(m, takeAwayReact(s, fortune), s === 'fortune_teller' ? fortune : undefined);
+  }
+
+  /** 자리에 닿았다: 머물기 시작 (숨는 가게는 안 보인다, 놀이기구는 한 바퀴를 기다린다). */
+  private arriveShopSeat(m: Monster): void {
+    const st = this.state;
+    const s = m.shop;
+    const i = m.shopSlot ?? -1;
+    if (s === null || s === undefined || i < 0 || st.shops[s].slots[i] !== m.id) {
+      this.dropShop(m);
+      return;
+    }
+    this.setPhase(m, 'atShop');
+    faceToward(m, shopSlotLook(st, s, i).x);
+    if ((SHOPS[s] as { hidden?: boolean }).hidden === true) m.hidden = true;
+    m.timer = isRide(s) ? 0 : shopStaySec(this.rng, s);
+  }
+
+  /** 자리에서 머문다 (timer초 뒤 finishStay). 놀이기구는 tickRide가 끝낸다. */
+  private tickAtShop(m: Monster, dt: number): void {
+    const s = m.shop;
+    if (s === null || s === undefined) {
+      this.decideSoon(m);
+      return;
+    }
+    if (isRide(s)) {
+      // 안전망: 자리를 잃었으면 (보관하기) 접는다. 한 바퀴를 너무 오래 기다리면 (두 바퀴 넘게) 그냥 내린다.
+      if (!this.state.shops[s].slots.includes(m.id)) this.dropShop(m);
+      else if ((m.phaseTime ?? 0) > RIDE.boardSec * 3 + shopStaySec(this.rng, s) * 2.2) this.finishStay(m);
+      return;
+    }
+    m.timer -= dt;
+    if (m.timer <= 0) this.finishStay(m);
+  }
+
+  /** 다 머물렀다 (먹음·잠·탕·사진·한 바퀴): 효과, 자리를 비우고 반응. */
+  private finishStay(m: Monster): void {
+    const st = this.state;
+    const s = m.shop;
+    if (s === null || s === undefined) {
+      this.decideSoon(m);
+      return;
+    }
+    const o = m.order ?? { item: null, price: 0 };
+    const at = shopSlotPt(st, s, Math.max(0, m.shopSlot ?? 0));
+    m.hidden = false;
+    this.applyShopEffect(m, s, o);
+    let kind: ShopReactKind = 'ride';
+    switch (s) {
+      case 'restaurant': {
+        // 좋아하는 메뉴면 가끔 배 터지게 먹고 드러눕는다 (미식가는 더, 다른 메뉴도 가끔).
+        const fav = SPECIES_FOOD[m.species];
+        const loved = fav !== undefined && o.item === itemArt(fav);
+        const foodie = m.traits.includes('foodie');
+        const p = loved ? FOOD_LIKE.stuffedChance * (foodie ? 2 : 1) : foodie ? FOOD_LIKE.foodieStuffed : 0;
+        const stuffed = p > 0 && this.rng.chance(p);
+        kind = stuffed ? 'stuffed' : loved ? 'favorite' : 'feast';
+        break;
+      }
+      case 'beauty_salon':
+        kind = 'salon';
+        break;
+      case 'inn':
+        kind = 'innWake';
+        break;
+      case 'hot_spring':
+        kind = 'soak';
+        break;
+      case 'photo_studio':
+        kind = 'photo';
+        break;
+      default:
+        kind = 'ride';
+    }
+    this.stayDone(m, s, o, at);
+    this.emit('shopConsumed', { id: m.id, shop: s, item: s === 'photo_studio' ? null : o.item, at: { x: at.x, y: at.y }, react: kind });
+    this.endShop(m, kind);
+    if (kind === 'stuffed') this.flop(m);
+  }
+
+  /** 머문 가게의 남는 일 (다 머물렀거나, 낸 뒤 가게를 보관했다): 여관 기록, 사진관 사진첩·찰칵·손에 든 사진. */
+  private stayDone(m: Monster, s: ShopId, o: ShopOrder, at: Pt): void {
+    const st = this.state;
+    if (s === 'inn') st.shopTotals.innStays += 1;
+    if (s !== 'photo_studio') return;
+    const first = st.photoAlbum[m.species] === undefined;
+    if (first) st.photoAlbum[m.species] = st.time;
+    st.shopTotals.photos += 1;
+    this.emit('photoTaken', { id: m.id, species: m.species, first, at: { x: at.x, y: at.y } });
+    if (first) this.toast(`사진첩에 처음 들어왔어요: ${SPECIES[m.species].name}`, 'good');
+    const hold = (SHOPS[s] as { hold?: number }).hold ?? 0;
+    if (o.item !== null && hold > 0) m.held = { item: o.item, left: hold, total: hold, eat: false, shop: s };
+  }
+
+  /** 가게 볼일 끝: 가게 칸을 지우고 반응 (reacting, 끝나면 다음 할 일: 떠나는 길이면 집으로). key = 반응 후보 열쇠 (점괘 등급). */
+  private endShop(m: Monster, kind: ShopReactKind, key?: string): void {
+    const st = this.state;
+    const s = m.shop ?? null;
+    // 들고 가는 가게: 계산대에 선 채 반응하면 다음 손님이 그 위에 올라선다. 비켜서는 점으로 몇 걸음 (반응은 비켜선 뒤 센다).
+    const aside = s !== null && !hasSlots(s) && dist(m.pos, shopCounterPt(st, s)) <= 40 ? shopPickupPt(st, s) : null;
+    this.leaveShop(m);
+    m.shopAt = st.time;
+    m.shopTrip = m.shopHome !== true;
+    const reaction = shopReaction(this.rng, kind, m, key);
+    this.setPhase(m, 'reacting');
+    m.path = [];
+    m.dest = null;
+    if (aside !== null && s !== null) this.go(m, aside, s === 'icecream_truck' ? null : s);
+    m.pose = reaction.pose;
+    m.poseTime = 0;
+    m.timer = reaction.duration;
+    this.recordDex(m, reaction.label);
+    this.emit('monsterReact', { id: m.id, reaction });
+  }
+
+  /**
+   * 배 터지게 먹었다 (식당): 테이블 옆에 FOOD_LIKE.stuffedSec초 드러눕는다 (Monster.lying, reacting이 그만큼 길어진다),
+   * 근처 손님이 보고 웃거나 걱정한다 (monsterSpectate). 다 누우면 getUp.
+   */
+  private flop(m: Monster): void {
+    const rng = this.rng;
+    m.lying = FOOD_LIKE.stuffedSec;
+    m.timer = Math.max(m.timer, FOOD_LIKE.stuffedSec + 0.4);
+    for (const o of this.state.monsters) {
+      if (o === m || o.phase === 'leaving' || o.phase === 'playing' || o.phase === 'reacting' || o.bankrupt === true || o.hidden === true || o.path.length > 0) continue;
+      if (dist(o.pos, m.pos) > FOOD_LIKE.watchRadius || !rng.chance(FOOD_LIKE.watchChance)) continue;
+      const reaction = shopReaction(rng, 'flopWatch', o);
+      o.pose = reaction.pose;
+      o.poseTime = reaction.duration;
+      faceToward(o, m.pos.x);
+      // 도감에도 남긴다 (도감의 '가게·놀이기구' 줄이 이 반응을 센다).
+      this.recordDex(o, reaction.label);
+      this.emit('monsterSpectate', { id: o.id, target: m.id, reaction });
+    }
+  }
+
+  /** 드러누웠다 일어난다: 뒤뚱뒤뚱 (FOOD_LIKE.waddle 동안 걸음이 느리다), '영차… 일어났다' 반응 (그동안 reacting). */
+  private getUp(m: Monster): void {
+    m.lying = 0;
+    const b = (m.buffs ??= {});
+    b.speed = FOOD_LIKE.waddle.mult;
+    b.speedSec = FOOD_LIKE.waddle.sec;
+    const reaction = shopReaction(this.rng, 'stuffedUp', m);
+    this.setPhase(m, 'reacting');
+    m.pose = reaction.pose;
+    m.poseTime = 0;
+    m.timer = reaction.duration;
+    this.recordDex(m, reaction.label);
+    this.emit('monsterReact', { id: m.id, reaction });
+  }
+
+  /** 걷는 중의 작은 가게 반응 (phase는 그대로). */
+  private sideShopReact(m: Monster, kind: ShopReactKind): void {
+    const reaction = shopReaction(this.rng, kind, m);
+    m.pose = reaction.pose;
+    m.poseTime = reaction.duration;
+    this.recordDex(m, reaction.label);
+    this.emit('monsterReact', { id: m.id, reaction });
+  }
+
+  /**
+   * 가게 효과 (defs.ts SHOPS.effect): 기분 + 주인 입담 (좋아하는 메뉴면 더, 미식가는 먹거리에 더), 끈기, 걸음·운·반짝이 (Monster.buffs),
+   * 여관은 지갑 일부 회복 (처음 지갑의 비율, 받은 코인으로 센다)·머무는 시간 연장 (bonusSec). 점괘가 좋았으면 true.
+   */
+  private applyShopEffect(m: Monster, s: ShopId, o: ShopOrder): boolean {
+    const st = this.state;
+    const d = SHOPS[s];
+    const e = d.effect as { mood: number; patience?: number; speed?: { mult: number; sec: number }; luck?: { add: number; sec: number; goodChance: number }; sparkleSec?: number; wallet?: number; walletMax?: number; visitSec?: number };
+    const charm = shopStat(st, s, 'charm');
+    let mood = e.mood + (charm - 3);
+    const fav = SPECIES_FOOD[m.species];
+    if (fav !== undefined && o.item === itemArt(fav)) mood += FOOD_LIKE.favoriteMood;
+    if (d.category === 'food' && m.traits.includes('foodie')) mood *= 1.3;
+    // 온천: 처진 손님일수록 크게 녹는다.
+    if (s === 'hot_spring') mood += springBonus(m.mood);
+    let good = true;
+    const b = (m.buffs ??= {});
+    if (e.luck !== undefined) {
+      // 점괘: 대길·길·흉 (주인 입담이 흉을 줄인다).
+      const f = rollFortune(this.rng, charm);
+      const g = FORTUNE[f];
+      good = f !== 'bad';
+      b.fortune = f;
+      b.luck = g.luck;
+      b.luckSec = e.luck.sec;
+      mood = g.mood + (good ? charm - 3 : 0);
+    }
+    m.mood = clampMood(m.mood + mood);
+    // 간식은 계속 지던 손님 (흐름 SHOP_URGE.comfortStreak 이하)이면 끈기가 하나 더 (사 먹고 기운을 차린다), 온천도 그렇다.
+    if (e.patience !== undefined) m.patience += e.patience + (d.category === 'food' && (m.streak ?? 0) <= SHOP_URGE.comfortStreak ? 1 : 0);
+    if (s === 'hot_spring' && (m.streak ?? 0) <= -2) m.patience += SPRING.losingPatience;
+    if (e.speed !== undefined) {
+      b.speed = e.speed.mult;
+      b.speedSec = e.speed.sec;
+    }
+    // 미용실 반짝이: 레벨·주인 입담만큼 길게.
+    if (e.sparkleSec !== undefined) b.sparkleSec = salonSparkleSec(st);
+    if (e.wallet !== undefined) {
+      const add = Math.max(0, Math.min(e.walletMax ?? Infinity, Math.round(startWallet(m) * e.wallet)));
+      m.wallet += add;
+      m.stats.won += add;
+    }
+    if (e.visitSec !== undefined) m.bonusSec = (m.bonusSec ?? 0) + e.visitSec;
+    return good;
+  }
+
+  // ── 아이스크림 트럭 ──
+
+  /**
+   * 트럭: 가게가 닫혔으면 차고에. 열리면 차고 입구 앞 길 칸으로 나와 (TRUCK.startSec 서 있다가) 다음 설 길 칸까지 달리고 (shops.ts truckPlan·stepTruck),
+   * 서면 TRUCK.stopSec 동안 판다 (truckStopped, 줄이 있으면 holdMax까지 더). 길이 끊겨 트럭 칸이 걸을 수 없는 길이 되면 차고로 돌아간다.
+   */
+  private tickTruck(dt: number): void {
+    const st = this.state;
+    const ss = st.shops.icecream_truck;
+    const t = ss.truck;
+    if (t === null) return;
+    const v = villageOf(st);
+    const home = v.truckHome();
+    const park = (): void => {
+      t.parked = true;
+      t.path = [];
+      t.stop = 0;
+      t.held = 0;
+      t.x = home.x;
+      t.y = home.y;
+    };
+    if (!shopIsOpen(st, 'icecream_truck')) {
+      park();
+      return;
+    }
+    if (t.parked) {
+      const p = v.placed('icecream_truck');
+      const e = p === undefined ? -1 : v.entryCellIndex(p);
+      if (e < 0 || !v.isWalkable(e)) {
+        park();
+        return;
+      }
+      const c = roadPoint(e, 0.5, 0.5, 0);
+      t.parked = false;
+      t.x = c.x;
+      t.y = c.y;
+      t.path = [];
+      t.stop = TRUCK.startSec;
+      t.held = 0;
+      return;
+    }
+    // 길이 바뀌었다: 트럭 칸이 끊겼으면 차고로, 가던 길이 끊겼으면 여기서 다시 고른다.
+    const cell = truckCell(t);
+    if (!v.isWalkable(cell)) {
+      park();
+      return;
+    }
+    // 가던 길 중간 칸 (꺾이는 점 사이 곧은 길)까지 본다: 끊겼으면 같은 곳으로 돌아가는 길, 그것도 없으면 여기서 다시 고른다.
+    if (t.path.length > 0 && !truckRouteOk(st, t)) {
+      t.path = truckReroute(st, t);
+      if (t.path.length > 0 && !truckRouteOk(st, t)) t.path = [];
+    }
+    if (t.stop > 0) {
+      t.stop -= dt;
+      const waiting = (id: MonsterId): boolean => {
+        const o = this.monster(id);
+        return o !== undefined && (o.phase === 'shopQueue' || (o.phase === 'toShop' && dist(o.pos, t) < TRUCK.waitNear));
+      };
+      if (t.stop <= 0 && (ss.queue.some(waiting) || ss.serving !== null) && t.held < TRUCK.holdMax) {
+        // 줄 선 손님이 있거나 따라오던 손님이 거의 닿았으면 조금 더 선다 (코앞에서 떠나지 않게).
+        t.held += dt;
+        t.stop = dt;
+      }
+      if (t.stop <= 0) {
+        t.held = 0;
+        t.path = truckPlan(st, this.rng, cell);
+        if (t.path.length === 0) t.stop = this.rng.range(TRUCK.stopSec[0], TRUCK.stopSec[1]);
+      }
+      return;
+    }
+    if (t.path.length > 0) {
+      stepTruck(t, dt);
+      if (t.path.length === 0) {
+        t.stop = this.rng.range(TRUCK.stopSec[0], TRUCK.stopSec[1]);
+        this.emit('truckStopped', { at: { x: t.x, y: t.y }, sec: t.stop });
+        this.layoutShopQueue('icecream_truck');
+      }
+      return;
+    }
+    t.path = truckPlan(st, this.rng, cell);
+    if (t.path.length === 0) t.stop = this.rng.range(TRUCK.stopSec[0], TRUCK.stopSec[1]);
+  }
+
+  // ── 놀이기구 ──
+
+  /**
+   * 회전목마·관람차: 첫 손님이 자리에 서면 boarding, RIDE.boardSec 뒤 (자리가 다 차면 fullSec 뒤, 자리로 오는 손님은 조금 기다린다) running (한 바퀴 = SHOPS.stay[0]초),
+   * 다 돌면 탄 손님 모두 finishStay (효과·반응). 출발 뒤 온 손님은 다음 바퀴.
+   */
+  private tickRide(s: ShopId, dt: number): void {
+    const st = this.state;
+    const ss = st.shops[s];
+    const r = ss.ride;
+    if (r === null) return;
+    r.t += dt;
+    if (r.phase === 'running') {
+      r.riders = r.riders.filter((id) => this.monster(id)?.shop === s);
+      if (r.t < r.duration && r.riders.length > 0) return;
+      const riders = r.riders;
+      r.phase = 'idle';
+      r.t = 0;
+      r.riders = [];
+      this.emit('rideFinished', { shop: s, riders: [...riders] });
+      for (const id of riders) {
+        const m = this.monster(id);
+        if (m !== undefined && m.shop === s && m.phase === 'atShop') this.finishStay(m);
+      }
+      return;
+    }
+    const seated: MonsterId[] = [];
+    let coming = false;
+    for (const id of ss.slots) {
+      if (id === null) continue;
+      const m = this.monster(id);
+      if (m === undefined) continue;
+      if (m.phase === 'atShop') seated.push(id);
+      else coming = true;
+    }
+    if (seated.length === 0) {
+      r.phase = 'idle';
+      r.t = 0;
+      return;
+    }
+    if (r.phase === 'idle') {
+      r.phase = 'boarding';
+      r.t = 0;
+      return;
+    }
+    const full = seated.length >= shopSlots(st, s);
+    const go = (full && r.t >= RIDE.fullSec) || (r.t >= RIDE.boardSec && (!coming || r.t >= RIDE.boardSec * 2));
+    if (!go) return;
+    r.phase = 'running';
+    r.t = 0;
+    r.duration = shopStaySec(this.rng, s);
+    r.riders = seated;
+    this.emit('rideStarted', { shop: s, riders: [...seated] });
+  }
+
+  // ── 꽃 선물 ──
+
+  /** 꽃다발을 든 손님이 친한 손님에게 간다 (shops.ts giftTarget: 시무룩한 친구 → 단체 놀이 친구 → 가장 가까운 친구). 친한 손님이 없으면 false. */
+  private goGift(m: Monster): boolean {
+    const st = this.state;
+    const t = giftTarget(st, m);
+    if (t === null) return false;
+    const f = t.friend;
+    this.leaveShop(m);
+    m.shopAt = st.time;
+    m.giftTo = f.id;
+    this.setPhase(m, 'toFriend');
+    this.go(m, f.pos);
+    return true;
+  }
+
+  /** 꽃을 건네러 가는 중: 닿으면 건넨다, 친구가 떠났거나 FLOWER.giveUpSec 안에 못 닿으면 그만 (꽃은 들고 다닌다). */
+  private tickGift(m: Monster): void {
+    const f = m.giftTo === null || m.giftTo === undefined ? undefined : this.monster(m.giftTo);
+    if (f === undefined || f.phase === 'leaving' || f.hidden === true || f.bankrupt === true || (m.phaseTime ?? 0) > FLOWER.giveUpSec) {
+      m.giftTo = null;
+      this.sideShopReact(m, 'lonely');
+      this.decideSoon(m);
+      return;
+    }
+    if (dist(m.pos, f.pos) <= FLOWER.reach) {
+      this.giveGift(m, f);
+      return;
+    }
+    const d = m.dest ?? null;
+    if (m.path.length === 0 || ((d === null || dist(d, f.pos) > 60) && (m.phaseTime ?? 0) % 1.2 < SIM.dt + 1e-6)) this.go(m, f.pos);
+  }
+
+  /** 꽃을 건넨다: 둘 다 기분 +, 하트 (꽃다발은 받은 손님 손으로). 받는 친구가 시무룩하면 위로 꽃 (받은 손님 기분 +FLOWER.comfortMood, '기운 내!'·'훌쩍… 고마워'). */
+  private giveGift(m: Monster, f: Monster): void {
+    const st = this.state;
+    m.giftTo = null;
+    const comfort = f.mood < FLOWER.sadBelow;
+    const bouquet = m.held?.item ?? itemArt('bouquet');
+    m.held = null;
+    f.held = { item: bouquet, left: 20, total: 20, eat: false, shop: null };
+    m.mood = clampMood(m.mood + FLOWER.mood);
+    f.mood = clampMood(f.mood + (comfort ? FLOWER.comfortMood : FLOWER.mood));
+    st.shopTotals.gifts += 1;
+    faceToward(m, f.pos.x);
+    faceToward(f, m.pos.x);
+    this.emit('giftGiven', { from: m.id, to: f.id, at: { x: (m.pos.x + f.pos.x) / 2, y: (m.pos.y + f.pos.y) / 2 } });
+    const got = shopReaction(this.rng, comfort ? 'giftThanks' : 'giftGet', f);
+    f.pose = got.pose;
+    f.poseTime = got.duration;
+    this.recordDex(f, got.label);
+    this.emit('monsterReact', { id: f.id, reaction: got });
+    this.endShop(m, comfort ? 'giftComfort' : 'giftGive');
+  }
+
+  // ── 팁 ──
+
+  /** 크게 딴 손님이 진행자(0번 자리)에게 팁 (shops.ts tipFor: 성격마다 다르게, 마을 수입). 진행자가 없거나 지갑이 모자라면 주지 않는다. 결과 반응 뒤 고마워요 (afterReact). */
+  private tipHost(b: BoothId, m: Monster, payout: number, bet: number, tier: OutcomeTier, festival: boolean): void {
+    const st = this.state;
+    if (B.boothStaff(st, b, 0) === null) return;
+    const amount = tipFor(payout, bet, tier, festival, this.rng, m.traits);
+    if (amount <= 0 || amount > m.wallet) return;
+    m.wallet -= amount;
+    m.tipped = this.rng.chance(TIP.reactChance);
+    const at = B.hostPt(st, b, 0);
+    this.earn(amount, at);
+    st.shopTotals.tips += 1;
+    st.shopTotals.tipCoins += amount;
+    this.emit('tip', { id: m.id, booth: b, role: 0, amount, at: { x: at.x, y: at.y } });
+  }
+
+  // ── 보관하기 ──
+
+  /** 가게를 보관함에 넣는다: 머무는 중이던 손님은 효과를 받고 나온다, 줄·계산대 손님은 다른 걸 하러 (out에 더한다). 놀이기구·트럭은 처음으로. */
+  private storeShop(s: ShopId, out: Monster[]): void {
+    const st = this.state;
+    const ss = st.shops[s];
+    for (const m of st.monsters) {
+      if (m.shop !== s) continue;
+      // 낸 손님 (자리로 가는 중·머무는 중)은 효과와 남는 일 (사진첩·여관 기록)까지 받고 나온다: 내고 아무것도 못 받는 일이 없게.
+      if ((m.phase === 'atShop' || m.phase === 'toShopSeat') && m.order !== null && m.order !== undefined) {
+        this.applyShopEffect(m, s, m.order);
+        this.stayDone(m, s, m.order, m.pos);
+      }
+      this.leaveShop(m);
+      if (m.shopHome === true) {
+        m.shopHome = false;
+        this.goHome(m);
+        continue;
+      }
+      out.push(m);
+    }
+    ss.queue = [];
+    ss.serving = null;
+    ss.slots = ss.slots.map(() => null);
+    if (ss.ride !== null) ss.ride = { phase: 'idle', t: 0, duration: 0, riders: [] };
+    if (ss.truck !== null) {
+      ss.truck.parked = true;
+      ss.truck.path = [];
+      ss.truck.stop = 0;
+    }
+  }
+
+  // ── 촌장의 행동 (가게) ──
+
+  /** 손님을 받는 중 (지었고 주인이 있고 놓여 길로 이어졌다). */
+  shopOpen(s: ShopId): boolean {
+    return shopIsOpen(this.state, s);
+  }
+
+  /** 짓는 비용 (이미 있으면 null). */
+  shopBuyCost(s: ShopId): Cost | null {
+    if (shopOwned(this.state, s)) return null;
+    const u = SHOPS[s].unlock as { coins: number; mats?: Partial<Record<MaterialId, number>> };
+    return costOf({ coins: u.coins, mats: u.mats });
+  }
+
+  /** 비용 말고 아직 지을 수 없는 이유 (회관 레벨). */
+  shopLockReason(s: ShopId): string | null {
+    if (shopOwned(this.state, s)) return null;
+    const need = SHOPS[s].unlock.hall;
+    return this.hallLevel() >= need ? null : `마을회관 Lv.${need}부터 지을 수 있어요.`;
+  }
+
+  /** 다음 레벨 비용 (없거나 최고 레벨이면 null). */
+  shopUpgradeCost(s: ShopId): Cost | null {
+    const lv = this.state.shops[s].level;
+    if (lv < 1) return null;
+    const u = (SHOPS[s].upgrade as readonly { coins: number; mats?: Partial<Record<MaterialId, number>> }[])[lv - 1];
+    return u === undefined ? null : costOf(u);
+  }
+
+  upgradeShop(s: ShopId): Result {
+    const st = this.state;
+    const cost = this.shopUpgradeCost(s);
+    if (st.shops[s].level < 1) return fail('아직 없는 가게예요.');
+    if (cost === null) return fail('이미 최고 레벨이에요.');
+    const why = missingReason(st, cost);
+    if (why !== null) return fail(why);
+    this.spend(cost, isPlaced(st, s) ? villageOf(st).art(s) : null);
+    st.shops[s].level += 1;
+    fitShop(st, s);
+    this.emit('buildingUpgraded', { id: s, level: st.shops[s].level });
+    return OK;
+  }
+
+  /** 가게를 짓는다 (보관함으로, 가게 주인이 같이 온다: SHOPS.owner). 짓기 모드 ✓·autoPlaceOnBuy면 놓는 알림은 놓을 때. */
+  private buyShop(s: ShopId): Result {
+    const st = this.state;
+    if (shopOwned(st, s)) return fail('이미 있는 가게예요.');
+    const lock = this.shopLockReason(s);
+    if (lock !== null) return fail(lock);
+    const cost = this.shopBuyCost(s);
+    if (cost === null) return fail('이미 있는 가게예요.');
+    const why = missingReason(st, cost);
+    if (why !== null) return fail(why);
+    this.spend(cost, null);
+    this.openShopRaw(s);
+    if (this.placingNow) return OK;
+    const placed = this.autoPlaceOnBuy && this.autoPlace(s).ok;
+    if (!placed) this.toast(`${josa(SHOPS[s].name, '을', '를')} 지었어요! 지도에 놓아 주세요.`, 'good');
+    return OK;
+  }
+
+  /** 가게를 레벨 1로 열고 주인을 들인다 (비용·검사 없이: buyShop·개발용). */
+  private openShopRaw(s: ShopId): void {
+    const st = this.state;
+    const ss = st.shops[s];
+    ss.level = Math.max(1, ss.level);
+    fitShop(st, s);
+    if (ss.owner === null) {
+      const o = SHOPS[s].owner;
+      const id = st.nextId++;
+      st.staff.push({ id, name: o.name, art: o.art, stats: { ...o.stats }, level: 1, post: null, shop: s });
+      ss.owner = id;
+      this.emit('staffChanged', {});
+    }
+    this.emit('buildingUpgraded', { id: s, level: ss.level });
+  }
+
+  /**
+   * 진행자를 가게 주인으로 세운다 (shop = null이면 쉬게). 맡던 부스 자리·가게는 빈다. 그 가게에 다른 주인이 있으면 그 주인은 이 진행자가 맡던 가게로 (없으면 쉰다).
+   */
+  assignShop(staff: StaffId, shop: ShopId | null): Result {
+    const st = this.state;
+    const s = st.staff.find((x) => x.id === staff);
+    if (s === undefined) return fail('진행자를 찾을 수 없어요.');
+    const from = s.shop ?? null;
+    if (shop === null) {
+      if (from === null) return OK;
+      if (st.shops[from].owner === s.id) st.shops[from].owner = null;
+      s.shop = null;
+      this.emit('staffChanged', {});
+      return OK;
+    }
+    if (!shopOwned(st, shop)) return fail('아직 없는 가게예요.');
+    const ss = st.shops[shop];
+    if (ss.owner === s.id) return OK;
+    if (s.post !== null) this.assignRaw(s, null);
+    if (from !== null && st.shops[from].owner === s.id) st.shops[from].owner = null;
+    const prev = ss.owner === null ? undefined : st.staff.find((x) => x.id === ss.owner);
+    if (prev !== undefined) {
+      prev.shop = from;
+      if (from !== null) st.shops[from].owner = prev.id;
+    }
+    ss.owner = s.id;
+    s.shop = shop;
+    this.emit('staffChanged', {});
+    return OK;
+  }
+
+  /**
+   * 개발용·시험용: 손님 id를 가게 shop에 보낸다 (열린 가게, 살 것은 지갑으로 낼 수 있는 것: 남길 코인 없이). home = 떠나는 길처럼 (끝나면 집으로). 보냈으면 true.
+   */
+  devVisitShop(id: MonsterId, shop: ShopId, home = false): boolean {
+    const m = this.monster(id);
+    if (m === undefined || m.bankrupt === true || !shopIsOpen(this.state, shop) || !shopHasRoom(this.state, shop)) return false;
+    const order = pickOrder(this.state, this.rng, m, shop, 0);
+    if (order === null) return false;
+    this.goToShop(m, shop, order, home);
+    return true;
+  }
+
+  /** 개발용: 가게를 비용·회관 레벨 없이 열고 (주인 포함) 자동 배치 (near = 이 칸 가까이, 자리가 없으면 보관함에 남는다). */
+  devOpenShop(s: ShopId, near?: Cell): boolean {
+    if (!shopOwned(this.state, s)) this.openShopRaw(s);
+    return this.autoPlace(s, true, near).ok;
+  }
+
   // ── 촌장의 행동 ─────────────────────────────────────────────────────
 
   cheer(id: MonsterId): Result {
@@ -2388,6 +3467,7 @@ export class Sim implements SimApi {
     m.mood = clampMood(m.mood + (g.mood ?? 0) * (foodie ? TUNE.foodieSnack : 1));
     m.patience += (g.patience ?? 0) + (foodie ? 1 : 0);
     m.snacked = true;
+    m.ateAt = st.time;
     // 일하는 채무자: 한동안 빨라진다.
     this.boostLabor(m, LABOR.snackMult, LABOR.snackSec);
     const reaction = snackReaction(this.rng, m);
@@ -2526,11 +3606,11 @@ export class Sim implements SimApi {
       const s = st.staff.find((x) => suits(x, booth, i));
       if (s === undefined) continue;
       const p = s.post;
-      if (p === null || (p.booth !== booth && B.boothRoles(p.booth)[p.role]?.optional === true)) put(s, i);
+      if ((p === null && isIdle(s)) || (p !== null && p.booth !== booth && B.boothRoles(p.booth)[p.role]?.optional === true)) put(s, i);
     }
     for (const { i } of order) {
       if (!free(i)) continue;
-      const idle = st.staff.filter((x) => x.post === null && !roles.some((_, j) => j !== i && free(j) && suits(x, booth, j)));
+      const idle = st.staff.filter((x) => isIdle(x) && !roles.some((_, j) => j !== i && free(j) && suits(x, booth, j)));
       const s = idle.find((x) => presetPost(x) === null) ?? idle[0];
       if (s === undefined) continue;
       put(s, i);
@@ -2588,6 +3668,11 @@ export class Sim implements SimApi {
     const st = this.state;
     const from = s.post;
     if (samePost(from, to)) return;
+    // 다섯째 묶음: 가게 주인을 부스에 세우면 그 가게는 주인이 빈다 (닫힌다).
+    if (to !== null && s.shop !== null && s.shop !== undefined) {
+      if (st.shops[s.shop].owner === s.id) st.shops[s.shop].owner = null;
+      s.shop = null;
+    }
     if (from !== null) st.booths[from.booth].staff[from.role] = null;
     if (to !== null) {
       const bs = st.booths[to.booth];
@@ -2608,6 +3693,7 @@ export class Sim implements SimApi {
     const s = st.staff.find((x) => x.id === staff);
     if (s === undefined) return fail('진행자를 찾을 수 없어요.');
     if (booth === null) {
+      if (s.shop !== null && s.shop !== undefined) return this.assignShop(staff, null);
       if (s.post === null) return OK;
       this.assignRaw(s, null);
       this.emit('staffChanged', {});
@@ -2676,6 +3762,8 @@ export class Sim implements SimApi {
         return st.booths[key as BoothId].unlocked ? 1 : 0;
       case 'building':
         return isBuilt(st, key as BuildingId) ? 1 : 0;
+      case 'shop':
+        return shopOwned(st, key as ShopId) ? 1 : 0;
       default:
         return (st.village.decor[key as DecorId] ?? 0) + st.village.placed.filter((p) => p.key === key).length;
     }
@@ -2706,6 +3794,8 @@ export class Sim implements SimApi {
         const id = key as BuildingId;
         return isBuilt(this.state, id) ? null : nextBuildingCost(this.state, id);
       }
+      case 'shop':
+        return this.shopBuyCost(key as ShopId);
       default:
         return { coins: DECOR[key as DecorId].cost };
     }
@@ -2718,6 +3808,8 @@ export class Sim implements SimApi {
         return this.boothLockReason(key as BoothId);
       case 'building':
         return this.buildingLockReason(key as BuildingId);
+      case 'shop':
+        return this.shopLockReason(key as ShopId);
       default:
         return null;
     }
@@ -2760,6 +3852,8 @@ export class Sim implements SimApi {
         if (isBuilt(st, id)) return fail('이미 있는 건물이에요.');
         return this.upgradeBuilding(id);
       }
+      case 'shop':
+        return this.buyShop(key as ShopId);
       default: {
         const k = key as DecorId;
         const cost: Cost = { coins: DECOR[k].cost };
@@ -2906,6 +4000,8 @@ export class Sim implements SimApi {
       }
     } else if (key === 'fountain') {
       for (const m of st.monsters) if (m.phase === 'resting') out.push(m);
+    } else if (kind === 'shop') {
+      this.storeShop(key as ShopId, out);
     }
     for (const m of st.monsters) {
       if (out.includes(m)) continue;
@@ -2996,11 +4092,11 @@ export class Sim implements SimApi {
    * 보관함의 key를 알맞은 자리에 길까지 이어 놓는다 (village.ts findSpot: 이어 줄 길이 짧고 마을 입구에 가까운 곳). 자리가 없으면 실패 (땅을 넓혀야).
    * 옛 저장 옮기기·sim-check 촌장·개발용 ?all=1이 쓴다 (autoPlaceOnBuy면 열기·짓기가 부른다).
    */
-  autoPlace(key: CatalogKey, spread = false): Result {
+  autoPlace(key: CatalogKey, spread = false, near?: Cell): Result {
     const st = this.state;
     if (catalogKind(key) !== 'decor' && isPlaced(st, key)) return OK;
     if (this.stored(key) <= 0) return fail('보관함에 없어요.');
-    const spot = findSpot(st, key, DEFAULT_LOTS[key as BoothId], spread);
+    const spot = findSpot(st, key, DEFAULT_LOTS[key as BoothId], spread, near);
     if (spot === null) return fail('놓을 자리가 없어요. 땅을 넓혀요.');
     if (spot.road.length > 0 && setRoads(st, spot.road, true) > 0) this.emit('villageChanged', { what: 'road' });
     this.placeRaw(key, spot.x, spot.y);

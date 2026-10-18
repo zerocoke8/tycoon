@@ -89,6 +89,8 @@ const EMOTE_FALLBACK: Record<EmoteKind, { glyph: string; color: number }> = {
   note: { glyph: '♪', color: 0x7cc46b },
   anger: { glyph: '!!', color: 0xf0644b },
   shock: { glyph: '!', color: 0xf08a3c },
+  sleep: { glyph: 'z', color: 0x8a9ad8 },
+  yum: { glyph: '♥', color: 0xf0a04b },
 };
 
 /** 이모트 하나 (가운데 기준, 지름 약 size px). */

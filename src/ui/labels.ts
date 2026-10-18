@@ -32,10 +32,14 @@ import {
   type WorkFacility,
   HALL_THEME,
   LAND,
+  SHOP_ITEMS,
+  SHOP_OWNER_ROLE,
+  SHOPS,
 } from '../data/defs.ts';
 import { presetPost } from '../sim/staff.ts';
-import type { Candidate, Errand, GroupRole, Monster, MonsterPhase, Staff } from '../sim/types.ts';
+import type { Candidate, Errand, GameState, GroupRole, Monster, MonsterPhase, Staff } from '../sim/types.ts';
 import { fmt } from './dom.ts';
+import { shopPhaseText } from './shopText.ts';
 
 export const BUILDING_IDS = Object.keys(BUILDINGS) as BuildingId[];
 export const MAT_IDS = Object.keys(MATERIALS) as MaterialId[];
@@ -43,9 +47,9 @@ export const MAT_IDS = Object.keys(MATERIALS) as MaterialId[];
 type Named = Readonly<Record<string, { readonly name: string } | undefined>>;
 /** 일터 연장 (items/hoe·pickaxe, LABOR.facilities[f].tool). */
 const TOOLS: Named = { hoe: { name: '괭이' }, pickaxe: { name: '곡괭이' } };
-const NAMED: readonly Named[] = [MATERIALS as Named, PRECIOUS as Named, GOODS as Named, ACCESSORIES as Named, TOOLS];
+const NAMED: readonly Named[] = [MATERIALS as Named, PRECIOUS as Named, GOODS as Named, ACCESSORIES as Named, TOOLS, SHOP_ITEMS as Named];
 
-/** 아이템 key → 이름 ('coin', mat_*, 귀한 물건, 가공품, 장신구 acc_*, 일터 연장). */
+/** 아이템 key → 이름 ('coin', mat_*, 귀한 물건, 가공품, 장신구 acc_*, 일터 연장, 가게에서 파는 것 food_*·bouquet …). */
 export function itemName(key: string): string {
   if (key === 'coin') return '코인';
   for (const table of NAMED) {
@@ -171,10 +175,10 @@ export function postName(b: BoothId, role: number): string {
   return BOOTHS[b].roles.length > 1 ? `${BOOTHS[b].name} ${roleName(b, role)}` : BOOTHS[b].name;
 }
 
-/** 진행자가 맡은 곳 한 줄: '쉬는 중' / '슬롯 부스 진행 중' / '몬스터 경주장 해설자'. */
+/** 진행자가 맡은 곳 한 줄: '쉬는 중' / '슬롯 부스 진행 중' / '몬스터 경주장 해설자' / '간식 노점 가게 주인' (다섯째 묶음). */
 export function staffWhere(st: Staff): string {
   const p = st.post;
-  if (p === null) return '쉬는 중';
+  if (p === null) return st.shop !== null && st.shop !== undefined ? `${SHOPS[st.shop].name} ${SHOP_OWNER_ROLE}` : '쉬는 중';
   return BOOTHS[p.booth].roles.length > 1 ? postName(p.booth, p.role) : `${BOOTHS[p.booth].name} 진행 중`;
 }
 
@@ -340,6 +344,12 @@ const PHASE: Record<MonsterPhase, string> = {
   working: '일터에서 빚 갚는 중',
   waitWork: '일터에서 자리를 기다리는 중',
   relieved: '빚을 다 갚고 홀가분',
+  toShop: '가게에 가는 중',
+  shopQueue: '가게 줄 서는 중',
+  buying: '가게에서 사는 중',
+  toShopSeat: '자리로 가는 중',
+  atShop: '가게에서 쉬는 중',
+  toFriend: '친구에게 꽃을 주러 가는 중',
 };
 
 /** 전당포·은행 볼일마다 가는 중·보는 중 글. */
@@ -350,9 +360,13 @@ const ERRAND: Record<Errand, readonly [string, string]> = {
   repay: ['빚을 갚으러 은행에 가는 중', '은행에 빚을 갚는 중'],
 };
 
-/** 손님의 지금 할 일 한 줄. */
-export function monsterStatus(m: Monster): string {
+/**
+ * 손님의 지금 할 일 한 줄. st가 있으면 놀이기구가 도는지까지, friend = 꽃을 건넬 친한 손님 이름 (다섯째 묶음 가게 볼일: ui/shopText.ts shopPhaseText).
+ */
+export function monsterStatus(m: Monster, st?: GameState, friend?: string): string {
   const p = PHASE[m.phase];
+  const shop = shopPhaseText(m, st, friend);
+  if (shop !== null) return shop;
   // 빚 걸기 판에 불린 채무자 (줄다리기·밀어내기)
   const match = m.bankrupt === true ? (m.labor?.match ?? null) : null;
   if (match !== null && m.booth === match && (m.phase === 'toSeat' || m.phase === 'playing')) {

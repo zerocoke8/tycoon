@@ -2,7 +2,7 @@
 // 행동은 모두 Result를 돌려준다: 안 되면 ok=false와 한국어 이유 (UI가 그대로 토스트로 띄운다).
 
 import type { CatalogKey, CatalogKind } from '../data/catalog.ts';
-import type { BoothId, BuildingId, GoodId, MaterialId, PreciousId } from '../data/defs.ts';
+import type { BoothId, BuildingId, GoodId, MaterialId, PreciousId, ShopId } from '../data/defs.ts';
 import type { Cell } from '../data/map.ts';
 import type { GameState, Monster, MonsterId, SimBus, StaffId } from './types.ts';
 import type { ChunkInfo, PlaceCheck, Village } from './village.ts';
@@ -117,8 +117,24 @@ export interface SimApi {
   eraseRoad(cells: readonly Cell[]): Result;
   /** 땅 조각 사기 (가진 땅에 이웃한 조각, 값·회관 레벨). */
   buyChunk(index: number): Result;
-  /** 보관함의 것을 알맞은 자리에 길까지 이어 놓는다 (자리가 없으면 실패). spread = 다른 건물에 위아래로 붙이지 않게 (village.ts findSpot). */
-  autoPlace(key: CatalogKey, spread?: boolean): Result;
+  /**
+   * 보관함의 것을 알맞은 자리에 길까지 이어 놓는다 (자리가 없으면 실패). spread = 다른 건물에 위아래로 붙이지 않게 (village.ts findSpot),
+   * near = 마을 입구 대신 이 칸에 가까운 자리 (개발용).
+   */
+  autoPlace(key: CatalogKey, spread?: boolean, near?: Cell): Result;
+
+  // ── 다섯째 묶음: 가게 (DESIGN 3.8, sim/shops.ts) ──
+  /** 손님을 받는 중 (지었고, 가게 주인이 있고, 놓여 입구가 길로 이어졌다). */
+  shopOpen(shop: ShopId): boolean;
+  /** 짓는 비용 (이미 있으면 null). 짓기는 buy(key)·place(key, cell) (가게 주인이 같이 온다). */
+  shopBuyCost(shop: ShopId): Cost | null;
+  /** 비용 말고 아직 지을 수 없는 이유 (마을회관 레벨). */
+  shopLockReason(shop: ShopId): string | null;
+  /** 다음 레벨 비용 (없거나 최고 레벨이면 null). */
+  shopUpgradeCost(shop: ShopId): Cost | null;
+  upgradeShop(shop: ShopId): Result;
+  /** 진행자를 가게 주인으로 (shop = null이면 쉬게). 맡던 부스 자리·가게는 빈다, 그 가게에 있던 주인은 이 진행자가 맡던 가게로 (없으면 쉰다). */
+  assignShop(staff: StaffId, shop: ShopId | null): Result;
 
   // ── 촌장의 행동 ──
   /** 손님을 톡 눌러 응원 (쿨타임). */

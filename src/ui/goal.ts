@@ -2,13 +2,17 @@
 // 목표 차례: 보관함의 부스·건물 놓기 → 길이 이어지지 않은 건물에 길 잇기 (둘 다 촌장이 한 일 뒤에만) → (옛 저장) 짓기 모드 알림 → 손님 응원하기 → 부스 구경하기 → 진행자 자리가 비어 쉬는 부스 →
 // 처음 열린 빚 걸기 판 보러 가기 → 처음 생긴 일터 채무자 응원하러 가기 (넷째 묶음) →
 // 아직 구경하지 않은 단체 놀이의 판이 모이거나 한창이면 지도에서 구경하기 →
+// 첫 가게 둘 (다섯째 묶음: 처음 부스 다음에 새 부스를 하나 연 뒤, 지을 수 있는 가장 싼 가게, 둘째는 다른 묶음 먼저) →
 // 전당포(회관 1)·일터·은행(회관 2)을 지을 수 있으면 짓기 (빈털터리 손님을 본 뒤나 밀어내기를 연 뒤에만: 그 전엔 할 일이 없다) → 지금 살 수 있는 가장 싼 짓기 →
-// 다음 부스(귀한 물건은 이미 모았을 때)·아직 안 지은 전당포·일터·은행 → 다음 마을회관까지 모은 정도.
+// 다음 부스(귀한 물건은 이미 모았을 때)·아직 안 지은 전당포·일터·은행·첫 가게 → 다음 마을회관까지 모은 정도.
+// 가게 주인이 없는 놓인 가게는 진행자 자리가 빈 부스 다음에 (주인 세우기).
 // 칩을 누르면 그 화면을 연다. 처음 두 단계와 구경한 단체 놀이는 이 브라우저에 기억한다 (게임 저장과 따로, 없어도 된다).
 
 import { catalogKind, catalogName, footprint, type CatalogKey } from '../data/catalog.ts';
-import { BOOTH_IDS, BOOTHS, boothDef, BUILDINGS, DEBT_MATCH, GROUP_BOOTHS, type BoothId, type BuildingId, type GroupBoothId, type MaterialId, type PreciousId } from '../data/defs.ts';
+import { BOOTH_IDS, BOOTHS, boothDef, BUILDINGS, DEBT_MATCH, GROUP_BOOTHS, SHOP_IDS, SHOP_OWNER_ROLE, SHOPS, type BoothId, type BuildingId, type GroupBoothId, type MaterialId, type PreciousId, type ShopId } from '../data/defs.ts';
 import type { Cost } from '../sim/api.ts';
+import { shopIdleReason, shopOwned } from '../sim/shops.ts';
+import { isIdle } from '../sim/staff.ts';
 import { josa } from '../sim/text.ts';
 import { fmt, h, setText } from './dom.ts';
 import { groupGame } from '../sim/group/index.ts';
@@ -17,8 +21,12 @@ import { AREAS, boothShort, boothTiny, BUILDING_IDS, districtAtHall, itemName } 
 import type { TabId, UiCtx } from './panel.ts';
 import { catOf, joinRoad } from './panels/build.ts';
 import { itemIcon } from './pics.ts';
+import { SHOP_PITCH } from './shopText.ts';
 
 const HINT_KEY = 'mpv-hints-v1';
+/** 첫 가게를 권하는 때: 열린 부스가 이만큼 (처음 둘 + 새로 하나) 된 뒤. 권하는 가게 수 (그다음은 '지금 지을 수 있어요'로). */
+const SHOP_AFTER_BOOTHS = 3;
+const FIRST_SHOPS = 2;
 
 interface Seen {
   cheer: boolean;
@@ -33,6 +41,8 @@ interface Seen {
   broke: boolean;
   /** 구경한 단체 놀이 (부스 패널을 열었거나 목표 칩으로 지도에서 보았다). */
   watched: string[];
+  /** 주인이 없는 가게 칩을 눌러 보았다 (가게마다 한 번: 일부러 닫아 둔 가게를 계속 조르지 않게). */
+  shopOwner: string[];
 }
 
 /** 한 번 보면 끝나는 목표. */
@@ -49,9 +59,10 @@ function loadSeen(): Seen {
       debtMatch: raw.debtMatch === true,
       broke: raw.broke === true,
       watched: Array.isArray(raw.watched) ? raw.watched.filter((x): x is string => typeof x === 'string') : [],
+      shopOwner: Array.isArray(raw.shopOwner) ? raw.shopOwner.filter((x): x is string => typeof x === 'string') : [],
     };
   } catch {
-    return { cheer: false, booth: false, place: false, yard: false, debtMatch: false, broke: false, watched: [] };
+    return { cheer: false, booth: false, place: false, yard: false, debtMatch: false, broke: false, watched: [], shopOwner: [] };
   }
 }
 
@@ -108,6 +119,13 @@ export class GoalChip {
     this.store();
   }
 
+  /** 주인 없는 가게 칩을 눌렀다 (그 가게는 다시 조르지 않는다). */
+  private markShopOwner(s: ShopId): void {
+    if (this.seen.shopOwner.includes(s)) return;
+    this.seen.shopOwner.push(s);
+    this.store();
+  }
+
   private store(): void {
     try {
       localStorage.setItem(HINT_KEY, JSON.stringify(this.seen));
@@ -128,7 +146,7 @@ export class GoalChip {
     setBadge('build', this.cheapest() !== null);
     const village = sim.village();
     const needHost = BOOTH_IDS.some((b) => st.booths[b].unlocked && village.connected(b) && !sim.boothOpen(b));
-    setBadge('staff', needHost && (st.staff.some((s) => s.post === null) || st.candidates.some((c) => c.cost <= st.coins)));
+    setBadge('staff', needHost && (st.staff.some((s) => isIdle(s)) || st.candidates.some((c) => c.cost <= st.coins)));
     setBadge('workshop', st.crafting.length < sim.craftSlots() && sim.availableRecipes().some((r) => r.affordable));
 
     // 이미 마을을 키운 사람 (회관 2 이상이거나 부스가 셋 넘게 열림: 옛 저장으로 이어 하는 사람)에게는 처음 두 단계를 건너뛴다.
@@ -181,7 +199,7 @@ export class GoalChip {
       const role = roles.findIndex((r, i) => r.optional !== true && (st.booths[idle].staff[i] ?? null) === null);
       const name = roles[role]?.name ?? '진행자';
       const where = roles.length > 1 ? `${boothTiny(idle)} ${name}` : boothShort(idle);
-      if (st.staff.some((x) => x.post === null)) {
+      if (st.staff.some((x) => isIdle(x))) {
         // 부스 패널을 열고 그 자리의 '세우기' 고르기를 바로 연다.
         this.show(`host:${idle}.${role}`, `${where} 자리에 진행자를 세워 주세요`, null, () => this.ctx.showBooth(idle, role));
         return;
@@ -189,6 +207,26 @@ export class GoalChip {
       const cheapest = st.candidates.reduce<number | null>((m, c) => (m === null || c.cost < m ? c.cost : m), null);
       // 주민 탭을 고용 후보 칸으로 굴려 연다. 자리 이름('출발 신호')은 사람이 아니라 자리로 말한다.
       this.show(`hire:${idle}.${role}`, `진행자를 고용해 주세요 (${roles.length > 1 ? `${where} 자리` : BOOTHS[idle].name})`, cheapest === null ? null : { coins: cheapest }, () => this.ctx.openHire());
+      return;
+    }
+
+    // 다섯째 묶음: 놓여 길로 이어졌는데 가게 주인이 없는 가게 (주인을 부스에 세웠을 때). 쉬는 주민이 있으면 가게 시트 (주인 세우기),
+    // 없으면 고용 (부스를 멈추거나 다른 가게를 닫는 바꾸기만 남지 않게). 가게마다 한 번 누르면 다시 조르지 않는다 (일부러 닫아 둔 가게).
+    const ownerless = SHOP_IDS.find((s) => shopIdleReason(st, s) === 'owner' && !this.seen.shopOwner.includes(s));
+    if (ownerless !== undefined) {
+      const name = SHOPS[ownerless].name;
+      if (st.staff.some((x) => isIdle(x))) {
+        this.show(`shopOwner:${ownerless}`, `${name}에 ${josa(SHOP_OWNER_ROLE, '을', '를')} 세워 주세요`, null, () => {
+          this.markShopOwner(ownerless);
+          this.ctx.showShop(ownerless);
+        });
+        return;
+      }
+      const cheapest = st.candidates.reduce<number | null>((m, c) => (m === null || c.cost < m ? c.cost : m), null);
+      this.show(`shopHire:${ownerless}`, `진행자를 고용해 주세요 (${name} ${SHOP_OWNER_ROLE})`, cheapest === null ? null : { coins: cheapest }, () => {
+        this.markShopOwner(ownerless);
+        this.ctx.openHire();
+      });
       return;
     }
 
@@ -228,6 +266,14 @@ export class GoalChip {
       return;
     }
 
+    // 다섯째 묶음: 첫 부스들 다음에 첫 가게 둘 (손님이 놀이 말고도 코인을 쓴다). 지을 수 있으면 그 카드로.
+    const shop = this.firstShop();
+    if (shop !== null && sim.canAfford(shop.cost)) {
+      const name = SHOPS[shop.id].name;
+      this.show(`firstShop:${shop.id}`, `${josa(name, '을', '를')} 지어 보세요: ${SHOP_PITCH[shop.id]}`, null, () => this.ctx.openBuild(catOf(shop.id), shop.id));
+      return;
+    }
+
     // 전당포(회관 1)·일터·은행(회관 2): 지을 수 있으면 다른 짓기보다 먼저 (돈이 떨어진 손님의 이야기가 시작된다).
     // 단, 돈이 떨어진 손님을 본 뒤나 첫 단체 놀이(밀어내기)를 연 뒤에만 (그 전엔 맡길 손님이 없어 첫 부스가 늦어질 뿐).
     const debt = this.debtMatters() ? this.debtBuild() : null;
@@ -240,7 +286,7 @@ export class GoalChip {
     const buy = this.cheapest();
     if (buy !== null) {
       // 그 카드가 든 묶음으로 (마지막에 본 묶음이 장식·길·땅이어도).
-      this.show(`buy:${buy.label}`, buy.label, null, () => this.ctx.openBuild(catOf(buy.key)));
+      this.show(`buy:${buy.label}`, buy.label, null, () => this.ctx.openBuild(catOf(buy.key), buy.key));
       return;
     }
 
@@ -249,6 +295,10 @@ export class GoalChip {
     const hallCost = sim.buildingUpgradeCost('hall');
     if (debt !== null && (next === null || debt.cost.coins <= next.cost.coins) && (hallCost === null || debt.cost.coins <= hallCost.coins)) {
       this.show(`debtNext:${debt.id}`, `${BUILDINGS[debt.id].name} 짓기까지`, debt.cost, () => this.ctx.showBuilding(debt.id));
+      return;
+    }
+    if (shop !== null && (next === null || shop.cost.coins <= next.cost.coins) && (hallCost === null || shop.cost.coins <= hallCost.coins)) {
+      this.show(`shopNext:${shop.id}`, `${SHOPS[shop.id].name} 짓기까지`, shop.cost, () => this.ctx.openBuild(catOf(shop.id), shop.id));
       return;
     }
     if (next !== null && (hallCost === null || next.cost.coins <= hallCost.coins)) {
@@ -278,6 +328,27 @@ export class GoalChip {
       if (ph === 'running' || (ph === 'gathering' && (st.booths[b].group?.participants.length ?? 0) > 0)) return b;
     }
     return null;
+  }
+
+  /**
+   * 권할 첫 가게 (다섯째 묶음, 없으면 null): 열린 부스가 SHOP_AFTER_BOOTHS 이상이고 가진 가게가 FIRST_SHOPS보다 적을 때,
+   * 지금 마을회관 레벨로 지을 수 있는 가장 싼 가게 (둘째는 가진 가게와 다른 묶음을 먼저: 간식 노점 다음 점집 …).
+   */
+  private firstShop(): { id: ShopId; cost: Cost } | null {
+    const sim = this.ctx.sim;
+    const st = sim.state;
+    const owned = SHOP_IDS.filter((s) => shopOwned(st, s));
+    if (owned.length >= FIRST_SHOPS || BOOTH_IDS.filter((b) => st.booths[b].unlocked).length < SHOP_AFTER_BOOTHS) return null;
+    const cats = new Set(owned.map((s) => SHOPS[s].category));
+    let best: { id: ShopId; cost: Cost; rank: number } | null = null;
+    for (const s of SHOP_IDS) {
+      if (shopOwned(st, s) || sim.shopLockReason(s) !== null) continue;
+      const cost = sim.shopBuyCost(s);
+      if (cost === null) continue;
+      const rank = cost.coins + (cats.has(SHOPS[s].category) ? 1000 : 0);
+      if (best === null || rank < best.rank) best = { id: s, cost, rank };
+    }
+    return best === null ? null : { id: best.id, cost: best.cost };
   }
 
   /** 전당포·일터·은행을 권할 때인가: 돈이 떨어진 손님을 보았거나 밀어내기 대결장을 열었다. */
@@ -370,6 +441,14 @@ export class GoalChip {
     for (const b of BOOTH_IDS as readonly BoothId[]) {
       if (st.booths[b].unlocked) consider(sim.boothUpgradeCost(b), `지금 올릴 수 있어요: ${BOOTHS[b].name} Lv.${st.booths[b].level + 1}`, b);
       else if (sim.boothLockReason(b) === null) consider(sim.boothUnlockCost(b), `지금 열 수 있어요: ${BOOTHS[b].name}`, b);
+    }
+    // 가게 (다섯째 묶음): 첫 가게를 지은 뒤부터 (그 전엔 firstShop이 따로 권한다).
+    if (SHOP_IDS.some((s) => shopOwned(st, s))) {
+      for (const s of SHOP_IDS) {
+        const lv = st.shops[s].level;
+        if (lv >= 1) consider(sim.shopUpgradeCost(s), `지금 올릴 수 있어요: ${SHOPS[s].name} Lv.${lv + 1}`, s);
+        else if (sim.shopLockReason(s) === null) consider(sim.shopBuyCost(s), `지금 지을 수 있어요: ${SHOPS[s].name}`, s);
+      }
     }
     return best;
   }

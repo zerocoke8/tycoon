@@ -5,29 +5,35 @@
 //   node scripts/sim-check.ts --auto --seeds 8   여러 시드의 이정표(처음 산 때) 표
 //   --minutes N, --seed N, --verbose (토스트 찍기), --detail (--seeds와 같이: 다음 회관 비용 항목마다 처음 모인 때),
 //   --first N (--seeds와 같이: 시드 N부터, 여러 프로세스로 나눠 돌릴 때)
+//   --no-shops (--auto와 같이: 욕심쟁이 촌장이 가게를 짓지 않는다, 다섯째 묶음이 회관 시각·코인 흐름에 주는 영향 비교), --shops (다섯째 묶음 가게 시험만),
+//   --shop-quota a,b,c,d,e (회관 레벨마다 먼저 지을 가게 수, 기본 1,3,5,7,9), --json (--seeds와 같이: 시드마다 @@{…} 한 줄), --why (손님 수 한도에 세는 시간·떠난 까닭)
 // 모든 모드에서 매 틱 불변식을 검사한다 (NaN, 음수 코인, 멈춘 손님, 자리·줄 어긋남, 놓인 것 겹침). 어긋나면 바로 멈춘다.
 // 배치형 마을 (DESIGN 6.1): sim-check의 Sim은 연 부스·지은 건물을 바로 자동 배치한다 (Sim.autoPlaceDefault). 욕심쟁이 촌장은 자리가 없으면 땅을 산다.
 // selftest의 시험 마을(testSim)은 땅을 다 가진 채 시작한다 (땅·배치 시험은 villageTests에서 따로).
 
 import { Rng } from '../src/core/rng.ts';
-import { catalogKind, footprint, type CatalogKey } from '../src/data/catalog.ts';
+import { catalogKind, footprint, SHOP_LAYOUT, type CatalogKey } from '../src/data/catalog.ts';
+import { FLOWER, FOOD_LIKE, FORTUNE, HUNGER, SALON, SHOP_IDS, SHOP_URGE, SHOP_VISIT, SHOPS, TIP, TRUCK, type ShopId } from '../src/data/defs.ts';
+import { devShops } from '../src/sim/dev.ts';
+import { accessoryMid, giftTarget, hasSlots, hungerOf, isRide, rollFortune, salonSparkleSec, shopReserve, shopWant, springBonus, tipFor, truckCell, truckRouteOk, urgeAfter, urgeOf } from '../src/sim/shops.ts';
+import { isIdle } from '../src/sim/staff.ts';
 import { ACCESSORIES, ACCESSORY_SPAWN, BANK, LABOR, PAWN, VAULT, type AccessoryId, BOOTHS, BOOTH_IDS, boothDef, BUILDINGS, DEBT_MATCH, DECOR, DECOR_IDS, DIG, GOODS, GROUP_BOOTHS, GROUP_RULES, HOST_PRESETS, isGroupBooth, KITE, MOOD, ODDS, RACE, RECIPES, SIM, SPECIES_IDS, SSIREUM, TUG, WHEEL, type BoothId, type BuildingId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type SpeciesId, type TraitId } from '../src/data/defs.ts';
 import { devAllLand, devOpenAll, devSeedDebtors } from '../src/sim/dev.ts';
 import { decideOutcome } from '../src/sim/games.ts';
 import { boothStat, minPlayCost } from '../src/sim/booths.ts';
 import { digNear, groupGame, raceOf, sideSign, trackAt, tugLineup } from '../src/sim/group/index.ts';
 import { COMEBACK_KEY_INDEX, generateRace, raceGatherSec, raceOutcome, racePlace, raceProgress, RACERS, raceStandings, raceTier } from '../src/sim/race.ts';
-import { cheerKey, DEBT_REACT_KINDS, debtReactionLabels, detailKeys, groupReactionLabels, moodDelta, pickReaction, reactionKeys, reactionLabels } from '../src/sim/reactions.ts';
+import { cheerKey, DEBT_REACT_KINDS, debtReactionLabels, detailKeys, groupReactionLabels, moodDelta, pickReaction, reactionKeys, reactionLabels, SHOP_REACT_KINDS, shopReactionLabels } from '../src/sim/reactions.ts';
 import { normalizeState } from '../src/sim/save.ts';
 import { bankLoan, bankOpenFor, canLend, laborRate, loanDebt, pairDebtors, pawnPrice, redeemCost, rollAccessories, wantMore, workSlots } from '../src/sim/debt.ts';
 import { createMonster } from '../src/sim/monsters.ts';
 import { presetPost } from '../src/sim/staff.ts';
 import { CELL, CHUNK, CHUNKS, GRID, LAND_START, cellAt, cellIndex } from '../src/data/map.ts';
 import { onRoad, route } from '../src/sim/path.ts';
-import { boothSpot, checkPlace, chunkInfo, findSpot, roadTo, startChunks, villageOf } from '../src/sim/village.ts';
+import { boothSpot, checkPlace, chunkInfo, findSpot, roadPaintable, roadTo, startChunks, villageOf } from '../src/sim/village.ts';
 import { clearSave, loadGame, newGame, saveGame, Sim } from '../src/sim/sim.ts';
 import { TUNE } from '../src/sim/tuning.ts';
-import type { GameState, GroupEntry, GroupEvent, GroupKey, GroupPlay, GroupState, Monster, MonsterId, MonsterPhase, RacerIndex, RoundOutcome, SimEvents } from '../src/sim/types.ts';
+import type { GameState, GroupEntry, GroupEvent, GroupKey, GroupPlay, GroupState, Monster, MonsterId, MonsterPhase, RacerIndex, RoundOutcome, SimEvents, Staff } from '../src/sim/types.ts';
 
 declare const process: { argv: string[]; exitCode?: number; getBuiltinModule(id: 'node:fs'): { readFileSync(p: URL, enc: 'utf8'): string } };
 
@@ -52,7 +58,10 @@ const LONG_OK: ReadonlySet<MonsterPhase> = new Set(['queued', 'resting', 'workin
 const STUCK_SEC = Math.max(120, WALK_MAX_SEC * 1.25 + 20);
 /** 온 때부터 머무는 최대 시간 + 줄에서 기다리는 시간 + 입구까지 걷는 시간. 이보다 오래 있으면 떠나지 못한 것. */
 // 넷째 묶음: 떠나기 전 볼일(갚기·되찾기)로 가게 둘을 들를 수 있다 (걷기 둘 + 계산대 + 반응). 파산했던 손님은 빚을 다 갚을 때까지 머문다 (따로 잰다).
-const MAX_AGE = TUNE.maxStaySec + TUNE.queueGiveUpSec + WALK_MAX_SEC * 3 + 90;
+// 다섯째 묶음: 떠나는 길의 기념품 가게 (걷기 + 줄 + 계산대)도. 여관에서 잔 시간(bonusSec)은 뺀다.
+const MAX_AGE = TUNE.maxStaySec + TUNE.queueGiveUpSec + WALK_MAX_SEC * 4 + SHOP_VISIT.queueGiveUpSec + 90;
+/** 다섯째 묶음: 가게 phase (Monster.shop이 있어야 한다). */
+const SHOP_PHASES: ReadonlySet<MonsterPhase> = new Set(['toShop', 'shopQueue', 'buying', 'toShopSeat', 'atShop']);
 /** 파산·일터에서 머물 수 있는 phase. */
 const DEBT_PHASES: ReadonlySet<MonsterPhase> = new Set(['reacting', 'toWork', 'working', 'waitWork', 'toSeat', 'playing']);
 /**
@@ -100,7 +109,7 @@ function checkInvariants(sim: Sim): void {
       const gs = g === null ? '' : `, 판 ${g.phase} ${g.elapsed.toFixed(1)}초 남은 ${g.countdown.toFixed(1)} 참가 [${g.participants.map((e) => `${e.monster}@${e.seat}:${e.pick}`).join(' ')}] 자리 [${st.booths[m.booth!].seats.join(' ')}]`;
       fail(`손님 ${m.id}가 ${m.phase}에 ${pt.toFixed(0)}초 멈춤 (path ${m.path.length}, booth ${m.booth}, seat ${m.seat}${gs})`, st);
     }
-    const age = st.time - (m.born ?? st.time);
+    const age = st.time - (m.born ?? st.time) - (m.bonusSec ?? 0);
     if (age > MAX_AGE && m.wasBankrupt !== true) fail(`손님 ${m.id}가 ${age.toFixed(0)}초째 떠나지 않음 (phase ${m.phase})`, st);
     // 넷째 묶음: 빚·장신구·일
     finite(m.debt, `손님 ${m.id} 빚`, st);
@@ -201,7 +210,94 @@ function checkInvariants(sim: Sim): void {
     spots.add(k);
   }
   for (const [k, v] of Object.entries(st.pawnCollection)) if (!(v !== undefined && v >= 1 && Number.isInteger(v))) fail(`전당포 컬렉션 ${k} = ${v}`, st);
+  checkShops(sim);
   checkVillage(sim);
+}
+
+/**
+ * 다섯째 묶음 불변식: 가게 상태 (레벨·주인·줄·계산대·자리·놀이기구·트럭)와 손님의 가게 칸이 서로 맞는다, 트럭은 차고에 있거나 걸을 수 있는 길 칸 위,
+ * 숨은 손님은 숨는 가게 자리에만, 손에 든 것·효과 시계는 수, 사진첩은 처음 찍은 때.
+ */
+function checkShops(sim: Sim): void {
+  const st = sim.state;
+  const v = villageOf(st);
+  for (const s of SHOP_IDS) {
+    const ss = st.shops[s];
+    if (!Number.isInteger(ss.level) || ss.level < 0 || ss.level > SHOPS[s].upgrade.length + 1) fail(`${s} 레벨 ${ss.level}`, st);
+    if (!(ss.revenue >= 0) || !(ss.served >= 0)) fail(`${s} 매상 ${ss.revenue} 손님 ${ss.served}`, st);
+    if (ss.level < 1 && (ss.queue.length > 0 || ss.serving !== null || ss.slots.some((x) => x !== null) || ss.owner !== null)) fail(`아직 없는 가게 ${s}에 손님·주인`, st);
+    if (ss.owner !== null) {
+      const o = st.staff.find((x) => x.id === ss.owner);
+      if (o === undefined || o.shop !== s || o.post !== null) fail(`${s} 주인 ${ss.owner}가 어긋남`, st);
+    }
+    if (new Set(ss.queue).size !== ss.queue.length) fail(`${s} 줄에 같은 손님이 둘`, st);
+    for (const id of ss.queue) {
+      const m = sim.monster(id);
+      if (!m || m.shop !== s || (m.phase !== 'toShop' && m.phase !== 'shopQueue')) fail(`${s} 줄의 손님 ${id}가 어긋남 (${m?.phase}, ${m?.shop})`, st);
+    }
+    if (ss.serving !== null) {
+      const m = sim.monster(ss.serving);
+      if (!m || m.shop !== s || m.phase !== 'buying') fail(`${s} 계산대 손님 ${ss.serving}가 어긋남 (${m?.phase})`, st);
+    }
+    if (ss.slots.length > Math.max(0, SHOP_LAYOUT[s].slots.length) || (!hasSlots(s) && ss.slots.length > 0)) fail(`${s} 자리 수 ${ss.slots.length}`, st);
+    ss.slots.forEach((id, i) => {
+      if (id === null) return;
+      const m = sim.monster(id);
+      if (!m || m.shop !== s || m.shopSlot !== i || (m.phase !== 'buying' && m.phase !== 'toShopSeat' && m.phase !== 'atShop')) fail(`${s} 자리 ${i}의 손님 ${id}가 어긋남 (${m?.phase})`, st);
+    });
+    const r = ss.ride;
+    if (isRide(s) !== (r !== null)) fail(`${s} 놀이기구 칸이 어긋남`, st);
+    if (r !== null) {
+      if (r.phase === 'running' && !(r.duration > 0)) fail(`${s} 한 바퀴 시간 ${r.duration}`, st);
+      for (const id of r.riders) if (!ss.slots.includes(id)) fail(`${s} 탄 손님 ${id}가 자리에 없음`, st);
+      if (r.phase === 'running' && r.t > r.duration + 1) fail(`${s} 한 바퀴가 끝나지 않음`, st);
+    }
+    const t = ss.truck;
+    if ((s === 'icecream_truck') !== (t !== null)) fail(`${s} 트럭 칸이 어긋남`, st);
+    if (t !== null && !t.parked) {
+      finite(t.x, '트럭 x', st);
+      finite(t.y, '트럭 y', st);
+      if (!v.isWalkable(truckCell(t))) fail(`트럭이 길 밖 (${t.x.toFixed(0)},${t.y.toFixed(0)})`, st);
+      // 꺾이는 점만이 아니라 그 사이 곧은 길 칸까지 (가던 길 가운데 칸을 지웠으면 그 틱에 길을 고쳤어야 한다).
+      if (!truckRouteOk(st, t)) fail('트럭 길이 길 밖을 지난다', st);
+      if (t.held > TRUCK.holdMax + 1) fail(`트럭이 너무 오래 섬 (${t.held})`, st);
+    }
+  }
+  for (const s of st.staff) {
+    const k = s.shop ?? null;
+    if (k !== null && (st.shops[k].owner !== s.id || s.post !== null)) fail(`가게 주인 ${s.id} (${k})가 어긋남`, st);
+  }
+  for (const m of st.monsters) {
+    if (SHOP_PHASES.has(m.phase)) {
+      const s = m.shop ?? null;
+      if (s === null) fail(`손님 ${m.id}가 가게 없이 ${m.phase}`, st);
+      const ss = st.shops[s];
+      if ((m.phase === 'toShop' || m.phase === 'shopQueue') && !ss.queue.includes(m.id)) fail(`손님 ${m.id} ${m.phase}인데 ${s} 줄에 없음`, st);
+      if (m.phase === 'buying' && ss.serving !== m.id) fail(`손님 ${m.id} buying인데 ${s} 계산대가 아님`, st);
+      if ((m.phase === 'toShopSeat' || m.phase === 'atShop') && (m.shopSlot === undefined || ss.slots[m.shopSlot] !== m.id)) fail(`손님 ${m.id} ${m.phase}인데 ${s} 자리가 없음`, st);
+      if (m.order === null || m.order === undefined || !(m.order.price > 0)) fail(`손님 ${m.id} ${s} 살 것이 없음`, st);
+    } else if (m.shop !== null && m.shop !== undefined) fail(`손님 ${m.id}가 ${m.phase}인데 가게 ${m.shop}`, st);
+    if (m.hidden === true && !(m.phase === 'atShop' && m.shop !== null && m.shop !== undefined && (SHOPS[m.shop] as { hidden?: boolean }).hidden === true)) fail(`손님 ${m.id}가 ${m.phase}에서 숨음`, st);
+    if (m.phase === 'toFriend' && (m.giftTo === null || m.giftTo === undefined)) fail(`손님 ${m.id}가 건넬 친구 없이 toFriend`, st);
+    if (m.held !== null && m.held !== undefined) finite(m.held.left, `손님 ${m.id} 든 것`, st);
+    const b = m.buffs;
+    if (b !== undefined)
+      for (const [k, x] of Object.entries(b)) {
+        if (k === 'fortune') {
+          if (x !== 'great' && x !== 'good' && x !== 'bad') fail(`손님 ${m.id} 점괘 ${String(x)}`, st);
+          if (!((b.luckSec ?? 0) > 0)) fail(`손님 ${m.id} 운이 끝났는데 점괘가 남음`, st);
+        } else finite(x as number, `손님 ${m.id} 효과 ${k}`, st);
+      }
+    if (m.bonusSec !== undefined && !(m.bonusSec >= 0)) fail(`손님 ${m.id} 늘어난 시간 ${m.bonusSec}`, st);
+    // 결과가 남긴 마음·드러눕기·배고픔.
+    if (m.urge !== null && m.urge !== undefined) finite(m.urge.until, `손님 ${m.id} 마음`, st);
+    if (m.lying !== undefined) {
+      finite(m.lying, `손님 ${m.id} 드러눕기`, st);
+      if (m.lying > 0 && (m.phase !== 'reacting' || m.lying > FOOD_LIKE.stuffedSec + 1e-6)) fail(`손님 ${m.id}가 ${m.phase}에서 ${m.lying.toFixed(1)}초 드러누움`, st);
+    }
+    if (m.ateAt !== undefined && !(m.ateAt >= 0 && m.ateAt <= st.time + 1e-6)) fail(`손님 ${m.id} 먹은 때 ${m.ateAt}`, st);
+  }
+  for (const [k, at] of Object.entries(st.photoAlbum)) if (!(at !== undefined && at >= 0 && at <= st.time + 1e-6)) fail(`사진첩 ${k} = ${at}`, st);
 }
 
 /** 배치형 마을 불변식: 놓인 것끼리 겹치지 않고 가진 땅 안, 부스·건물은 하나씩, 놓인 부스·건물은 가진 것, 보관함 부스의 진행자는 쉰다, 길은 빈 가진 땅. */
@@ -423,6 +519,12 @@ function emptySlots(sim: Sim): { booth: BoothId; role: number; optional: boolean
 
 /** 회관 코인을 모으는 중에도 여는 싼 부스: 다음 회관 코인의 이 비율 이하 (--cheap N, 기본 0 = 열지 않는다: 이정표 표는 회관 먼저인 촌장 기준). */
 const CHEAP_BOOTH = num('cheap', 0);
+/** 다섯째 묶음: 회관 레벨(1~5)마다 다음 회관보다 먼저 지어 둘 가게 수 (--shop-quota a,b,c,d,e). */
+const SHOP_QUOTA: readonly number[] = (() => {
+  const i = args.indexOf('--shop-quota');
+  const v = i >= 0 ? (args[i + 1] ?? '').split(',').map(Number) : [];
+  return v.length === 5 && v.every(Number.isFinite) ? v : [1, 3, 5, 7, 9];
+})();
 
 /** 욕심쟁이 촌장. milestones에 처음 산 때(초)를 남긴다 (key: hall2, unlock-cups, first …). */
 function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map()): Chief {
@@ -442,7 +544,7 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
 
     // 진행자 배치: 쉬는 진행자를 빈 자리로 (꼭 있어야 하는 자리 먼저).
     for (const s of st.staff) {
-      if (s.post !== null) continue;
+      if (!isIdle(s)) continue;
       const slot = emptySlots(sim).sort((a, c) => Number(a.optional) - Number(c.optional))[0];
       if (slot !== undefined && sim.assign(s.id, slot.booth, slot.role).ok) log(`${s.name} → ${slot.booth}.${slot.role} 배치`);
     }
@@ -511,11 +613,31 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
         if (c !== null && sim.canAfford({ ...c, coins: 0 })) saving = true;
       }
     }
+    // 다섯째 묶음: 회관 레벨마다 가게를 SHOP_QUOTA[회관 - 1]곳까지는 다음 회관보다 먼저 짓는다 (사람 촌장처럼 새 회관에 열린 가게를 하나둘: 싼 것부터, 모자라면 코인을 모은다).
+    // 막 열린 구역의 부스를 먼저 (그 코인을 모으는 중이면 넘어간다). --no-shops: 짓지 않는다. --shop-quota 2,3,5,7,9: 회관 레벨마다 곳 수.
+    if (!flag('no-shops') && !saving) {
+      const built = SHOP_IDS.filter((s) => st.shops[s].level >= 1).length;
+      if (built < (SHOP_QUOTA[lv - 1] ?? 0)) {
+        const next = SHOP_IDS.filter((s) => st.shops[s].level < 1 && sim.shopLockReason(s) === null).sort((a, c) => (sim.shopBuyCost(a)?.coins ?? 0) - (sim.shopBuyCost(c)?.coins ?? 0))[0];
+        if (next !== undefined) {
+          if (buy(`shop-${next}`, `가게 ${next}`, () => sim.buy(next))) return;
+          saving = true;
+        }
+      }
+    }
     // 다음 회관이 코인만 모자라면 코인을 모은다 (해금·업그레이드는 미룬다).
     if (hallNext !== null && sim.canAfford({ ...hallNext, coins: 0 })) {
       const key = `ready-hall${st.buildings.hall.level + 1}`;
       if (!milestones.has(key)) milestones.set(key, st.time);
       saving ||= st.coins < hallNext.coins;
+    }
+    // 다섯째 묶음: 모으는 중이어도 다음 회관 코인보다 남는 코인이 있으면 (재료·귀한 물건을 기다릴 때) 지을 수 있는 가게를 짓는다 (회관 5 뒤에는 부스 먼저).
+    if (!flag('no-shops') && saving && hallNext !== null) {
+      for (const s of SHOP_IDS) {
+        if (st.shops[s].level >= 1 || sim.shopLockReason(s) !== null) continue;
+        const c = sim.shopBuyCost(s);
+        if (c !== null && st.coins - c.coins >= (hallNext?.coins ?? 0) && buy(`shop-${s}`, `가게 ${s}`, () => sim.buy(s))) return;
+      }
     }
     // 회관 코인을 모으는 중에도 싼 부스(다음 회관 코인의 CHEAP_BOOTH 이하)는 연다 (사람 촌장처럼: 회관 재료가 일찍 모여 늘 모으는 중이어도 처음 부스들이 늦게까지 닫혀 있지 않게).
     const cheap = (b: BoothId): boolean => hallNext !== null && (sim.boothUnlockCost(b)?.coins ?? Infinity) <= hallNext.coins * CHEAP_BOOTH;
@@ -579,6 +701,8 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
             ['workyard', '일터', () => sim.upgradeBuilding('workyard')],
             ['bank', '은행', () => sim.upgradeBuilding('bank')],
           ] as [string, string, () => { ok: boolean }][])),
+      // 다섯째 묶음: 지을 수 있게 된 가게 (짓기 목록 차례: 먹거리부터). --no-shops: 짓지 않는다 (회관 시각·코인 흐름 비교).
+      ...(flag('no-shops') ? [] : SHOP_IDS.filter((s) => st.shops[s].level < 1 && sim.shopLockReason(s) === null).map((s) => [`shop-${s}`, `가게 ${s}`, () => sim.buy(s)] as [string, string, () => { ok: boolean }])),
       ...BOOTH_IDS.map((b) => [`up-${b}`, `부스 업그레이드 ${b}`, () => sim.upgradeBooth(b)] as [string, string, () => { ok: boolean }]),
       ['workshop', '공방 업그레이드', () => sim.upgradeBuilding('workshop')],
       ['office', '사무소 업그레이드', () => sim.upgradeBuilding('office')],
@@ -791,11 +915,19 @@ function tallyBooths(sim: Sim): BoothTally {
 
 /** --auto --seeds: 손님 시간 (떠다니는 종 포함, 채무자 빼고): 입구 오가기·걷기·놀기·줄·그 밖 (초). */
 const GUEST_TIME = new Map<string, number>();
+const COUNTED_TIME = new Map<string, number>();
+/** --why: 떠난 손님이 떠난 까닭. */
+const LEAVE_WHY = new Map<string, number>();
 function guestTime(st: GameState, dt: number): void {
   for (const m of st.monsters) {
     if (m.bankrupt === true) continue;
-    const k = m.phase === 'arriving' || m.phase === 'leaving' ? (m.path.length > 0 ? '입구 오가기' : '떠나기') : m.path.length > 0 ? '걷기' : m.phase === 'playing' || m.phase === 'reacting' ? '놀기' : m.phase === 'queued' ? '줄' : '그 밖';
+    const k = m.phase === 'arriving' || m.phase === 'leaving' ? (m.path.length > 0 ? '입구 오가기' : '떠나기') : m.path.length > 0 ? '걷기' : SHOP_PHASES.has(m.phase) ? '가게' : m.phase === 'playing' || m.phase === 'reacting' ? '놀기' : m.phase === 'queued' ? '줄' : '그 밖';
     GUEST_TIME.set(k, (GUEST_TIME.get(k) ?? 0) + dt);
+    // --why: 손님 수 한도에 세는 손님만 phase마다 (가게가 노는 손님 자리를 얼마나 잡아먹나).
+    if (flag('why') && m.phase !== 'leaving' && m.phase !== 'arriving' && !SHOP_PHASES.has(m.phase) && m.phase !== 'toFriend' && m.shopTrip !== true) {
+      const p = `${m.phase}${m.path.length > 0 ? '(걷기)' : ''}`;
+      COUNTED_TIME.set(p, (COUNTED_TIME.get(p) ?? 0) + dt);
+    }
   }
 }
 
@@ -814,6 +946,7 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
   const needAll = new Map<string, number[]>();
   const debtRows: DebtRow[] = [];
   const landAll: number[] = [];
+  const flowRows: FlowTally[] = [];
   let strayCount = 0;
   const strayLog: string[] = [];
   for (let seed = first; seed < first + count; seed++) {
@@ -826,6 +959,7 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
     listen(sim, zeroTally(), all, new Set());
     const tb = tallyBooths(sim);
     const dt = tallyDebt(sim);
+    const fl = tallyFlows(sim);
     const openedAt = new Map<BoothId, number>();
     const need = new Map<string, number>();
     const n = Math.round((minutes * 60) / SIM.dt);
@@ -842,6 +976,7 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
       if (i % Math.round(1 / SIM.dt) === 0) {
         chief(sim, () => {});
         for (const b of BOOTH_IDS) if (!openedAt.has(b) && sim.boothOpen(b)) openedAt.set(b, sim.state.time);
+        if (fl.fiveAt < 0 && SHOP_IDS.filter((s) => sim.shopOpen(s)).length >= FIVE_SHOPS) fl.fiveAt = sim.state.time;
         // --detail: 다음 회관 비용 항목마다 처음 모인 때 (그 회관 레벨에서).
         const next = sim.buildingUpgradeCost('hall');
         if (detail && next !== null) {
@@ -890,6 +1025,31 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
     const storedLeft = sim.storage().filter((x) => catalogKind(x.key) !== 'decor').map((x) => x.key);
     console.log(`${pad(seed, 4)} ${cells.join('')} ${pad(st.coins, 6)}  ${pad(`${p.gem}/${p.golden_acorn}/${p.star_piece}`, 10)}  ${pad((all.moodSum / Math.max(1, all.left)).toFixed(0), 4)}  ${pad(all.broke, 4)}  ${race}  땅 ${st.village.chunks.length}${storedLeft.length > 0 ? ` 보관함 ${storedLeft.join(',')}` : ''}`);
     landAll.push(st.village.chunks.length);
+    flowRows.push(fl);
+    console.log(`     ${flowLine(st, fl)}`);
+    // --json: 시드마다 한 줄 (여러 프로세스로 나눠 돌린 결과를 합칠 때).
+    if (flag('json')) {
+      const d = st.debtTotals;
+      console.log(
+        `@@${JSON.stringify({
+          seed,
+          ms: Object.fromEntries([...keys.map((k) => [k, ms.has(k) ? (ms.get(k) as number) / 60 : null] as const), ...[...ms.entries()].filter(([k]) => !keys.includes(k)).map(([k, v]) => [k, v / 60] as const)]),
+          flow: { fees: fl.fees, shop: fl.shop, tips: fl.tips, leaveTips: fl.leaveTips, left: fl.left, leftShopped: fl.leftShopped, staySec: fl.staySec, rounds: fl.rounds, leftover: fl.leftover, served: fl.served, fiveAt: fl.fiveAt, w5: fl.w5 },
+          byShop: Object.fromEntries(fl.byShop),
+          revBy: Object.fromEntries(fl.revBy),
+          shops: SHOP_IDS.filter((s) => st.shops[s].level >= 1),
+          debt: { pawned: d.pawned, redeemed: d.redeemed, forfeited: d.forfeited, loans: d.loans, bankrupt: d.bankrupt, matches: d.matches },
+          acc: st.shopTotals.accessories,
+          visitors: st.totals.visitors,
+          mood: all.moodSum / Math.max(1, all.left),
+          broke: all.broke,
+          gifts: st.shopTotals.gifts,
+          tipsN: st.shopTotals.tips,
+          photos: Object.keys(st.photoAlbum).length,
+          land: st.village.chunks.length,
+        })}`,
+      );
+    }
     if (flag('debt')) {
       console.log(`     ${debtLine(st)}`);
       const row = debtRow(sim, dt);
@@ -913,11 +1073,119 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
     const tot = [...GUEST_TIME.values()].reduce((a, b) => a + b, 0);
     console.log(`손님 시간 (채무자 빼고): ${[...GUEST_TIME.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${((v / Math.max(1, tot)) * 100).toFixed(1)}%`).join(', ')}`);
   }
+  if (flag('why')) {
+    const tot = [...COUNTED_TIME.values()].reduce((a, b) => a + b, 0);
+    console.log(`세는 손님 시간 합 ${(tot / 60).toFixed(0)}분 (시드마다 ${(tot / 60 / count).toFixed(0)}분)`);
+    console.log(`세는 손님 시간: ${[...COUNTED_TIME.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${((v / Math.max(1, tot)) * 100).toFixed(1)}%`).join(', ')}`);
+    const lt = [...LEAVE_WHY.values()].reduce((a, b) => a + b, 0);
+    console.log(`떠난 까닭: ${[...LEAVE_WHY.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${((v / Math.max(1, lt)) * 100).toFixed(1)}%`).join(', ')}`);
+  }
   console.log(`길 밖 손님 (10틱마다 잼): ${strayCount}${strayLog.length > 0 ? ` — ${strayLog.join(' / ')}` : ''}`);
   if (strayCount > 0) process.exitCode = 1;
   console.log(`단체 놀이 한 판 평균 참가자 / 접힌 판 비율 (시드 중간, 판이 5번 넘은 시드 수): ${GROUP_BOOTHS.map((b) => { const r = groupAvg.get(b); return r === undefined ? `${b} -` : `${b} ${fmt(quantile(r.avg, 0.5))}/${(quantile(r.fold, 0.5) * 100).toFixed(0)}% (${r.avg.length})`; }).join('  ')}`);
   console.log(`땅 조각 (처음 9, 시드 p25/중간/p75): ${fmt(quantile(landAll, 0.25))}/${fmt(quantile(landAll, 0.5))}/${fmt(quantile(landAll, 0.75))}`);
   if (debtRows.length > 0) debtSummary(debtRows);
+  flowSummary(flowRows);
+}
+
+/** 다섯째 묶음: 코인 흐름 (마을 수입 = 부스 참가비 + 가게 매상 + 진행자 팁 + 떠날 때 팁)과 가게 들름. */
+interface FlowTally {
+  fees: number;
+  shop: number;
+  tips: number;
+  leaveTips: number;
+  visits: number;
+  served: number;
+  byShop: Map<ShopId, number>;
+  left: number;
+  leftShopped: number;
+  /** 첫 가게를 지은 때 (초, 없으면 -1). */
+  firstShop: number;
+  /** 떠난 손님의 머문 초·한판 수 합. */
+  staySec: number;
+  rounds: number;
+  /** 떠날 때 지갑에 남아 그대로 나간 코인 합 (팁 뒤). */
+  leftover: number;
+  /** 가게가 5곳 넘게 열린 뒤 (fiveAt초부터, 없으면 -1)의 수입: 참가비·가게·진행자 팁·떠날 때 팁, 떠난 손님·한판. */
+  fiveAt: number;
+  w5: { fees: number; shop: number; tips: number; leaveTips: number; left: number; rounds: number; spend: number };
+  /** 가게마다 매상. */
+  revBy: Map<ShopId, number>;
+}
+
+/** 가게 5곳 (열림) 뒤의 창: 이때부터 마을 수입 가운데 가게 몫을 잰다 (DESIGN 3.8 밸런스: 25~40%). */
+const FIVE_SHOPS = 5;
+
+function tallyFlows(sim: Sim): FlowTally {
+  const t: FlowTally = { fees: 0, shop: 0, tips: 0, leaveTips: 0, visits: 0, served: 0, byShop: new Map(), left: 0, leftShopped: 0, firstShop: -1, staySec: 0, rounds: 0, leftover: 0, fiveAt: -1, w5: { fees: 0, shop: 0, tips: 0, leaveTips: 0, left: 0, rounds: 0, spend: 0 }, revBy: new Map() };
+  const win = (): boolean => t.fiveAt >= 0;
+  sim.bus.on('roundStarted', (e) => {
+    t.fees += e.round.fee;
+    if (win()) t.w5.fees += e.round.fee;
+  });
+  sim.bus.on('shopServed', (e) => {
+    t.shop += e.price;
+    t.served++;
+    t.byShop.set(e.shop, (t.byShop.get(e.shop) ?? 0) + 1);
+    t.revBy.set(e.shop, (t.revBy.get(e.shop) ?? 0) + e.price);
+    if (win()) t.w5.shop += e.price;
+  });
+  sim.bus.on('shopVisit', () => t.visits++);
+  sim.bus.on('tip', (e) => {
+    t.tips += e.amount;
+    if (win()) t.w5.tips += e.amount;
+  });
+  sim.bus.on('monsterLeft', (e) => {
+    t.leaveTips += e.tip;
+    t.left++;
+    const m = sim.monster(e.id);
+    if ((m?.shopsVisited?.length ?? 0) > 0) t.leftShopped++;
+    t.staySec += sim.state.time - (m?.born ?? sim.state.time);
+    t.rounds += m?.stats.rounds ?? 0;
+    t.leftover += Math.max(0, m?.wallet ?? 0);
+    if (flag('why') && m !== undefined) {
+      const why = m.patience <= 0 ? '끈기' : m.broke === true ? '빈털터리' : m.mood < MOOD.leaveBelow ? '기분' : sim.state.time - (m.firstPlay ?? m.born ?? 0) - (m.bonusSec ?? 0) > TUNE.maxVisitSec ? '머문 시간' : sim.state.time - (m.born ?? 0) - (m.bonusSec ?? 0) > TUNE.maxStaySec ? '온 뒤 시간' : m.wasBankrupt === true ? '다 갚음' : '그 밖';
+      LEAVE_WHY.set(why, (LEAVE_WHY.get(why) ?? 0) + 1);
+    }
+    if (win()) {
+      t.w5.leaveTips += e.tip;
+      t.w5.left++;
+      t.w5.rounds += m?.stats.rounds ?? 0;
+    }
+  });
+  sim.bus.on('buildingUpgraded', (e) => {
+    if (t.firstShop < 0 && (SHOP_IDS as readonly string[]).includes(e.id)) t.firstShop = sim.state.time;
+  });
+  return t;
+}
+
+function flowLine(st: GameState, t: FlowTally): string {
+  const income = t.fees + t.shop + t.tips + t.leaveTips;
+  const pct = (x: number) => `${((x / Math.max(1, income)) * 100).toFixed(0)}%`;
+  const shops = SHOP_IDS.filter((s) => st.shops[s].level >= 1).length;
+  const top = [...t.byShop.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([s, n]) => `${s} ${n}`).join(' ');
+  const w = t.w5;
+  const wi = w.fees + w.shop + w.tips + w.leaveTips;
+  const five = t.fiveAt < 0 ? '' : ` · 가게 ${FIVE_SHOPS}곳 뒤 (${(t.fiveAt / 60).toFixed(1)}분~) 가게 몫 ${((w.shop / Math.max(1, wi)) * 100).toFixed(0)}% 참가비 ${((w.fees / Math.max(1, wi)) * 100).toFixed(0)}% 한판 ${(w.rounds / Math.max(1, w.left)).toFixed(1)}`;
+  return `머문 ${(t.staySec / Math.max(1, t.left) / 60).toFixed(2)}분 · 한판 ${(t.rounds / Math.max(1, t.left)).toFixed(1)} · 손님마다 수입 ${(income / Math.max(1, t.left)).toFixed(1)} · 남겨 간 코인 ${(t.leftover / Math.max(1, t.left)).toFixed(1)} · 가게 ${shops}곳 (첫 가게 ${t.firstShop < 0 ? '-' : (t.firstShop / 60).toFixed(1) + '분'}) · 들른 손님 ${t.leftShopped}/${t.left} · 산 것 ${t.served} · 수입 참가비 ${t.fees} (${pct(t.fees)}) 가게 ${t.shop} (${pct(t.shop)}) 진행자 팁 ${t.tips} (${pct(t.tips)}) 떠날 때 팁 ${t.leaveTips} (${pct(t.leaveTips)}) · ${top}${five}`;
+}
+
+function flowSummary(rows: readonly FlowTally[]): void {
+  if (rows.length === 0) return;
+  const fmt = (v: number) => (Number.isFinite(v) ? v.toFixed(1) : '-');
+  const q = (xs: number[]) => `${fmt(quantile(xs, 0.25))}/${fmt(quantile(xs, 0.5))}/${fmt(quantile(xs, 0.75))}`;
+  const share = (r: FlowTally, x: number) => (x / Math.max(1, r.fees + r.shop + r.tips + r.leaveTips)) * 100;
+  console.log('\n다섯째 묶음 코인 흐름 (시드 p25/중간/p75):');
+  console.log(`  마을 수입 가운데 %: 참가비 ${q(rows.map((r) => share(r, r.fees)))}  가게 ${q(rows.map((r) => share(r, r.shop)))}  진행자 팁 ${q(rows.map((r) => share(r, r.tips)))}  떠날 때 팁 ${q(rows.map((r) => share(r, r.leaveTips)))}`);
+  console.log(`  가게에 들른 손님 % (떠난 손님 가운데): ${q(rows.map((r) => (r.leftShopped / Math.max(1, r.left)) * 100))}, 가게 매상 / 참가비: ${q(rows.map((r) => r.shop / Math.max(1, r.fees)))}, 남겨 간 코인 (손님마다): ${q(rows.map((r) => r.leftover / Math.max(1, r.left)))}`);
+  const five = rows.filter((r) => r.fiveAt >= 0 && r.w5.left >= 20);
+  if (five.length > 0) {
+    const ws = (r: FlowTally, x: number) => (x / Math.max(1, r.w5.fees + r.w5.shop + r.w5.tips + r.w5.leaveTips)) * 100;
+    console.log(`  가게 ${FIVE_SHOPS}곳 뒤 (${five.length}시드, 처음 ${q(five.map((r) => r.fiveAt / 60))}분): 가게 ${q(five.map((r) => ws(r, r.w5.shop)))}%  참가비 ${q(five.map((r) => ws(r, r.w5.fees)))}%  진행자 팁 ${q(five.map((r) => ws(r, r.w5.tips)))}%  떠날 때 팁 ${q(five.map((r) => ws(r, r.w5.leaveTips)))}%  손님마다 한판 ${q(five.map((r) => r.w5.rounds / Math.max(1, r.w5.left)))}`);
+  }
+  const by = new Map<ShopId, number>();
+  for (const r of rows) for (const [s, n] of r.byShop) by.set(s, (by.get(s) ?? 0) + n);
+  console.log(`  가게마다 산 손님 (모든 시드): ${SHOP_IDS.map((s) => `${s} ${by.get(s) ?? 0}`).join(', ')}`);
 }
 
 /** 시드 하나의 넷째 묶음 수치 (일터를 지은 뒤 30분마다로 맞춘다). */
@@ -1607,6 +1875,9 @@ function selftest(): void {
 
   // 6g) 넷째 묶음: 장신구·전당포·금고·은행·파산·일터·빚 걸기 판·저장.
   debtFlows();
+
+  // 6h) 다섯째 묶음: 가게·트럭·놀이기구·여관·사진첩·꽃 선물·장신구 가게 → 전당포·팁·저장.
+  shopTests();
 
   // 7) 오래 돌려도 멈추지 않는다 (여러 시드, 120분).
   for (const seed of [1, 2, 3]) {
@@ -2328,7 +2599,7 @@ function groupLifecycles(): void {
       bsv.race = race;
     }
     const back = normalizeState(old);
-    assert(back !== null && back.version === 5, '옛 저장(2)을 읽는다 (2 → 3 → 4 → 5)');
+    assert(back !== null && back.version === 6, '옛 저장(2)을 읽는다 (2 → 3 → 4 → 5 → 6)');
     const twin = new Sim(back);
     runFor(a, 40);
     runFor(twin, 40);
@@ -2833,7 +3104,7 @@ function debtFlows(): void {
     runFor(s, 30);
     st.pawnCollection.acc_ribbon = 2;
     const back = normalizeState(JSON.parse(JSON.stringify(st)));
-    assert(back !== null && back.version === 5, '저장 5를 읽는다');
+    assert(back !== null && back.version === 6, '저장 6을 읽는다');
     const twin = new Sim(back);
     runFor(s, 30);
     runFor(twin, 30);
@@ -2862,7 +3133,7 @@ function debtFlows(): void {
       delete m.debt;
     }
     const up = normalizeState(old);
-    assert(up !== null && up.version === 5 && up.buildings.pawnshop.level === 0 && up.materials.mat_veggie === 0 && up.debtTotals.forgiven === 0 && up.monsters.every((m) => Array.isArray(m.accessories) && m.debt === 0), '옛 저장(3) → 5');
+    assert(up !== null && up.version === 6 && up.buildings.pawnshop.level === 0 && up.materials.mat_veggie === 0 && up.debtTotals.forgiven === 0 && up.monsters.every((m) => Array.isArray(m.accessories) && m.debt === 0), '옛 저장(3) → 5');
     const us = new Sim(up);
     runFor(us, 60);
     // 기초 작업 때의 저장 4 (forgiven·since·foremanTimer가 없다)도 읽는다.
@@ -3120,7 +3391,7 @@ function villageTests(): void {
     const raw = JSON.parse(process.getBuiltinModule('node:fs').readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), 'utf8')) as Record<string, unknown>;
     const before = JSON.parse(JSON.stringify(raw)) as GameState & { districts?: unknown };
     const st = normalizeState(raw);
-    assert(st !== null && st.version === 5 && (st as unknown as Record<string, unknown>).districts === undefined, `${name}: 저장 5로`);
+    assert(st !== null && st.version === 6 && (st as unknown as Record<string, unknown>).districts === undefined, `${name}: 저장 6으로`);
     const s = new Sim(st);
     const v = s.village();
     for (const b of BOOTH_IDS) {
@@ -3535,6 +3806,625 @@ function storeAndMoveRefunds(): void {
   }
 }
 
+// ── 다섯째 묶음 (DESIGN 3.8) 가게 시험 ─────────────────────────────────────
+
+/** 가게 시험 마을: 땅을 다 가진 처음 마을에 슬롯 부스만 (진행자 있음) + 가게 only (주인 포함, 광장 가까이). 처음 손님은 지우고 새 손님은 오지 않게. */
+function shopVillage(seed: number, only: readonly ShopId[]): Sim {
+  const s = testSim(newGame(seed));
+  s.state.coins = 5000;
+  devShops(s, only);
+  s.state.monsters.length = 0;
+  s.state.spawnTimer = 1e9;
+  return s;
+}
+
+function shopTests(): void {
+  // a) 데이터: 가게마다 그림·메뉴·주인 그림, 레벨 표 길이, 자리 수, 안쪽 점이 발자국 안, 입구.
+  {
+    const meta = JSON.parse(process.getBuiltinModule('node:fs').readFileSync(new URL('../public/assets/art/meta.json', import.meta.url), 'utf8')) as Record<string, Record<string, unknown>>;
+    const has = (g: string, k: string): boolean => meta[g]?.[k] !== undefined;
+    for (const s of SHOP_IDS) {
+      const d = SHOPS[s];
+      const L = SHOP_LAYOUT[s];
+      const lv = d.upgrade.length + 1;
+      assert(d.price.length === lv && d.serviceSec.length === lv && d.slots.length === lv, `${s} 레벨 표 길이`);
+      assert(!hasSlots(s) || Math.max(...d.slots) <= L.slots.length, `${s} 자리 ${Math.max(...d.slots)} > 모양 ${L.slots.length}`);
+      assert(hasSlots(s) === ((d as { stay?: unknown }).stay !== undefined), `${s} 머무는 초`);
+      assert(L.fp.entry !== undefined && L.fp.door !== undefined && L.queue.length >= 2, `${s} 입구·줄`);
+      const inside = (p: { x: number; y: number }): boolean => p.x >= 0 && p.y >= 0 && p.x <= L.fp.w * CELL && p.y <= L.fp.h * CELL;
+      for (const p of [L.counter, L.owner, ...L.queue, ...L.slots]) assert(inside(p), `${s} 안쪽 점 (${p.x},${p.y})가 발자국 밖`);
+      for (const p of L.parts) assert(has(p.group, p.key), `${s} 그림 ${p.group}/${p.key}`);
+      for (const x of d.menu) assert(has('items', x.item), `${s} 메뉴 그림 items/${x.item}`);
+      assert(has('characters', d.owner.art), `${s} 주인 그림 ${d.owner.art}`);
+      assert(d.unlock.hall >= 1 && d.unlock.hall <= 5 && d.unlock.coins > 0, `${s} 짓기`);
+    }
+    for (const k of ['racers/carousel_horse', 'racers/icecream_truck', 'objects/ferris_wheel', 'objects/ferris_gondola', 'fx/emote_sleep', 'fx/emote_yum']) {
+      const [g, key] = k.split('/') as [string, string];
+      assert(has(g, key), `그림 ${k}`);
+    }
+    for (const sp of SPECIES_IDS) assert(has('objects', `plush_${sp}`), `기념품 인형 objects/plush_${sp}`);
+    for (const kind of SHOP_REACT_KINDS) assert(shopReactionLabels(kind).length >= 2, `가게 반응 ${kind} 후보`);
+    assert(!shopReactionLabels('fortuneTrue', 'good').includes('역시 대길!') && shopReactionLabels('fortuneTrue', 'great').includes('역시 대길!'), "'역시 대길!'은 대길 점괘만");
+    // 팁: 크게 딴 손님만, 받은 코인의 몫, 1~TIP.max.
+    const rng = new Rng(5);
+    assert(tipFor(10, 5, 'win', false, rng) === 0 && tipFor(25, 10, 'win', false, rng) === 0, '작게 딴 손님은 팁을 주지 않는다');
+    let n = 0;
+    for (let i = 0; i < 2000; i++) {
+      const t = tipFor(400, 40, 'jackpot', false, rng);
+      if (t > 0) n++;
+      assert(t === 0 || t === Math.min(TIP.max, Math.round(400 * TIP.share)), `팁 ${t}`);
+    }
+    assert(Math.abs(n / 2000 - TIP.jackpotChance) < 0.04, `대박 팁 확률 ${(n / 2000).toFixed(2)}`);
+    console.log(`  가게 데이터 OK: ${SHOP_IDS.length}곳 (그림·메뉴·주인·자리), 반응 ${SHOP_REACT_KINDS.length}가지, 팁`);
+  }
+
+  // b) 장신구 가게 → 전당포: 산 장신구를 몸에 달고, 돈이 떨어지면 그 장신구를 맡긴다.
+  {
+    const s = shopVillage(11, ['accessory_shop']);
+    s.state.buildings.pawnshop.level = 1;
+    if (s.village().placed('pawnshop') === undefined) assert(s.autoPlace('pawnshop').ok, '전당포 놓기');
+    const m = testGuest(s, { wallet: 300, mood: 80, acc: [] });
+    m.streak = 2;
+    assert(s.devVisitShop(m.id, 'accessory_shop'), '장신구 가게로 보낸다');
+    const order = m.order;
+    assert(order !== null && order !== undefined && order.accessory !== undefined && order.price <= 300, '장신구를 고른다');
+    const before = { wallet: m.wallet, coins: s.state.coins };
+    assert(runUntil(s, 90, () => m.accessories.length === 1), '장신구를 사서 단다');
+    const a = m.accessories[0] as { key: AccessoryId; value: number };
+    assert(a.key === order.accessory.key && a.value === accessoryMid(a.key), '산 장신구 = 고른 장신구, 값 = 값 가운데');
+    assert(m.wallet === before.wallet - order.price && s.state.shops.accessory_shop.revenue === order.price && s.state.shopTotals.accessories === 1, '낸 코인 = 값 = 가게 매상');
+    // 돈이 떨어진다: 그 장신구를 전당포에 맡긴다.
+    m.wallet = 2;
+    m.patience = 5;
+    const pawned: string[] = [];
+    s.bus.on('pawned', (e) => {
+      if (e.id === m.id) pawned.push(e.key);
+    });
+    withWant(1, () => assert(runUntil(s, 120, () => pawned.length > 0), '산 장신구를 맡긴다'));
+    assert(pawned[0] === a.key, `맡긴 장신구 = 산 장신구 (${pawned[0]})`);
+    console.log(`  장신구 가게 → 전당포 OK: ${ACCESSORIES[a.key].name} ${order.price}코인에 사서 → 맡김`);
+  }
+
+  // c) 여관: 숨고 (hidden), 정한 시간 안에 졸린 얼굴로 나오고, 끈기·지갑이 조금 돌아오고, 머문 시간이 늘고, 한 방문에 한 번.
+  {
+    const s = shopVillage(12, ['inn']);
+    const m = testGuest(s, { wallet: 100, patience: 1 });
+    const labels = reactLog(s, m.id);
+    assert(s.devVisitShop(m.id, 'inn'), '여관으로');
+    const price = m.order?.price ?? 0;
+    assert(runUntil(s, 90, () => m.phase === 'atShop'), '여관 방에 든다');
+    assert(m.hidden === true, '여관에 든 손님은 안 보인다');
+    const inAt = s.state.time;
+    const w = m.wallet;
+    assert(runUntil(s, 80, () => m.phase !== 'atShop'), '여관에서 나온다');
+    const stay = s.state.time - inAt;
+    const [s0, s1] = SHOPS.inn.stay as readonly [number, number];
+    assert(stay >= s0 - 0.2 && stay <= s1 + 0.3, `여관 머문 시간 ${stay.toFixed(1)}초 (${s0}~${s1})`);
+    assert(m.hidden !== true && m.patience >= 1 + 3 && m.wallet > w && (m.bonusSec ?? 0) === SHOPS.inn.effect.visitSec, '끈기·지갑 회복, 머문 시간 연장');
+    assert(labels.some((l) => shopReactionLabels('innWake').includes(l)), '졸린 얼굴로 나온다');
+    assert(shopWant(s.state, m, 'inn', 1000) === 0, '여관은 한 방문에 한 번');
+    assert(s.state.shopTotals.innStays === 1 && price > 0, '여관 기록');
+    console.log(`  여관 OK: ${stay.toFixed(1)}초 숨었다가 나옴, 지갑 +${m.wallet - w}, 머문 시간 +${m.bonusSec}초`);
+  }
+
+  // d) 사진관 사진첩: 종마다 처음 찍은 사진 하나 (같은 종은 다시 'first'가 아니다).
+  {
+    const s = shopVillage(13, ['photo_studio']);
+    const firsts: string[] = [];
+    let photos = 0;
+    s.bus.on('photoTaken', (e) => {
+      photos++;
+      if (e.first) firsts.push(e.species);
+    });
+    const a = testGuest(s, { wallet: 100, species: 'dragon' });
+    const b = testGuest(s, { wallet: 100, species: 'dragon' });
+    const c = testGuest(s, { wallet: 100, species: 'crab' });
+    for (const m of [a, b, c]) assert(s.devVisitShop(m.id, 'photo_studio'), '사진관으로');
+    assert(runUntil(s, 150, () => photos >= 3), '셋 다 찍는다');
+    assert(firsts.length === 2 && new Set(firsts).size === 2 && Object.keys(s.state.photoAlbum).length === 2, `사진첩은 종마다 하나 (${firsts.join(',')})`);
+    const t0 = s.state.photoAlbum.dragon;
+    const d = testGuest(s, { wallet: 100, species: 'dragon' });
+    assert(s.devVisitShop(d.id, 'photo_studio') && runUntil(s, 90, () => photos >= 4), '또 찍는다');
+    assert(s.state.photoAlbum.dragon === t0 && firsts.length === 2, '처음 찍은 때는 그대로');
+    console.log(`  사진첩 OK: 사진 ${photos}장, 사진첩 ${Object.keys(s.state.photoAlbum).join('·')}`);
+  }
+
+  // e) 꽃 선물: 친한 손님에게 걸어가 건넨다 (둘 다 기분 +, 꽃다발이 받은 손님 손으로).
+  {
+    const s = shopVillage(14, ['flower_shop']);
+    const a = testGuest(s, { wallet: 100, mood: 70 });
+    const b = testGuest(s, { wallet: 100, mood: 40 });
+    a.friends = [b.id];
+    b.phase = 'resting';
+    b.timer = 1e6;
+    let gift: { from: number; to: number } | null = null;
+    s.bus.on('giftGiven', (e) => (gift = { from: e.from, to: e.to }));
+    assert(s.devVisitShop(a.id, 'flower_shop'), '꽃집으로');
+    const m0 = b.mood;
+    assert(runUntil(s, 120, () => gift !== null), '꽃을 건넨다');
+    const g = gift as unknown as { from: number; to: number };
+    assert(g.from === a.id && g.to === b.id && b.mood >= m0 + FLOWER.mood - 1e-9 && b.held?.item === 'items/bouquet' && (a.held ?? null) === null, '둘 다 기분 +, 꽃다발은 받은 손님 손으로');
+    console.log(`  꽃 선물 OK: 손님 ${a.id} → ${b.id}`);
+  }
+
+  // f) 놀이기구: 같이 타고 한 바퀴 (rideStarted → rideFinished, 같은 손님), 효과·반응.
+  for (const ride of ['carousel', 'ferris_wheel'] as const) {
+    const s = shopVillage(15, [ride]);
+    const ms = [testGuest(s, { wallet: 80, mood: 50 }), testGuest(s, { wallet: 80, mood: 50 })];
+    let started: number[] = [];
+    let finished: number[] = [];
+    s.bus.on('rideStarted', (e) => (started = e.riders));
+    s.bus.on('rideFinished', (e) => (finished = e.riders));
+    for (const m of ms) assert(s.devVisitShop(m.id, ride), `${ride}로`);
+    assert(runUntil(s, 120, () => finished.length > 0), `${ride} 한 바퀴`);
+    assert(started.length === 2 && finished.join() === started.join() && ms.every((m) => m.mood > 50 && (m.shopsVisited ?? []).includes(ride)), `${ride} 둘이 같이 타고 내린다`);
+    console.log(`  ${ride} OK: 둘이 같이 한 바퀴 (${SHOPS[ride].stay[0]}초)`);
+  }
+
+  // g) 아이스크림 트럭: 길 위를 다니고 선다, 손님이 따라가 산다, 트럭 아래 길을 지우면 차고로 (그래도 길 밖에 있지 않다).
+  {
+    const s = shopVillage(16, ['icecream_truck']);
+    let stops = 0;
+    let bought = 0;
+    s.bus.on('truckStopped', () => stops++);
+    s.bus.on('shopServed', (e) => {
+      if (e.shop === 'icecream_truck') bought++;
+    });
+    assert(runUntil(s, 120, () => stops >= 2), '트럭이 길 위를 다니다 선다');
+    const t = s.state.shops.icecream_truck.truck as NonNullable<GameState['shops']['icecream_truck']['truck']>;
+    const m = testGuest(s, { wallet: 60 });
+    assert(s.devVisitShop(m.id, 'icecream_truck'), '트럭으로');
+    assert(runUntil(s, TRUCK.followSec + 30, () => bought > 0), '트럭을 따라가 산다');
+    // 트럭이 선 칸의 길을 지운다 (마을 입구 앞 칸이 아니면): 트럭은 차고로 돌아가 다시 나온다.
+    if (!t.parked) {
+      const c = truckCell(t);
+      s.eraseRoad([{ x: c % GRID.w, y: Math.floor(c / GRID.w) }]);
+      runFor(s, 2);
+      s.paintRoad([{ x: c % GRID.w, y: Math.floor(c / GRID.w) }]);
+    }
+    runFor(s, 60);
+    console.log(`  아이스크림 트럭 OK: 섬 ${stops}번, 산 손님 ${bought}, 지금 ${t.parked ? '차고' : '길 위'}`);
+  }
+
+  // g2) 트럭이 달리는 곧은 길 가운데 칸을 지운다 (옆으로 돌아가는 길을 깔아 둘레가 이어져 있다):
+  //     트럭은 지운 칸을 지나지 않고 (불변식: 남은 길의 모든 칸이 길) 돌아가거나 다시 고른다, 차고로 뛰지 않는다.
+  {
+    let tried = 0;
+    let parkedJump = 0;
+    for (const seed of [16, 17, 18, 19, 20, 21, 22, 23]) {
+      const s = shopVillage(seed, ['icecream_truck']);
+      const t = s.state.shops.icecream_truck.truck as NonNullable<GameState['shops']['icecream_truck']['truck']>;
+      const ahead = (): number => {
+        const p = t.path[0];
+        return p === undefined ? 0 : Math.abs(p.x - t.x) + Math.abs(p.y - t.y);
+      };
+      if (!runUntil(s, 240, () => !t.parked && t.stop <= 0 && ahead() >= CELL * 4.2)) continue;
+      const p0 = t.path[0] as { x: number; y: number };
+      const dx = Math.sign(Math.round(p0.x - t.x));
+      const dy = Math.sign(Math.round(p0.y - t.y));
+      const c = cellAt(t);
+      const mid = { x: c.x + 2 * dx, y: c.y + 2 * dy };
+      // 옆 줄 (가로로 가면 위·아래, 세로로 가면 왼쪽·오른쪽)에 세 칸 돌아가는 길.
+      let ok = false;
+      for (const side of [1, -1]) {
+        const px = dy !== 0 ? side : 0;
+        const py = dx !== 0 ? side : 0;
+        const detour = [1, 2, 3].map((k) => ({ x: c.x + k * dx + px, y: c.y + k * dy + py }));
+        const v0 = s.village();
+        if (!detour.every((d) => v0.isWalkable(cellIndex(d.x, d.y)) || roadPaintable(s.state, d.x, d.y))) continue;
+        s.paintRoad(detour);
+        const v1 = s.village();
+        if (detour.every((d) => v1.isWalkable(cellIndex(d.x, d.y)))) {
+          ok = true;
+          break;
+        }
+      }
+      if (!ok) continue;
+      s.eraseRoad([mid]);
+      if (s.village().isWalkable(cellIndex(mid.x, mid.y))) continue;
+      tried++;
+      // 지운 칸 위로 달리면 불변식 ('트럭 길이 길 밖을 지난다'·'트럭이 길 밖')이 바로 잡는다.
+      runUntil(s, 20, () => {
+        if (t.parked) parkedJump++;
+        return t.parked;
+      });
+    }
+    assert(tried >= 3, `곧은 길 가운데 칸을 지운 시험 ${tried}번`);
+    assert(parkedJump === 0, `둘레 길이 있는데 트럭이 차고로 뜀 ${parkedJump}번`);
+    console.log(`  트럭 길 가운데 칸 지우기 OK: ${tried}번 (돌아가거나 다시 골라 길 위로만)`);
+  }
+
+  // h) 가게가 다 있는 마을 (devOpenAll + devShops) 30분: 장부 (산 것 = 매상 = 마을 수입), 낼 수 있을 때만 산다, 여관은 정한 시간 안,
+  //    사진첩은 종마다 처음 한 번, 가게마다 손님, 팁·꽃 선물, 저장·불러오기 왕복.
+  for (const seed of [7, 8]) {
+    const e = new Sim(newGame(seed));
+    devOpenAll(e);
+    const placed = devShops(e);
+    assert(placed === SHOP_IDS.length, `가게 ${placed}곳 놓임`);
+    let served = 0;
+    let badWallet = 0;
+    let badReserve = 0;
+    let innLong = 0;
+    const innIn = new Map<number, number>();
+    const firstSeen = new Set<string>();
+    let photoDup = 0;
+    const inc = { fees: 0, leave: 0 };
+    e.bus.on('roundStarted', (x) => (inc.fees += x.round.fee));
+    e.bus.on('monsterLeft', (x) => (inc.leave += x.tip));
+    e.bus.on('shopVisit', (x) => {
+      const m = e.monster(x.id);
+      if (m === undefined || x.order.price > m.wallet) badWallet++;
+      // 낸 뒤에도 남길 코인 (떠나는 길의 기념품은 0): 가게 때문에 돈이 떨어지지 않는다.
+      else if (x.order.price > m.wallet - shopReserve(e.state, m, m.shopHome === true) + 1e-9) badReserve++;
+    });
+    e.bus.on('shopServed', (x) => {
+      served += x.price;
+      const m = e.monster(x.id);
+      if (m === undefined || m.wallet < 0) badWallet++;
+    });
+    e.bus.on('photoTaken', (x) => {
+      if (x.first && firstSeen.has(x.species)) photoDup++;
+      if (x.first) firstSeen.add(x.species);
+    });
+    const coinsTips = { tips: 0 };
+    e.bus.on('tip', (x) => (coinsTips.tips += x.amount));
+    const n = Math.round((30 * 60) / SIM.dt);
+    for (let i = 0; i < n; i++) {
+      e.tick(SIM.dt);
+      checkInvariants(e);
+      for (const m of e.state.monsters) {
+        if (m.shop === 'inn' && m.phase === 'atShop') {
+          const at = innIn.get(m.id) ?? e.state.time;
+          innIn.set(m.id, at);
+          if (e.state.time - at > SHOPS.inn.stay[1] + 0.5) innLong++;
+        }
+      }
+      if (i === Math.round(n / 2)) {
+        // 저장·불러오기 왕복 (가게 볼일 중인 손님 포함): 같은 상태.
+        const raw = JSON.parse(JSON.stringify(e.state)) as unknown;
+        const back = normalizeState(raw);
+        assert(back !== null && stripTime(back) === stripTime(e.state), '가게가 있는 저장 왕복');
+      }
+    }
+    const st = e.state;
+    const sum = SHOP_IDS.reduce((a, s) => a + st.shops[s].revenue, 0);
+    assert(served === sum && sum === st.shopTotals.revenue && served > 0, `장부: 산 것 ${served} = 가게 매상 ${sum} = 기록 ${st.shopTotals.revenue}`);
+    assert(badWallet === 0, `낼 수 없는데 사러 감·산 뒤 지갑 음수 ${badWallet}`);
+    assert(badReserve === 0, `남길 코인보다 많이 쓰러 감 ${badReserve}`);
+    // 가게가 다 있는 큰 마을: 가게 매상은 마을 수입의 큰 몫이지만 참가비·팁을 밀어내지 않는다 (DESIGN 3.8 밸런스).
+    const share = sum / Math.max(1, sum + inc.fees + inc.leave + st.shopTotals.tipCoins);
+    assert(share >= 0.2 && share <= 0.5 && inc.fees > sum * 0.4, `가게 몫 ${(share * 100).toFixed(0)}% (참가비 ${inc.fees}, 매상 ${sum})`);
+    assert(innLong === 0, '여관은 정한 시간 안에 나온다');
+    assert(photoDup === 0 && Object.keys(st.photoAlbum).length === firstSeen.size, '사진첩은 종마다 처음 한 번');
+    assert(st.shopTotals.tips > 0 && coinsTips.tips === st.shopTotals.tipCoins, `팁 ${st.shopTotals.tips}번 ${st.shopTotals.tipCoins}코인`);
+    const none = SHOP_IDS.filter((s) => st.shops[s].served === 0);
+    assert(none.length <= 2, `손님이 안 온 가게 ${none.join(',')}`);
+    console.log(`  가게가 다 있는 마을 30분 (시드 ${seed}) OK: 매상 ${sum} (수입의 ${(share * 100).toFixed(0)}%), 팁 ${st.shopTotals.tipCoins}, 손님 ${st.totals.visitors}, 사진첩 ${firstSeen.size}종, 꽃 ${st.shopTotals.gifts}, 여관 ${st.shopTotals.innStays}`);
+    console.log(`     ${SHOP_IDS.map((s) => `${s} ${st.shops[s].served}`).join(', ')}${none.length > 0 ? ` (손님 없음: ${none.join(',')})` : ''}`);
+  }
+
+  // i) 보관하기·옮기기: 가게 볼일 중인 손님이 있어도 불변식이 맞고 (머물던 손님은 효과를 받고 나온다), 놀이기구·트럭은 처음으로.
+  {
+    const s = shopVillage(17, ['restaurant', 'carousel', 'icecream_truck', 'hot_spring']);
+    const ms = Array.from({ length: 6 }, () => testGuest(s, { wallet: 120, mood: 40 }));
+    ms.forEach((m, i) => s.devVisitShop(m.id, (['restaurant', 'carousel', 'hot_spring'] as const)[i % 3] ?? 'restaurant'));
+    runFor(s, 25);
+    const v = s.village();
+    const hs = v.placed('hot_spring');
+    const car = v.placed('carousel');
+    assert(hs !== undefined && car !== undefined, '놓인 가게');
+    assert(s.store(hs.id).ok, '온천 보관하기');
+    runFor(s, 5);
+    assert(ms.every((m) => m.shop !== 'hot_spring'), '보관한 가게의 손님은 나온다');
+    const spot = findSpot(s.state, 'carousel', undefined, false);
+    if (spot !== null) {
+      if (spot.road.length > 0) s.paintRoad(spot.road);
+      assert(s.move(car.id, { x: spot.x, y: spot.y }).ok, '회전목마 옮기기');
+    }
+    runFor(s, 40);
+    assert(s.place('hot_spring', { x: hs.x, y: hs.y }).ok || s.autoPlace('hot_spring').ok, '온천 다시 놓기');
+    runFor(s, 30);
+    // 가게 주인을 부스에 세우면 그 가게는 닫힌다, 다시 세우면 연다.
+    const owner = s.state.staff.find((x) => x.shop === 'restaurant');
+    assert(owner !== undefined && s.assign(owner.id, 'slot').ok && !s.shopOpen('restaurant'), '식당 주인을 부스로 → 식당 닫힘');
+    assert(s.assignShop(owner.id, 'restaurant').ok && s.shopOpen('restaurant') && s.state.booths.slot.staff[0] !== owner.id, '다시 식당으로 → 열림');
+    runFor(s, 30);
+    console.log('  보관하기·옮기기·주인 바꾸기 OK');
+  }
+
+  // j) 옛 저장 5 → 6: 가게·사진첩·누적 기록이 생긴다 (가게는 아직 없다).
+  {
+    const old = JSON.parse(JSON.stringify(newGame(21))) as Record<string, unknown>;
+    old.version = 5;
+    delete old.shops;
+    delete old.photoAlbum;
+    delete old.shopTotals;
+    const st = normalizeState(old);
+    assert(st !== null && st.version === 6 && SHOP_IDS.every((s) => st.shops[s].level === 0) && Object.keys(st.photoAlbum).length === 0, '저장 5 → 6');
+    const s = new Sim(st);
+    runFor(s, 30);
+    console.log('  옛 저장 5 → 6 OK');
+  }
+  shopFeelTests();
+}
+
+/**
+ * 다섯째 묶음 다듬기 시험: 가게 고르는 마음 (결과가 남긴 마음·배고픔·여관·꽃), 점괘 등급, 미용실 반짝이, 온천, 식당 배 터짐 (드러눕기),
+ * 진행자 팁 (성격), 가게 길 (손님 수 한도에 세지 않는다).
+ */
+function shopFeelTests(): void {
+  // k) 결과가 남긴 마음: 대박·이기는 흐름 = 축하, 아깝게 놓침 = 단 것, 계속 짐 = 달래기, 아무 일 없으면 그대로, 끝나면 사라진다. 그 마음이 가게 무게를 바꾼다.
+  {
+    const s = shopVillage(31, ['snack_stall', 'restaurant', 'carousel', 'accessory_shop', 'hot_spring', 'inn', 'flower_shop']);
+    const m = testGuest(s, { wallet: 300, mood: 60 });
+    const now = s.state.time;
+    m.streak = 0;
+    assert(urgeAfter(m, 'jackpot', false, now)?.kind === 'celebrate', '대박 = 축하');
+    m.streak = -1;
+    assert(urgeAfter(m, 'nearMiss', false, now)?.kind === 'sweet', '아깝게 놓침 = 단 것');
+    m.streak = SHOP_URGE.comfortStreak;
+    assert(urgeAfter(m, 'lose', false, now)?.kind === 'comfort', '계속 짐 = 달래기');
+    m.streak = SHOP_URGE.celebrateStreak;
+    assert(urgeAfter(m, 'win', false, now)?.kind === 'celebrate', '이기는 흐름 = 축하');
+    m.streak = 0;
+    m.mood = 70;
+    m.urge = { kind: 'comfort', until: now + 10 };
+    assert(urgeAfter(m, 'lose', false, now)?.kind === 'comfort' && urgeAfter(m, 'lose', false, now + 11) === null, '남은 마음은 그대로, 끝나면 사라진다');
+    m.urge = null;
+    const want = (k: ShopId, age = 100): number => shopWant(s.state, m, k, age);
+    // 달래기 → 먹거리·온천 (놀이기구는 그대로).
+    m.ateAt = s.state.time - 1000;
+    m.streak = -2;
+    m.mood = 50;
+    m.stats.rounds = 4;
+    const b0 = { snack: want('snack_stall'), spring: want('hot_spring'), ride: want('carousel') };
+    m.urge = { kind: 'comfort', until: s.state.time + 60 };
+    assert(urgeOf(s.state, m) === 'comfort', '달래기 마음');
+    assert(want('snack_stall') > b0.snack * 2 && want('hot_spring') > b0.spring * 2 && Math.abs(want('carousel') - b0.ride) < 1e-9, '달래기는 먹거리·온천 쪽으로');
+    // 축하 → 놀이기구·장신구·식당.
+    m.urge = null;
+    m.streak = 2;
+    m.hadJackpot = true;
+    m.mood = 80;
+    const c0 = { ride: want('carousel'), acc: want('accessory_shop'), food: want('restaurant') };
+    m.urge = { kind: 'celebrate', until: s.state.time + 60 };
+    assert(want('carousel') > c0.ride * 2 && want('accessory_shop') > c0.acc * 2 && want('restaurant') > c0.food * 2, '축하는 놀이기구·장신구·식당 쪽으로');
+    m.urge = null;
+    // 배고픔: 막 먹었으면 먹거리 무게가 작고, 오래 안 먹었으면 크다.
+    m.ateAt = s.state.time;
+    const full = want('snack_stall');
+    m.ateAt = s.state.time - HUNGER.sec * 3;
+    assert(hungerOf(s.state, m) === HUNGER.max && want('snack_stall') > full * 4, `배고픔 (막 먹음 ${full.toFixed(2)})`);
+    // 여관: 오래 논 지친 손님만.
+    m.patience = 2;
+    assert(want('inn', 200) > 0 && want('inn', 60) === 0, '여관은 오래 논 지친 손님');
+    // 꽃: 단체 놀이 친구면 더, 시무룩한 친구면 더. 건넬 친구는 시무룩한 친구 → 단체 놀이 친구.
+    const f1 = testGuest(s, { wallet: 50, mood: 80 });
+    const f2 = testGuest(s, { wallet: 50, mood: 80 });
+    m.mood = 70;
+    m.friends = [f1.id, f2.id];
+    m.groupFriends = [];
+    const w1 = want('flower_shop');
+    m.groupFriends = [f2.id];
+    const w2 = want('flower_shop');
+    assert(w1 > 0 && w2 > w1 * 1.4, `단체 놀이 친구 (${w1.toFixed(2)} → ${w2.toFixed(2)})`);
+    assert(giftTarget(s.state, m)?.friend === f2, '꽃은 단체 놀이 친구에게');
+    f1.mood = 30;
+    const w3 = want('flower_shop');
+    const t = giftTarget(s.state, m);
+    assert(w3 > w2 * 1.4 && t?.friend === f1 && t.comfort, '시무룩한 친구에게 위로 꽃');
+    console.log(`  가게 고르는 마음 OK: 달래기·단 것·축하, 배고픔 ×${HUNGER.min}~${HUNGER.max}, 여관, 꽃 (단체 놀이 친구 ×${FLOWER.group}, 시무룩한 친구 ×${FLOWER.comfort})`);
+  }
+
+  // l) 점괘: 대길·길·흉 (주인 입담이 흉을 줄인다), 등급대로 운·반응, 운이 끝나면 점괘도 사라진다.
+  {
+    const rng = new Rng(9);
+    const count = (charm: number): Record<'great' | 'good' | 'bad', number> => {
+      const c = { great: 0, good: 0, bad: 0 };
+      for (let i = 0; i < 4000; i++) c[rollFortune(rng, charm)]++;
+      return c;
+    };
+    const c3 = count(3);
+    const c5 = count(5);
+    const bad3 = 1 - FORTUNE.great.chance - FORTUNE.good.chance;
+    assert(Math.abs(c3.great / 4000 - FORTUNE.great.chance) < 0.03 && Math.abs(c3.bad / 4000 - bad3) < 0.03, `점괘 비율 ${JSON.stringify(c3)}`);
+    assert(c5.bad < c3.bad - 100, `입담이 높으면 흉이 준다 (${c3.bad} → ${c5.bad})`);
+    const s = shopVillage(32, ['fortune_teller']);
+    const seen = new Set<string>();
+    let first: Monster | null = null;
+    for (let i = 0; i < 10; i++) {
+      const m = testGuest(s, { wallet: 60 });
+      first ??= m;
+      const labels = reactLog(s, m.id);
+      assert(s.devVisitShop(m.id, 'fortune_teller'), '점집으로');
+      assert(runUntil(s, 80, () => m.buffs?.fortune !== undefined && m.phase === 'reacting'), '점괘를 받는다');
+      const f = m.buffs?.fortune as 'great' | 'good' | 'bad';
+      seen.add(f);
+      assert(m.buffs?.luck === FORTUNE[f].luck && (m.buffs?.luckSec ?? 0) > 0, `점괘 ${f}의 운 ${m.buffs?.luck}`);
+      const ok = f === 'bad' ? shopReactionLabels('fortuneBad') : shopReactionLabels('fortuneGood', f);
+      assert(labels.some((l) => ok.includes(l)), `점괘 반응 (${f}): ${labels.join(',')}`);
+    }
+    assert(seen.size >= 2, `점괘 등급 ${[...seen].join(',')}`);
+    const f0 = first as Monster;
+    runUntil(s, SHOPS.fortune_teller.effect.luck.sec + 5, () => false);
+    assert(s.monster(f0.id) === undefined || (f0.buffs?.fortune === undefined && f0.buffs?.luck === undefined), '운이 끝나면 점괘도 사라진다');
+    console.log(`  점괘 OK: 입담 3 ${JSON.stringify(c3)} / 입담 5 흉 ${c5.bad}, 본 등급 ${[...seen].join('·')}`);
+  }
+
+  // m) 미용실 반짝이: 레벨·주인 입담만큼 오래.
+  {
+    const s = shopVillage(33, ['beauty_salon']);
+    const owner = s.state.staff.find((x) => x.shop === 'beauty_salon') as Staff;
+    const extra = Math.max(0, owner.stats.charm - 3) * SALON.perCharm;
+    assert(salonSparkleSec(s.state) === SALON.sparkleSec[0] + extra, '레벨 1 반짝이');
+    s.state.shops.beauty_salon.level = 3;
+    assert(salonSparkleSec(s.state) === SALON.sparkleSec[2] + extra, '레벨 3 반짝이');
+    const m = testGuest(s, { wallet: 80 });
+    assert(s.devVisitShop(m.id, 'beauty_salon'), '미용실로');
+    assert(runUntil(s, 90, () => (m.buffs?.sparkleSec ?? 0) > 0), '반짝이며 나온다');
+    assert(Math.abs((m.buffs?.sparkleSec ?? 0) - salonSparkleSec(s.state)) <= 0.2, `반짝이 ${m.buffs?.sparkleSec}초`);
+    console.log(`  미용실 OK: 반짝이 ${SALON.sparkleSec.join('·')}초 (+입담 ${extra}초)`);
+  }
+
+  // n) 온천: 처진 손님일수록 크게 녹는다.
+  {
+    const s = shopVillage(34, ['hot_spring']);
+    const low = testGuest(s, { wallet: 80, mood: 25 });
+    const high = testGuest(s, { wallet: 80, mood: 70 });
+    const at = new Map<number, number>();
+    const gain = new Map<number, number>();
+    s.bus.on('shopConsumed', (e) => {
+      const m = s.monster(e.id);
+      if (m !== undefined && at.has(e.id)) gain.set(e.id, m.mood - (at.get(e.id) as number));
+    });
+    for (const m of [low, high]) assert(s.devVisitShop(m.id, 'hot_spring'), '온천으로');
+    assert(
+      runUntil(s, 120, () => {
+        for (const m of [low, high]) if (m.phase === 'atShop' && !at.has(m.id)) at.set(m.id, m.mood);
+        return gain.size === 2;
+      }),
+      '둘 다 몸을 담근다',
+    );
+    const gl = gain.get(low.id) as number;
+    const gh = gain.get(high.id) as number;
+    const charm = (s.state.staff.find((x) => x.shop === 'hot_spring')?.stats.charm ?? 3) - 3;
+    assert(gl > gh + 5 && gl >= SHOPS.hot_spring.effect.mood + charm + springBonus(at.get(low.id) as number) - 1, `온천 기분 (처진 손님 +${gl.toFixed(1)}, 기분 좋은 손님 +${gh.toFixed(1)})`);
+    console.log(`  온천 OK: 처진 손님 +${gl.toFixed(0)}, 기분 좋은 손님 +${gh.toFixed(0)}`);
+  }
+
+  // o) 식당 배 터짐: 좋아하는 메뉴를 먹은 미식가가 드러눕는다 (lying, reacting), 근처 손님이 보고 웃는다, 일어나면 '영차…'·뒤뚱뒤뚱.
+  {
+    const s = shopVillage(35, ['restaurant']);
+    // 구경할 손님 넷 (식당 안 테이블 옆에 쉬는 중).
+    const seat = shopSlotPtOf(s, 'restaurant', 1);
+    for (let i = 0; i < 4; i++) {
+      const w = testGuest(s, { wallet: 50, mood: 70 });
+      w.pos = { x: seat.x + 14 * i - 20, y: seat.y + 6 };
+      w.phase = 'resting';
+      w.timer = 1e6;
+    }
+    let watched = 0;
+    s.bus.on('monsterSpectate', (e) => {
+      if (shopReactionLabels('flopWatch').includes(e.reaction.label)) watched++;
+    });
+    let flopped: Monster | null = null;
+    let labels: string[] = [];
+    let lyingMax = 0;
+    for (let i = 0; i < 10 && flopped === null; i++) {
+      const m = testGuest(s, { wallet: 200, species: 'crab', traits: ['foodie'] });
+      labels = reactLog(s, m.id);
+      assert(s.devVisitShop(m.id, 'restaurant'), '식당으로');
+      const o = m.order as NonNullable<Monster['order']>;
+      m.order = { item: 'items/food_stew', price: o.price };
+      runUntil(s, 90, () => {
+        lyingMax = Math.max(lyingMax, m.lying ?? 0);
+        if ((m.lying ?? 0) > 0) assert(m.phase === 'reacting', `드러누운 손님이 ${m.phase}`);
+        return (m.lying ?? 0) > 0 || ((m.shopsVisited ?? []).includes('restaurant') && m.shop !== 'restaurant' && m.phase !== 'reacting');
+      });
+      if ((m.lying ?? 0) > 0) flopped = m;
+    }
+    const m = flopped as Monster;
+    assert(m !== null && labels.some((l) => shopReactionLabels('stuffed').includes(l)), '배 터지게 먹고 드러눕는다');
+    assert(runUntil(s, FOOD_LIKE.stuffedSec + 1, () => (m.lying ?? 0) <= 0), '잠깐 뒤 일어난다');
+    assert(labels.some((l) => shopReactionLabels('stuffedUp').includes(l)) && m.buffs?.speed === FOOD_LIKE.waddle.mult, '일어나 뒤뚱뒤뚱');
+    assert(watched > 0, '근처 손님이 본다');
+    // 구경한 반응도 도감에 남는다 (도감 '가게·놀이기구' 줄이 센다).
+    assert(Object.values(s.state.dex).some((d) => d.reactions.some((l) => shopReactionLabels('flopWatch').includes(l))), '구경 반응이 도감에');
+    console.log(`  식당 배 터짐 OK: ${lyingMax.toFixed(1)}초 드러누움, 구경 ${watched}, '${labels.join("' '")}'`);
+  }
+
+  // p) 진행자 팁: 흥부자는 자주, 겁쟁이는 덜.
+  {
+    const rng = new Rng(77);
+    let a = 0;
+    let b = 0;
+    for (let i = 0; i < 4000; i++) {
+      if (tipFor(60, 10, 'win', false, rng, ['cheerful']) > 0) a++;
+      if (tipFor(60, 10, 'win', false, rng, ['coward']) > 0) b++;
+    }
+    assert(Math.abs(a / 4000 - Math.min(0.95, TIP.chance * 1.35)) < 0.03 && Math.abs(b / 4000 - TIP.chance * 0.7) < 0.03, `성격마다 팁 (${a}, ${b})`);
+    console.log(`  팁 OK: 흥부자 ${((a / 4000) * 100).toFixed(0)}% · 겁쟁이 ${((b / 4000) * 100).toFixed(0)}%`);
+  }
+
+  // q) 가게 길: 가게에서 나와 다음 놀이를 시작할 때까지 손님 수 한도에 세지 않는다 (shopTrip).
+  {
+    const s = shopVillage(36, ['snack_stall']);
+    const m = testGuest(s, { wallet: 100 });
+    assert(s.devVisitShop(m.id, 'snack_stall'), '간식 노점으로');
+    assert(runUntil(s, 60, () => m.phase === 'reacting' && m.shopTrip === true), '사고 나면 가게 길');
+    assert(runUntil(s, 120, () => m.shopTrip !== true), '다음 놀이로 가면 끝');
+    assert(m.phase !== 'reacting' && m.phase !== 'toBooth', `가게 길이 끝난 때 ${m.phase}`);
+    console.log(`  가게 길 OK: ${m.phase}에서 다시 센다`);
+  }
+
+  // r) 꽃다발을 샀는데 건넬 친구가 그새 떠났다: 꽃만 들고 시무룩 ('lonely'), 간식 반응이 아니다.
+  {
+    const s = shopVillage(37, ['flower_shop']);
+    const a = testGuest(s, { wallet: 100, mood: 70 });
+    const b = testGuest(s, { wallet: 100, mood: 60 });
+    a.friends = [b.id];
+    b.phase = 'resting';
+    b.timer = 1e6;
+    const labels = reactLog(s, a.id);
+    assert(s.devVisitShop(a.id, 'flower_shop'), '꽃집으로');
+    s.state.monsters.splice(s.state.monsters.indexOf(b), 1);
+    assert(runUntil(s, 90, () => (a.shopsVisited ?? []).includes('flower_shop') && a.phase !== 'buying'), '꽃다발을 산다');
+    assert(labels.some((l) => shopReactionLabels('lonely').includes(l)) && !labels.some((l) => shopReactionLabels('snack').includes(l)), `친구가 없으면 시무룩 (${labels.join(',')})`);
+    console.log(`  친구 없는 꽃다발 OK: '${labels.join("' '")}'`);
+  }
+
+  // s) 사진 찍는 중에 사진관을 보관한다: 낸 손님은 사진 (사진첩·찰칵·손에 든 사진)을 받고 나온다. 여관도 기록이 남는다.
+  {
+    const s = shopVillage(38, ['photo_studio', 'inn']);
+    const m = testGuest(s, { wallet: 100, species: 'dragon' });
+    const n = testGuest(s, { wallet: 200, patience: 1 });
+    let photos = 0;
+    s.bus.on('photoTaken', () => photos++);
+    assert(s.devVisitShop(m.id, 'photo_studio') && s.devVisitShop(n.id, 'inn'), '사진관·여관으로');
+    assert(runUntil(s, 90, () => m.phase === 'atShop' && n.phase === 'atShop'), '배경판 앞·여관 방에');
+    const p = s.village().placed('photo_studio');
+    const q = s.village().placed('inn');
+    assert(p !== undefined && q !== undefined && s.store(p.id).ok && s.store(q.id).ok, '사진관·여관 보관하기');
+    assert(photos === 1 && s.state.photoAlbum.dragon !== undefined && s.state.shopTotals.photos === 1 && (m.held ?? null) !== null, '보관해도 낸 손님은 사진을 받는다');
+    assert(s.state.shopTotals.innStays === 1, '여관 기록');
+    runFor(s, 10);
+    console.log('  찍는 중 보관하기 OK: 사진첩·여관 기록');
+  }
+
+  // t) 들고 가는 가게: 산 손님은 계산대에서 비켜서서 반응한다 (다음 손님이 계산대에 올라서도 겹치지 않는다).
+  {
+    let overlaps = 0;
+    let served = 0;
+    for (const shop of ['snack_stall', 'fortune_teller', 'accessory_shop', 'icecream_truck'] as const) {
+      const s = shopVillage(39, [shop]);
+      const ms = Array.from({ length: 4 }, () => testGuest(s, { wallet: 400, mood: 80 }));
+      for (const m of ms) m.streak = 2;
+      s.bus.on('shopServed', (e) => {
+        if (e.shop === shop) served++;
+      });
+      for (const m of ms) s.devVisitShop(m.id, shop);
+      runUntil(s, 90, () => {
+        const at = s.state.shops[shop].serving;
+        const b = at === null ? undefined : s.monster(at);
+        if (b !== undefined && b.path.length === 0 && ms.some((o) => o !== b && o.phase === 'reacting' && Math.hypot(o.pos.x - b.pos.x, o.pos.y - b.pos.y) < 30)) {
+          overlaps++;
+          const o = ms.find((x) => x !== b && x.phase === 'reacting' && Math.hypot(x.pos.x - b.pos.x, x.pos.y - b.pos.y) < 30) as Monster;
+          console.log(`    겹침 ${shop}: 산 손님 ${o.id} (${o.pos.x.toFixed(0)},${o.pos.y.toFixed(0)}) 길 ${o.path.length}, 계산대 손님 ${b.id} (${b.pos.x.toFixed(0)},${b.pos.y.toFixed(0)})`);
+        }
+        return ms.every((m) => (m.shopsVisited ?? []).includes(shop) && m.phase !== 'reacting');
+      });
+    }
+    assert(served >= 10 && overlaps === 0, `계산대에서 산 손님과 다음 손님이 겹침 ${overlaps} (산 손님 ${served})`);
+    console.log(`  계산대 비켜서기 OK: 산 손님 ${served}, 겹침 0`);
+  }
+}
+
+/** 시험용: 가게 자리 점 (세계 좌표). */
+function shopSlotPtOf(s: Sim, shop: ShopId, i: number): { x: number; y: number } {
+  const sp = s.village().shopSpot(shop);
+  return sp.slots[i] ?? sp.counter;
+}
+
 // ── 실행 ───────────────────────────────────────────────────────────────
 
 const seed = num('seed', 1);
@@ -3544,6 +4434,9 @@ if (flag('selftest')) {
 } else if (flag('village')) {
   villageTests();
   console.log('\n배치형 마을 시험 통과');
+} else if (flag('shops')) {
+  shopTests();
+  console.log('\n가게 시험 통과');
 } else if (flag('auto') && flag('seeds')) {
   runSeeds(num('seeds', 8), minutes, flag('detail'), num('first', 1));
 } else if (flag('auto')) {

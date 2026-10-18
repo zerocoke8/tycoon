@@ -42,6 +42,11 @@ const ICONS = {
   move: wrap('<path d="M16 5v22M5 16h22"/><path d="M12 9l4-4 4 4M12 23l4 4 4-4M9 12l-4 4 4 4M23 12l4 4-4 4"/>'),
   box: wrap('<path d="M5.5 12h21v14.5h-21z" fill="#d9a066"/><path d="M4 7h24v5H4z" fill="#ebbd85"/><path d="M13 17h6"/>'),
   list: wrap('<rect x="5" y="5.5" width="22" height="21" rx="3" fill="#f6ebd5"/><path d="M10 11.5h12M10 16h12M10 20.5h7.5"/>'),
+  // 다섯째 묶음: 놀이기구 (관람차), 사진관 (사진기)
+  ride: wrap(
+    '<path d="M10 28 16 14l6 14"/><circle cx="16" cy="13" r="9" fill="#f6ebd5"/><path d="M16 4v18M7 13h18M9.6 6.6l12.8 12.8M22.4 6.6 9.6 19.4" stroke-width="1.6"/><circle cx="16" cy="13" r="2.2" fill="#f2a65a"/><circle cx="16" cy="4" r="2" fill="#e46f5a"/><circle cx="25" cy="13" r="2" fill="#8ec8ee"/><circle cx="7" cy="13" r="2" fill="#f3d36a"/><circle cx="16" cy="22" r="2" fill="#8cc47a"/>',
+  ),
+  camera: wrap('<rect x="4" y="10" width="24" height="16" rx="3" fill="#8ec8ee"/><path d="M11 10l2-3.5h6L21 10" fill="#f6ebd5"/><circle cx="16" cy="18" r="5" fill="#f6ebd5"/><circle cx="16" cy="18" r="2" fill="#3b2a20" stroke="none"/><path d="M23.5 13.5h1.5"/>'),
 } as const;
 
 export type IconName = keyof typeof ICONS;

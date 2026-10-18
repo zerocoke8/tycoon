@@ -3,8 +3,9 @@
 
 import type { Emitter } from '../core/events.ts';
 import type { CatalogKey } from '../data/catalog.ts';
-import type { AccessoryId, AccessorySlot, BoothId, BuildingId, DecorId, GoodId, GroupBoothId, MaterialId, OutcomeTier, PreciousId, SlotSymbol, SpeciesId, StaffStats, TraitId, WorkFacility } from '../data/defs.ts';
+import type { AccessoryId, AccessorySlot, BoothId, BuildingId, DecorId, GoodId, GroupBoothId, MaterialId, OutcomeTier, PreciousId, ShopId, ShopUrge, SlotSymbol, SpeciesId, StaffStats, TraitId, WorkFacility } from '../data/defs.ts';
 import type { Pt } from '../data/map.ts';
+import type { ShopReactKind } from './reactions.ts';
 
 export type MonsterId = number;
 export type StaffId = number;
@@ -29,13 +30,20 @@ export type MonsterPhase =
   | 'toWork' // 파산: 일터로 (느린 걸음). 닿으면 working 또는 waitWork
   | 'working' // 일터에서 일한다 (빚이 줄고 재료가 나온다, Monster.labor)
   | 'waitWork' // 일터 자리가 없어 옆에 쪼그리고 기다린다
-  | 'relieved'; // 빚을 다 갚았다: 어둠이 걷히고 기뻐한 뒤 (timer초) 떠난다
+  | 'relieved' // 빚을 다 갚았다: 어둠이 걷히고 기뻐한 뒤 (timer초) 떠난다
+  // ── 다섯째 묶음 (DESIGN 3.8): 가게 (Monster.shop) ──
+  | 'toShop' // 가게 줄로 걸어간다 (아이스크림 트럭은 트럭을 따라간다)
+  | 'shopQueue' // 가게 줄에 서 있다
+  | 'buying' // 계산대에서 산다 (걸어 들어간 뒤 timer초)
+  | 'toShopSeat' // 산 뒤 머무는·타는 자리로 (식당 테이블·탕·방·배경판·목마·곤돌라)
+  | 'atShop' // 자리에서 머문다 (timer초, 놀이기구는 한 바퀴가 끝날 때까지)
+  | 'toFriend'; // 꽃다발을 들고 친한 손님에게 간다 (Monster.giftTo)
 
 /** 몸 그림 (monsters/<species>_<pose>). 애니메이션이 붙으면 같은 이름의 클립을 쓴다. */
 export type Pose = 'base' | 'joy' | 'agony' | 'sad';
 
-/** 머리 위 이모트 (fx/emote_<kind>). */
-export type EmoteKind = 'heart' | 'sweat' | 'tear' | 'sparkle' | 'storm' | 'note' | 'anger' | 'shock';
+/** 머리 위 이모트 (fx/emote_<kind>). sleep·yum = 다섯째 묶음 (여관에서 나올 때 졸림, 맛있게 먹음). */
+export type EmoteKind = 'heart' | 'sweat' | 'tear' | 'sparkle' | 'storm' | 'note' | 'anger' | 'shock' | 'sleep' | 'yum';
 
 /** 코드 연출 (화면 쪽이 트윈으로). */
 export type Motion = 'none' | 'hop' | 'bigHop' | 'shake' | 'squash' | 'spin' | 'slump' | 'tremble' | 'bounceLoop';
@@ -120,6 +128,128 @@ export interface Monster {
    * 그래도 못 가면 하던 일을 접는다 (끊긴 길 너머 자리에서 노는 일이 없게).
    */
   dest?: { x: number; y: number; via: CatalogKey | null } | null;
+  // ── 다섯째 묶음 (DESIGN 3.8): 가게 ──
+  /** 지금 가는·쓰는 가게 (toShop·shopQueue·buying·toShopSeat·atShop). */
+  shop?: ShopId | null;
+  /** 가게 자리 (ShopState.slots index, 머무는·타는 자리가 없거나 아직이면 -1). */
+  shopSlot?: number;
+  /** 계산대에서 살 것 (가게에 가기로 할 때 정한다: 값은 그때의 값, 낼 수 없으면 사지 않는다). */
+  order?: ShopOrder | null;
+  /** 떠나는 길에 들른 가게 (기념품): 볼일이 끝나면 다시 집으로. */
+  shopHome?: boolean;
+  /** 이번 방문에 들른 가게 (산 차례대로)와 마지막으로 가게 볼일이 끝난 때 (state.time). */
+  shopsVisited?: ShopId[];
+  shopAt?: number;
+  /** 손에 든 것 (그림 'items/food_waffle'·'objects/plush_dragon'·'items/bouquet' …): 남은 초·처음 초, eat = 먹고 마시며 걷는다. */
+  held?: HeldItem | null;
+  /** 한동안의 가게 효과 (남은 초): 걸음 배수 (음료), 운 (점집, ±), 반짝이 (미용실). */
+  buffs?: ShopBuffs;
+  /** 최근 결과 흐름 (이기면 +1·대박 +2, 지면 -1, ±SHOP_VISIT.streakMax): 지면 먹거리, 따면 장신구·기념품·놀이기구. */
+  streak?: number;
+  /** 여관에서 자서 늘어난 머무는 시간 (초): 머문 시간(maxVisitSec·maxStaySec)에서 뺀다. */
+  bonusSec?: number;
+  /** 안 보인다 (여관 방·미용실 안: atShop 동안). */
+  hidden?: boolean;
+  /** 꽃다발을 건넬 친한 손님 (toFriend). */
+  giftTo?: MonsterId | null;
+  /** 친한 손님 (같은 판에서 논·같은 부스에 앉았던 손님, 가까운 차례로 FLOWER.friendsMax명). */
+  friends?: MonsterId[];
+  /** 그 가운데 단체 놀이 한 판을 같이 한 손님 (꽃 선물을 더 하고 싶다). */
+  groupFriends?: MonsterId[];
+  /** 마지막으로 먹은 때 (state.time, 먹거리 가게·촌장 간식): 배고픔 (defs.ts HUNGER). */
+  ateAt?: number;
+  /** 한판 결과가 남긴 마음 (defs.ts SHOP_URGE: 지면 달래기, 아깝게 놓치면 단 것, 크게 따면 축하)과 끝나는 때 (state.time). */
+  urge?: { kind: ShopUrge; until: number } | null;
+  /** 배 터지게 먹고 드러누운 남은 초 (식당, reacting 동안: 화면이 몸을 눕힌다). 0·없음 = 서 있다. */
+  lying?: number;
+  /** 이번 결과에 진행자에게 팁을 줬다 (결과 반응이 끝나면 고마워요 반응). */
+  tipped?: boolean;
+  /** 가게 볼일을 마치고 다음 놀이(부스 줄)로 가는 길: 손님 수 한도에 세지 않는다 (가게 반응·고르기·부스로 걷기 동안, 다른 걸 하면 지운다). */
+  shopTrip?: boolean;
+}
+
+/** 가게에서 살 것 (Monster.order): 그림 'group/key' (서비스만이면 null), 낼 코인, 장신구 가게면 그 장신구. */
+export interface ShopOrder {
+  readonly item: string | null;
+  readonly price: number;
+  readonly accessory?: Accessory;
+}
+
+/** 손에 든 것 (Monster.held, 화면이 손 위에 그린다). item = 그림 'group/key'. */
+export interface HeldItem {
+  item: string;
+  left: number;
+  total: number;
+  eat: boolean;
+  /** 이 가게에서 샀다 (다 먹으면 shopConsumed). */
+  shop: ShopId | null;
+}
+
+/** 가게 효과 (Monster.buffs, 남은 초). */
+export interface ShopBuffs {
+  speed?: number;
+  speedSec?: number;
+  luck?: number;
+  luckSec?: number;
+  sparkleSec?: number;
+  /** 점괘 등급 (운이 남은 동안: great 대길·good 길·bad 흉). */
+  fortune?: 'great' | 'good' | 'bad';
+}
+
+/**
+ * 가게 상태 (GameState.shops). level 0 = 아직 없다 (사면 1, 보관함으로, 놓고 길을 이으면 손님이 온다). owner = 가게 주인 (Staff.shop, 없으면 닫힘).
+ * queue = 줄 (toShop·shopQueue 손님), serving = 계산대에서 사는 손님, slots = 머무는·타는 자리 (SHOPS.slots[레벨-1]개).
+ * ride = 회전목마·관람차의 한 바퀴, truck = 아이스크림 트럭 (그 밖은 null). served·revenue = 누적 손님 수·매상 (마을 코인).
+ */
+export interface ShopState {
+  level: number;
+  owner: StaffId | null;
+  queue: MonsterId[];
+  serving: MonsterId | null;
+  slots: (MonsterId | null)[];
+  ride: RideState | null;
+  truck: TruckState | null;
+  served: number;
+  revenue: number;
+}
+
+/** 놀이기구 한 바퀴 (회전목마·관람차): idle → (첫 손님이 탐) boarding → (RIDE.boardSec·자리가 다 참) running (SHOPS.stay[0]초) → idle. t = 그 단계에서 지난 초. */
+export interface RideState {
+  phase: 'idle' | 'boarding' | 'running';
+  t: number;
+  /** running: 한 바퀴 초. */
+  duration: number;
+  /** running: 이번 바퀴에 탄 손님 (그 자리 = ShopState.slots index, 출발 뒤 온 손님은 다음 바퀴). */
+  riders: MonsterId[];
+}
+
+/**
+ * 아이스크림 트럭: 차고(parked, 가게가 닫혔거나 길이 없을 때)에 서 있거나, 마을 입구와 이어진 길 칸 위를 path(칸 가운데 점들)를 따라 다닌다.
+ * stop > 0 = 서서 판다 (그동안 손님이 모인다). facing = 그림 방향 (1 = 오른쪽: 뒤집기). x·y = 트럭 자리 (아래 가운데, 길 칸 가운데를 잇는 선 위).
+ */
+export interface TruckState {
+  x: number;
+  y: number;
+  path: Pt[];
+  stop: number;
+  facing: -1 | 1;
+  parked: boolean;
+  /** 서 있는 동안 줄 때문에 더 선 초 (TRUCK.holdMax까지). */
+  held: number;
+}
+
+/** 다섯째 묶음 누적 기록 (UI·시험용). byShop = 가게마다 손님 수, tips·tipCoins = 진행자 팁 횟수·코인. */
+export interface ShopTotals {
+  visits: number;
+  served: number;
+  revenue: number;
+  tips: number;
+  tipCoins: number;
+  gifts: number;
+  photos: number;
+  innStays: number;
+  accessories: number;
+  byShop: Partial<Record<ShopId, number>>;
 }
 
 /** 몸에 단 장신구 하나 (defs.ts ACCESSORIES). value = 전당포가 쳐 주는 값 (손님이 올 때 정한다). */
@@ -181,8 +311,10 @@ export interface Staff {
   art: string;
   stats: StaffStats;
   level: number;
-  /** 맡은 자리 (부스와 BOOTHS[booth].roles의 index). null = 쉬는 중. */
+  /** 맡은 자리 (부스와 BOOTHS[booth].roles의 index). null = 부스에 없다 (shop도 없으면 쉬는 중). */
   post: StaffPost | null;
+  /** 다섯째 묶음: 맡은 가게 (역할 '가게 주인', 그 가게의 ShopState.owner). post와 함께 갖지 않는다. 없으면 null·undefined. */
+  shop?: ShopId | null;
 }
 
 /** 진행자 자리: 부스 하나의 역할 하나. */
@@ -513,7 +645,7 @@ export interface VillageState {
 }
 
 export interface GameState {
-  version: 5;
+  version: 6;
   /** 시뮬레이션 누적 초. */
   time: number;
   rng: number;
@@ -548,6 +680,13 @@ export interface GameState {
   debtCheck: number;
   /** 일터 반장이 다음에 채무자를 다독일 때까지 초 (LABOR.foreman.everySec, 없으면 그 값으로 시작). */
   foremanTimer?: number;
+  // ── 다섯째 묶음 (DESIGN 3.8) ──
+  /** 가게마다 상태 (레벨 0 = 아직 없다). */
+  shops: Record<ShopId, ShopState>;
+  /** 사진첩: 종마다 사진관에서 처음 찍은 때 (state.time). */
+  photoAlbum: Partial<Record<SpeciesId, number>>;
+  /** 다섯째 묶음 누적 기록. */
+  shopTotals: ShopTotals;
 }
 
 /** 넷째 묶음 누적 기록: 맡김·되찾음·못 찾음(컬렉션), 대출·갚음, 파산·다 갚음 (그 가운데 반장이 덜어 줌), 빚 걸기 판, 일터에서 나온 재료. */
@@ -618,7 +757,8 @@ export interface SimEvents extends Record<string, unknown> {
   groupCancelled: { booth: GroupBoothId; reason: GroupCancelReason };
   coinsChanged: { coins: number; delta: number; at: Pt | null };
   itemsChanged: Record<string, never>;
-  buildingUpgraded: { id: BuildingId | BoothId; level: number };
+  /** 건물·부스·가게 (다섯째 묶음: 가게를 지으면 level 1로도 난다)의 레벨이 올랐다. */
+  buildingUpgraded: { id: BuildingId | BoothId | ShopId; level: number };
   /** 부스를 열었다 (보관함으로: 놓으면 손님을 받는다). */
   boothUnlocked: { booth: BoothId };
   /** 배치형 마을이 바뀌었다 (place = 건물·장식 자리, road = 길, land = 땅). key = 놓거나 옮기거나 보관한 것. */
@@ -663,6 +803,30 @@ export interface SimEvents extends Record<string, unknown> {
    * opponent = 짝 상대 (밀어내기 = 상대 선수, 줄다리기 = 짝지은 상대 편 선수), result = halved (이겨서 반) · cleared (대박으로 0) · added (져서 상대 빚만큼 더).
    */
   debtSettled: { booth: GroupBoothId; changes: DebtChange[] };
+  // ── 다섯째 묶음 (DESIGN 3.8): 가게 ──
+  /** 손님이 가게로 가기 시작했다 (order = 살 것: 그림·값). */
+  shopVisit: { id: MonsterId; shop: ShopId; order: ShopOrder };
+  /**
+   * 계산대에서 샀다 (price = 낸 코인 = 마을 수입, coinsChanged가 같이 난다). item = 산 것 그림 'group/key' (서비스만이면 null), at = 계산대 (트럭은 트럭 앞).
+   * 들고 가는 가게는 그 뒤 Monster.held, 머무는·타는 가게는 자리로 간다.
+   */
+  shopServed: { id: MonsterId; shop: ShopId; item: string | null; price: number; at: Pt };
+  /**
+   * 다 먹었다 (손에 든 것이 끝남, react = null)·다 머물렀다·한 바퀴 다 탔다 (효과는 이미 냈다: 반응은 monsterReact, react = 그 반응 종류:
+   * stuffed = 배 터지게 먹고 드러눕기, innWake = 여관에서 나옴 …). item = 다 먹은 것 (없으면 null).
+   */
+  shopConsumed: { id: MonsterId; shop: ShopId; item: string | null; at: Pt; react: ShopReactKind | null };
+  /** 꽃다발을 친한 손님에게 건넸다 (둘 다 하트·기분 +). */
+  giftGiven: { from: MonsterId; to: MonsterId; at: Pt };
+  /** 사진관에서 찍었다 (first = 그 종의 첫 사진: 사진첩에 들어감). at = 배경판 앞. */
+  photoTaken: { id: MonsterId; species: SpeciesId; first: boolean; at: Pt };
+  /** 크게 딴 손님이 진행자에게 팁 (마을 수입, coinsChanged도 같이). role = 진행자 자리 (보통 0), at = 진행자 자리. */
+  tip: { id: MonsterId; booth: BoothId; role: number; amount: number; at: Pt };
+  /** 놀이기구 한 바퀴가 시작했다·끝났다 (riders = 자리 순서, 빈 자리는 빼고). */
+  rideStarted: { shop: ShopId; riders: MonsterId[] };
+  rideFinished: { shop: ShopId; riders: MonsterId[] };
+  /** 아이스크림 트럭이 길 위에 섰다 (at = 트럭 자리, sec = 서 있을 초). */
+  truckStopped: { at: Pt; sec: number };
 }
 
 /** 빚 걸기 판에서 채무자 하나의 빚 변화 (SimEvents.debtSettled). */

@@ -25,6 +25,12 @@ function tierWeights(booth: BoothId, luck: number): [OutcomeTier, number][] {
   const row = ODDS[booth] as OddsRow;
   const w = new Map<OutcomeTier, number>();
   for (const t of TIERS) w.set(t, Math.max(0, row[t]?.[0] ?? 0));
+  // 운이 나쁘면 (점괘 흉, luck < 0) 이길 몫을 짐으로 옮긴다.
+  if (luck < 0 && (w.get('win') ?? 0) > 0) {
+    const moved = Math.min(-luck, w.get('win') ?? 0);
+    w.set('win', (w.get('win') ?? 0) - moved);
+    w.set('lose', (w.get('lose') ?? 0) + moved);
+  }
   if (luck > 0 && (w.get('win') ?? 0) > 0) {
     const moved = Math.min(luck, w.get('lose') ?? 0);
     w.set('lose', (w.get('lose') ?? 0) - moved);

@@ -47,7 +47,8 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
 ## 시뮬레이션 (src/sim)
 
 - `Sim implements SimApi` (`api.ts`). 생성자 `new Sim(state: GameState)`; `newGame(seed?)`, `loadGame(): GameState | null`(localStorage 키 `mpv-save-v1`, 버전 확인).
-  저장 버전 4 (넷째 묶음). 버전 2·3 저장은 `save.ts migrate2`(경주장 `BoothState.race` → `group`) → `migrate3`(손님 장신구·맡긴 장신구·빚 칸)으로 그대로 잇는다 (새 부스·건물·재료 칸, 새 진행자 후보는 채운다).
+  저장 버전 6 (다섯째 묶음 가게). 버전 2·3·4·5 저장은 `save.ts migrate2`(경주장 `BoothState.race` → `group`) → `migrate3`(손님 장신구·맡긴 장신구·빚 칸) → `migrate4`(배치형 마을) → `migrate5`(가게: 칸은 normalizeState가 newGame 값으로)
+  으로 그대로 잇는다 (새 부스·건물·재료·가게 칸, 새 진행자 후보는 채운다).
 - 손님 상태 기계 (`MonsterPhase`): arriving → wandering → toBooth → queued → toSeat → playing → reacting → (다시 한판 | wandering | resting | leaving).
   - 걷기 (배치형 마을, 아래 '배치형 마을'): `path.ts route(state, from, to, via, lane)`가 길 칸으로만 → `Monster.path`(세계 좌표 점들). 속도 SIM.walkSpeed (떠다니는 종은 floatSpeed).
     건물 안 자리(줄·자리·계산대·일터·쉼터·구경 자리)는 그 건물의 입구 앞 길 칸 → 문(door) → 자리로 들어간다. `Sim.walk(m, to, via)`가 손님마다 비켜 걷기(laneOffset)를 붙인다.
@@ -125,6 +126,35 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   - API: `buildingBuilt(id)`, `buildingLockReason(id)` (회관 레벨), `upgradeBuilding`은 레벨 0이면 짓기. 개발용 `Sim.devBankrupt(id, debt)`.
   - sim-check: `--auto --seeds N --debt` (일터를 지은 뒤 30분마다 맡김·컬렉션·대출·파산·빚 걸기 판, 일한 시간, 채무자 수, 금고, 장부, 돈이 떨어진 손님 깔때기),
     `--debt-build` (지을 수 있으면 바로), `--no-debt` (짓지 않음), `--open-all` (다 열린 마을). selftest 6g: 장신구·마음·짝·전당포·싫다·금고·은행·빚 쫓기·파산·일터·반장·빚 걸기 판(1:1·2:2)·저장·반응 표·45분 장부.
+- 다섯째 묶음 (DESIGN 3.8: 손님이 돈을 쓰는 가게 15곳 + 진행자 팁). 숫자는 `defs.ts` (`SHOPS`·`SHOP_IDS`·`ShopId`·`SHOP_CATEGORIES`·`SHOP_ITEMS`·`SHOP_VISIT`·`SPECIES_FOOD`·`FOOD_LIKE`·`ACCESSORY_SHOP`·`PHOTO`·`FLOWER`·`TIP`·`TRUCK`·`RIDE`, 역할 이름 `SHOP_OWNER_ROLE`),
+  모양은 `catalog.ts` (`SHOP_LAYOUT[s]`: fp·parts(그림 조각 group/key/at/k/anchor)·counter·queue·owner·ownerLook·slots·slotLook, `CAROUSEL_GEO`·`FERRIS_GEO`·`TRUCK_GEO`, 놓을 것 종류 `catalogKind` 'shop'·`isShopKey`),
+  세계 좌표는 `village.ts` (`shopSpot(s)`·`carousel()`·`ferris()`·`truckHome()`), 순수 도구는 `sim/shops.ts`, 흐름은 `sim.ts` '다섯째 묶음' 묶음.
+  - 상태: `GameState.shops[s]: ShopState` (level 0 = 아직 없다, owner = 가게 주인 `Staff.shop`, queue·serving·slots, ride `RideState` (idle·boarding·running, t·duration·riders), truck `TruckState` (x·y·path·stop·facing·parked·held), served·revenue),
+    `photoAlbum` (종 → 처음 찍은 때), `shopTotals` (visits·served·revenue·tips·tipCoins·gifts·photos·innStays·accessories·byShop).
+    손님: `shop`·`shopSlot`·`order` (`ShopOrder` item 'group/key'·price·accessory), `shopHome` (떠나는 길의 기념품), `shopsVisited`·`shopAt`, `held` (`HeldItem` 손에 든 것), `buffs` (speed·luck·sparkle 남은 초),
+    `streak` (최근 흐름), `bonusSec` (여관: 머문 시간에서 뺀다), `hidden` (여관·미용실 안), `giftTo`, `friends`.
+    다듬기: `urge` ({kind: `ShopUrge` 'comfort'·'sweet'·'celebrate', until}: 결과가 남긴 마음), `ateAt` (배고픔), `groupFriends` (단체 놀이 친구), `lying` (식당에서 배 터져 드러누운 남은 초: 화면이 눕힌다),
+    `tipped` (결과 반응 뒤 고마워요), `shopTrip` (가게에서 나와 다음 부스 줄·자리까지: 손님 수 한도에 세지 않는다), `buffs.fortune` (점괘 등급 'great'·'good'·'bad').
+  - phase: toShop (줄로, 트럭은 `followTruck`) → shopQueue → buying (계산대 serviceSec) → (머무는·타는 가게) toShopSeat → atShop (stay초, 놀이기구는 `tickRide`가 끝낸다) → reacting. 꽃은 toFriend.
+  - 흐름: decide → `goShopping` (`shops.ts chooseShop`: `shopWant` × 손님맞이 ÷ 거리, 살 것 `pickOrder`) → `goToShop` → `pumpShop` (계산대가 비면 줄 맨 앞, 머무는 가게는 빈 자리) → `finishBuy` (낸다: `earn`, shopServed)
+    → `takeAway` (효과 `applyShopEffect`, 손에 든 것, 장신구는 몸에, 꽃은 `goGift`) 또는 자리 → `finishStay` (효과, 사진첩, 여관 깨기) → `endShop` (반응 `reactions.ts shopReaction(kind, m, key?)`, `ShopReactKind` 29가지, 점괘는 열쇠 'great'·'good').
+    `leave` 앞에 `goSouvenir`. 트럭 `tickTruck` (`shops.ts truckPlan`·`stepTruck`: 칸 가운데 점들, 사지 않은 땅 가장자리 칸은 거의 안 고른다. 길이 바뀌면 `truckRouteOk`로 남은 길의 모든 칸 (꺾이는 점 사이 곧은 길까지)을 보고 끊겼으면 `truckReroute` (같은 곳으로) 또는 다시 고른다, 트럭 칸이 끊길 때만 차고로). 팁 `tipHost` (finishRound의 결과 뒤, `shops.ts tipFor`). 친구 `addFriends` (같은 부스·같은 판).
+    들고 가는 가게에서 산 손님은 `endShop`에서 비켜서는 점으로 몇 걸음 (`shops.ts shopPickupPt`: `SHOP_LAYOUT.pickup`, 트럭은 옆 길 칸), 그 손님이 계산대 44px 안에서 반응하는 동안 `pumpShop`은 다음 손님을 기다리게 한다.
+    산 뒤 반응은 `takeAwayReact` (가게마다 빠짐없는 switch, 건넬 친구가 없는 꽃다발 = 'lonely'). 머문 가게의 남는 일 (여관 기록·사진첩·찰칵·손에 든 사진)은 `stayDone` (다 머물렀을 때와 낸 뒤 보관했을 때).
+    가게 볼일 중인 손님과 가게 길 (`shopTrip`)은 손님 수 한도에 세지 않는다 (`tickSpawn`). 점괘 운은 `startRound`의 luck (`shops.ts fortuneLuck`, 음수면 `games.ts`가 이길 몫을 짐으로), 음료·뒤뚱 걸음은 `monsters.ts speedOf`.
+    다듬기 (defs `SHOP_URGE`·`URGE_SHOPS`·`URGE_MENU`·`HUNGER`·`FORTUNE`·`SALON`·`SPRING`·`TIP_TRAIT`): `finishRound`가 `shops.ts urgeAfter`로 마음을 남기고 (점괘대로면 'fortuneTrue'·'fortuneCurse' 반응),
+    `afterReact`는 달래기·축하 마음이면 `SHOP_URGE.leaveSeat`로 자리를 털고 `goShopping(m, true)`. `shopWant`는 `hungerOf`·`urgeOf`·꽃 (`giftTarget`: 시무룩한 친구 → 단체 놀이 친구)을 본다.
+    효과: 점괘 `rollFortune(rng, 입담)`, 미용실 `salonSparkleSec(state)` (반짝이는 동안 진 판 기분 하락 × `SALON.moodLossScale`: `sparkling`), 온천 `springBonus(기분)`,
+    식당 배 터짐 `flop` (lying + 근처 손님 monsterSpectate 'flopWatch') → `getUp` ('stuffedUp', `FOOD_LIKE.waddle`). 남길 코인 `shopReserve(state, m, homeward)` (처음 지갑 `startWallet`의 `SHOP_VISIT.reserveLow`).
+  - 열림 `shops.ts shopIsOpen(state, s)` (지었고·주인·놓여 길로 이어짐, 넷째 묶음 `debt.ts shopOpen`과 다른 함수), 까닭 `shopIdleReason` ('stored'·'road'·'owner'), 값 `shopPrice`·`shopPriceRange`·`accessoryPrice`,
+    점 `shopCounterPt`·`shopQueuePt`·`shopSlotPt`·`shopSlotLook` (트럭은 트럭 둘레), 놀이기구 화면 `rideProgress`·`carouselAngle`·`ferrisAngle`.
+  - API: `buy(s)`·`place(s, cell)` (짓기 = 주인이 같이 온다), `shopOpen(s)`·`shopBuyCost`·`shopLockReason`·`shopUpgradeCost`·`upgradeShop`·`assignShop(staff, s|null)` (`assign(staff, booth)`은 가게를 비운다, 쉬는 진행자 = `staff.ts isIdle`),
+    `autoPlace(key, spread, near)`, 개발용 `devOpenShop(s, near)`·`devVisitShop(id, s, home)`, `dev.ts devShops(sim, only?)` (주소 `?shops=1`·`?shops=snack_stall,carousel`).
+  - 이벤트: shopVisit·shopServed (price, coinsChanged도)·shopConsumed (react: 'stuffed'·'innWake' …, 손에 든 것을 다 먹으면 react null)·giftGiven·photoTaken (first)·tip·rideStarted·rideFinished·truckStopped, buildingUpgraded의 id에 ShopId.
+  - sim-check: 불변식 `checkShops` (가게 상태 ↔ 손님 칸, 트럭은 걸을 수 있는 길 위, 숨음, 사진첩), selftest 6h `shopTests` (데이터·그림 meta, 장신구 가게 → 전당포, 여관, 사진첩, 꽃 선물, 놀이기구, 트럭·길 지우기,
+    다 있는 마을 30분 장부·남길 코인·가게 몫·저장 왕복, 보관하기·옮기기·주인 바꾸기, 저장 5 → 6, `shopFeelTests`: 마음·배고픔·여관·꽃, 점괘 등급, 미용실, 온천, 배 터짐, 팁, 가게 길), `--shops` (그 시험만),
+    `--auto` 촌장이 회관 레벨마다 가게를 `--shop-quota` (기본 1,3,5,7,9)곳까지 짓고 (`--no-shops` 비교) 코인 흐름 (참가비·가게·진행자 팁·떠날 때 팁, 가게 5곳 뒤 창)·가게 들름을 찍는다.
+    `--json` (시드마다 `@@{…}` 한 줄: 여러 프로세스 결과 합치기), `--why` (손님 수 한도에 세는 시간·떠난 까닭).
 - 개발용: `sim/dev.ts devOpenAll(sim)` = 모든 땅·부스를 열고 (큰 것부터 길까지 이어 자동 배치 `devPlaceAll`), 그림 있는 진행자를 다 고용, 전당포·은행·일터도 끝까지, 재료는 창고 반 (주소 `?all=1`, sim-check). `devAllLand(sim)` = 땅을 다. `devGiveGoods(sim)` = 간식·응원 도구 몇 개씩.
   `devBroke` (주소 `?broke=1`: 넷째 묶음 건물 레벨 1·금고 2000·손님 지갑을 거의 비게), `devSeedDebtors(sim, n)` (`?debtors=N`: 일터에 채무자 n), `devAccessories` (`?acc=1`: 모든 손님에게 장신구 셋).
   주소 `?unlockAll=1` = `?all=1` + `devGiveGoods` (저장하지 않는다). 개발 서버 콘솔 `mpv.setSpeed(n)`으로 배속을 바꾼다 (스크린숏: 빠르게 손님을 모았다가 천천히 찍기).
@@ -186,6 +216,35 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   (남쪽 변은 아래 끝을 변에 맞추고, 북·동·서 변은 가진 땅 쪽으로 조금 삐져나온다), 띠마다 떠도는 구름이 바람 따라 흐르다 안개가 옅은 곳에서 흐려진다.
   땅을 사면 그 조각 안개가 가운데부터 걷히고 덮던 구름이 양옆으로 갈라져 흩어진다 (+ 반짝이), 새 가장자리 구름은 조금 뒤 피어난다.
 - 효과(`fx.ts`): 코인 튀기기(`items/coin`), 색종이(`fx/fx_confetti` 여러 색으로 tint), 반짝이(`fx/emote_sparkle` 작게), 먼지(`fx/fx_puff`), 떠오르는 숫자(+12, 둥근 굵은 글꼴, 흰 테두리). 대박이면 크게.
+- 다섯째 묶음 화면: world.ts가 단체 놀이 다음·손님 전에 이 차례로 돌린다 (손님 몸을 맡기니): `shops.ts` → `shopsFood.ts` (안에서 `truck.ts`) → `rides.ts` → `rest.ts`. 모두 sim은 읽기만, 이벤트는 스스로 듣는다.
+  `view/shops.ts ShopsView(sim, {objects, floor})` — 놓인 가게마다 `SHOP_LAYOUT.parts` 그림, 가게 주인 (`ownerNode(s)`, 숨쉬기), 그림 조각 `shopParts(s)` (다른 화면이 주인 몸짓·그림 zIndex를 고친다).
+  회전목마·관람차는 주인만 여기서 (그림은 `rides.ts`). 누르기 `hitTest` → `onTapPlaced(Placed.id)` → UI `showShop`. `BuildingsView`는 가게를 세우지 않는다. 짓기 유령 (`buildMode.ts ghostParts` 'shop': 그림 묶음까지, 트럭 차고는 트럭).
+  `view/shopsFood.ts ShopLifeView({sim, layers: {objects, shadows, effects}, fx, shops, monsters})` — 먹거리·꾸미기·선물 가게 (`FOOD_SHOPS` 8곳): 주인 몸짓 (살랑·톡·두리번, 바쁘면 통통, 팔면 톡),
+  산 것이 주인 손에서 손님 손으로 (`shopsFx.ts Flights`, 그동안 손에 든 것은 `holdHeld`로 숨김, 손님 코인은 주인에게), 장신구는 몸 그 자리로 (`holdAccessory`),
+  식당: 테이블 의자에 앉힘 (뒤 의자 = 테이블 뒤, 앞 의자 = 들어 올려 테이블 앞), 접시가 테이블로·먹을수록 줄어듦·냠냠, 배 터짐 (shopConsumed 'stuffed') = 테이블 옆에 벌러덩 (sim `Monster.lying`이 0이 되면 일어남),
+  미용실: 문으로 들어가며 흐려지고 주인도 들어가 창에서 싹둑 반짝·털 뭉치, 나오면 반짝 와르르. 꽃 선물 (giftGiven) = 꽃다발이 친구 손으로, 닿으면 둘 다 하트·꽃잎. 굴뚝 연기·진열창 반짝.
+  누르기 `hitTest(wx, wy)` = 아이스크림 트럭 (world.ts tap이 손님 바로 다음에).
+  `view/truck.ts TruckView` — 트럭 그림 (sim `ShopState.truck`을 부드럽게 따라감, 통통·살랑·좌우 뒤집기, 배기 먼지·음표), 서면 꾸벅·음표 말풍선·창 속 아저씨가 쏙 (창 모양 가리개),
+  팔면 아저씨 톡·아이스크림이 창에서 손님 손으로, 차고에 서 있으면 (길 없음) 꾸벅꾸벅 졸음. 따라가는 손님은 종종걸음, 트럭 앞줄 손님은 그림만 조금 아래·옆으로 (창을 가리지 않게, sim 자리는 길 칸 안 그대로),
+  뒷줄 손님은 옆으로 더 벌린다 (트럭 몸통 뒤에 겹쳐 숨지 않게). 차고: 주차판 (그림자층, 양 끝 분홍 줄무늬)과 표지판 위 아이스크림 그림 (트럭이 나가 있어도 트럭 자리로 읽히게).
+  손님 (`monsterView.ts`): 손에 든 것 `view/held.ts HeldView` (Monster.held: 먹으며 걷기·홀짝·인형 꼭 안기, 몇 입마다 냠냠 이모트·부스러기: `heldBeat`), `hidden`이면 안 그린다 (누를 수도 없다),
+  미용실 반짝이 (buffs.sparkleSec), 음료 걸음 (buffs.speed > 1: 발밑 먼지), 배 터진 뒤 뒤뚱 걸음 (buffs.speed < 1: 좌우로 크게 기우뚱). world.ts: tip = 손님 → 진행자 코인.
+- 다섯째 묶음 놀이기구·쉼·재미 가게 화면 (world.ts가 shops.ts·shopsFood.ts 다음, 손님 전에 돌린다. 둘 다 sim은 읽기만, 이벤트는 스스로 듣는다):
+  `view/rides.ts RidesView(sim, {objects, effects}, fx, monsters, shops)` — `update(dt, view)`·`hitTest(wx, wy)` (Placed.id, world.ts tap이 가게 다음에)·`destroy()`.
+  회전목마: 판 그림 하나를 같은 텍스처의 네모 조각으로 나눠 물체층 여러 겹 (통째 그림 = 판 뒤 끝 → 가운데 기둥 = 판 가운데 y → 옆 기둥 → 앞 기둥 → 지붕 = 판 앞 끝:
+  `CAROUSEL_SLICES`, 뒤쪽 목마·탄 손님은 기둥·지붕 뒤로). 목마는 `carouselAngle` 타원 + 엇갈린 오르내림 (빠르기 6p(1−p)), 옆으로 돌 때 좁아짐, 막대는 판에서 지붕 아래 끝 곡선(`CANOPY_EDGE`)까지 코드로.
+  탄 손님 = 자리 i의 목마 안장 (`HORSE_SADDLE`, 몸 0.7배, 올라탈 때·내릴 때 0.32초 톡). 도는 동안 지붕 꼭대기 음표, 출발(rideStarted)하면 주인 통통 (shops.ts 주인 그림 y만).
+  관람차: 바퀴 (돌린다) → 다리 그림 (앞 버팀대·표 파는 집) → 탄 손님 (다리 base − 1) → 곤돌라 (base − 0.5, 늘 똑바로 살랑): 곤돌라 창이 그림에서 비어 있어 탄 손님 머리·어깨가 창으로 보인다
+  (`GONDOLA_WINDOW`, 몸 = 창 높이 × 2.05 (0.76배까지), still). 다리 그림의 표 파는 집은 조각 (`FERRIS_BOOTH`)으로 곤돌라 앞에 한 번 더 (맨 아래 곤돌라가 집 안에 매달려 보이지 않게). 타고 내릴 때 땅·곤돌라에서 퐁 (먼지), 꼭대기를 지나면 한 바퀴에 한 번 반짝·하트. 탄 손님 그림자는 숨긴다.
+  `view/rest.ts RestView(sim, {objects, effects}, fx, monsters, shops)` — 여관: 그림을 문 앞 디딤돌 줄 뒤로 (`INN_Z_UP`, shops.ts 그림의 zIndex만), 들고 날 때 문이 잠깐 어둡게 열림,
+  자는 방 창 (`INN_WINDOWS`, 자리 i = 창 i)은 창유리 픽셀만 골라 밤빛으로 칠한 덮개가 천천히 (`ridesKit.keyedTexture`), 꺼진 창에서 졸음 표시(fx/emote_sleep).
+  온천: 발자국 안·그림 아래 끝 위의 손님은 그림 앞으로 (몸 맡기기 dy·lift: 앞뒤만), 물(`SPRING_WATER`)에 들어가면 몸 높이 44%만큼 가라앉고 물낯 위만 보이는 가리개 (세계 좌표 네모, 손님 node.mask),
+  녹아내림 (납작·넓적·흔들, 1.1초 뒤 기쁜 포즈), 물결 고리 (몸 바로 뒤, 그 높이의 물 폭 안으로 줄여 둘레 돌 위로 넘지 않게; 물에서 나와 가리개를 풀면 가리개 그림을 비운다: 안 그러면 하얀 네모), 가끔 하트·음표, 김 (fx_puff 크림색, 손님이 있으면 더). 점집: 그림을 탁자 다리 줄 뒤로 (`FORTUNE_Z_UP`, 손님은 탁자 오른쪽·점쟁이는 왼쪽),
+  점 보는 동안 수정구슬 연보라 원·반짝, 손님 기울기·점쟁이 살랑, shopServed = 점괘 종이가 구슬에서 손님 손으로 (monsterView `holdHeld`·`heldAt`, 닿으면 대길·길 반짝, 흉 회색 김).
+  사진관: 찍기 1.3초 전 (m.timer) 기쁜 포즈로 톡·사진사 통통, photoTaken = 렌즈 앞 하얀 납작 별 (빛 번짐 없음) + 배경판이 잠깐 하얗게 + 사진이 손으로 (첫 사진이면 반짝·하트).
+  공용 도구 `view/ridesKit.ts`: `artFrame`·`framePt` (그림 px ↔ 세계), `sliceSprite`·`destroySlice` (텍스처 조각), `keyedTexture` (색으로 고른 픽셀 덮개), `Borrow` (그림자·이모트 높이·가리개를 그 프레임만, 안 빌리면 돌려놓음),
+  가게 화면 넷이 같이 쓰는 `view/shopsFx.ts`: `Bits` (떠오르는 작은 그림: 졸음·음표·김·반짝, `update(dt, scale)`), `Flights` (손님 손·테이블로 날아가는 물건, 닿을 곳을 매 프레임 다시 읽는다).
+  손님 누르기·카메라 따라가기·머리 점 (`MonsterView.hits`·`centerX/Y`·`headX/Y`)은 그린 자리 (몸 맡기기로 옮기거나 띄운 몸: 곤돌라·목마·식당 의자), 크게 기운 몸은 이모트가 머리 쪽으로.
 - 넷째 묶음 화면: 장신구 `view/accessory.ts` — `AccessoryLayer` (몸 그릇의 자식, (0,0) = 발 기준점, `setAccessories(list)`·`setPose(species, pose)`·`setScaleK(k)`, 뒤에 그릴 것은 `back` 그릇),
   `accessoryAnchors(species, pose)` = 자리마다 캔버스 점과 자리 기준 폭 (`data/accessoryAnchors.ts`: `MEASURED` = `tools/accessory-anchors.ts`가 원본 그림 알파에서 잰 27종 × 4포즈 (`@generated` 사이만 다시 쓴다),
   `FIXES` = 손으로 고친 종, 합친 것 `ACCESSORY_ANCHORS`). 장신구마다 붙이는 법 `ACCESSORY_FIT` (그림 안 붙는 점 ax·ay, 폭 비율, 옮기기·기울기), 둘을 합친 자리는 `accessoryPlacement(종, 포즈, key, slot)`
@@ -250,6 +309,18 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   진행자 고르기 판 끝에는 늘 '새 진행자 고용하기'. 닫힌 부스 패널은 경고 바로 아래에 진행자 자리 줄을 먼저 보인다.
 - 한글 줄바꿈은 낱말 단위 (`.mpv-ui { word-break: keep-all }`).
 - 아이템 그림은 `assets/art/items/<key>.webp`를 <img>로 (없으면 글자).
+- 다섯째 묶음 UI: 짓기 탭 묶음 `store` '가게'와 `ride` '놀이기구' (회전목마·관람차, 묶음 띠는 4×2), 옛 'shop' 묶음 이름은 '건물'. 가게 카드 (`panels/build.ts shopCard`) = 하는 일·값·효과·주인·짓기·업그레이드·자리,
+  그림을 누르면 가게 시트. `openBuild(category, key)`는 그 카드로 굴려 반짝. `catalogPic(key)` (트럭 = racers 그림).
+  가게 시트 `ui/panels/shop.ts ShopPanel` (`showShop(s)`, 지도에서 가게·트럭·놀이기구를 누르면): 상태 줄 (손님 맞는 중·쉬는 까닭·트럭이 어디), 이번 매상·이번 손님 (이번에 마을을 연 뒤)·지금 손님 (+ 지금까지),
+  가게 주인 카드 (`openShopOwnerMenu`: `assignShop`, 바꾸면 비는 부스 경고·쉬게 하기·새 진행자 고용, 부스를 멈추거나 다른 가게를 닫는 사람은 아래로), 가게마다: 자리 (식당·여관·온천·미용실·사진관, 잠긴 자리 'Lv.N부터'), 놀이기구 진행 막대·목마·곤돌라,
+  트럭 길 지도 (SVG: 차고·마을 입구·트럭·다음 정류장), 장신구 진열 (값·'Lv.N부터'), 꽃 선물, 최근 사진 줄 → 사진첩, 메뉴 (값·좋아하는 종·효과·오는 손님), 지금 손님 (누르면 손님 카드)·최근 판매, 레벨·업그레이드·자리.
+  짓기 전이면 하는 일·잠긴 까닭·값·[짓고 놓기]. 시트가 열리면 카메라가 가게를 시트 위에 (`syncInsets`). 놓인 가게의 시트는 58% (짧은 폰 52%: `.mpv-shopsheet`),
+  짧은 폰 (높이 720 아래)에서는 메뉴 덩이 (`.mpv-shop-menu`)를 머리 카드 바로 아래로 올리고 주인 칸의 능력치 풀이를 뺀다 (flex order).
+  글자 `ui/shopText.ts` (DOM 없음: 효과·오는 손님 `shopEffectText`·`SHOP_WHO` = sim 다듬기 규칙을 글로, 손님 볼일 `shopPhaseText`, 레벨 `shopLevelText`·`shopNextText`),
+  이 화면을 연 뒤의 기록 `ui/shopLog.ts ShopLog` (shopServed·tip·monsterReact·giftGiven: 이번 매상·손님마다 산 것·팁·점괘 등급 (대길·길·흉)·꽃 선물. sim은 이력을 두지 않는다).
+  사진첩 `ui/panels/album.ts` (도감 셋째 탭 '사진 n/27': 종마다 폴라로이드 = 배경판 + 기쁜 포즈, 아직 없는 종은 실루엣·만난 적 없으면 '?'). 도감 반응 줄에 '가게·놀이기구'.
+  손님 카드: 가게 줄 (손에 든 것·미용실 반짝이·음료 걸음·점괘·준 팁·최근 산 것 넷), 상태 줄에 가게 볼일·꽃 줄 친구 이름 (`labels.ts monsterStatus`).
+  주민 탭: '가게 주인 자리' 칸, 가게 주인은 '○○ 가게 주인' (`labels.ts staffWhere`), 쉬는 진행자 = `isIdle`. 목표 칩: 주인 없는 가게 → 주인 세우기 (쉬는 진행자가 없으면 고용, 가게마다 한 번 누르면 다시 조르지 않는다: `Seen.shopOwner`), 부스 셋 뒤 첫 가게 둘 (싼 것, 서로 다른 묶음).
 - 넷째 묶음 UI: 전당포·은행·일터를 누르면 `ui/panels/debt.ts` 시트 (`PawnshopPanel`: 맡긴 장신구 줄·진열장 컬렉션 칸 (못 모은 것은 실루엣 '???')·레벨, `BankPanel`: 대출·빚 있는 손님·금고,
   `WorkyardPanel`: 일하는·기다리는 채무자 줄 (빚 게이지·남은 시간·응원/간식 버튼)·나온 재료 (`DebtLog`: 화면을 연 뒤 laborOutput)·빚 걸기 판 상태). 짓기 전에는 설명·비용·짓기 버튼 먼저.
   손님 카드: 장신구·맡긴 장신구(되찾는 값)·빚 칩, 그림 위에 장신구 (`pics.ts dressPic`: `accessoryPortrait` 비율로 <img> 겹치기, 몸 뒤 장신구는 뺀다), 파산하면 카드가 어둡게 가라앉고 먹구름·혼잣말·빚 게이지.

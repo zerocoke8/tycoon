@@ -176,6 +176,22 @@ function drawFallback(key: FallbackKey): Graphics {
       g.roundRect(-6, -24, 12, 28, 6).fill(0xf3d36a).stroke({ color: OUTLINE, width: 4 });
       g.circle(0, 14, 6.5).fill(0xf3d36a).stroke({ color: OUTLINE, width: 4 });
       break;
+    case 'emote_sleep':
+      // 초승달 대신 'z' 둘 (졸림).
+      for (const [x, y, s] of [
+        [-6, 4, 1],
+        [10, -12, 0.7],
+      ] as const) {
+        g.moveTo(x - 8 * s, y - 8 * s).lineTo(x + 8 * s, y - 8 * s).lineTo(x - 8 * s, y + 8 * s).lineTo(x + 8 * s, y + 8 * s).stroke({ color: OUTLINE, width: 8 * s, cap: 'round', join: 'round' });
+        g.moveTo(x - 8 * s, y - 8 * s).lineTo(x + 8 * s, y - 8 * s).lineTo(x - 8 * s, y + 8 * s).lineTo(x + 8 * s, y + 8 * s).stroke({ color: 0x9fb0e8, width: 4 * s, cap: 'round', join: 'round' });
+      }
+      break;
+    case 'emote_yum': {
+      const heart = (gg: Graphics): Graphics => gg.circle(-7, -4, 8).circle(7, -4, 8).poly([-14.6, -1, 14.6, -1, 0, 14]);
+      heart(g).stroke({ color: OUTLINE, width: 5, join: 'round' });
+      heart(g).fill(0xf0a04b);
+      break;
+    }
   }
   return g;
 }

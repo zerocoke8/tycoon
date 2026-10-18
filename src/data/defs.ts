@@ -756,6 +756,374 @@ export const DEBT_MATCH = {
   maxWaitSec: 150,
 } as const satisfies { booths: readonly GroupBoothId[]; watchOnly: readonly GroupBoothId[]; [k: string]: unknown };
 
+// ── 다섯째 묶음: 손님이 돈을 쓰는 가게들 (DESIGN 3.8) ─────────────────────────────
+
+/** 가게 (배치형 건물, 하나씩). 순서 = 짓기 목록 순서 (먹거리 → 꾸미기 → 쉼 → 재미 → 선물). 모양은 catalog.ts SHOP_LAYOUT. */
+export type ShopId =
+  | 'snack_stall'
+  | 'drink_stand'
+  | 'bakery'
+  | 'restaurant'
+  | 'icecream_truck'
+  | 'accessory_shop'
+  | 'beauty_salon'
+  | 'inn'
+  | 'hot_spring'
+  | 'fortune_teller'
+  | 'carousel'
+  | 'ferris_wheel'
+  | 'photo_studio'
+  | 'souvenir_shop'
+  | 'flower_shop';
+export const SHOP_IDS: readonly ShopId[] = ['snack_stall', 'drink_stand', 'bakery', 'restaurant', 'icecream_truck', 'accessory_shop', 'beauty_salon', 'inn', 'hot_spring', 'fortune_teller', 'carousel', 'ferris_wheel', 'photo_studio', 'souvenir_shop', 'flower_shop'];
+
+/** 가게 묶음: 먹거리 · 꾸미기 · 쉼 · 재미(점집·놀이기구) · 기념·선물. 손님의 가게 고르기와 짓기 목록이 쓴다. */
+export type ShopCategory = 'food' | 'style' | 'rest' | 'fun' | 'gift';
+export const SHOP_CATEGORIES: Readonly<Record<ShopCategory, { readonly name: string }>> = {
+  food: { name: '먹거리' },
+  style: { name: '꾸미기' },
+  rest: { name: '쉼' },
+  fun: { name: '재미' },
+  gift: { name: '기념·선물' },
+};
+
+/**
+ * 가게에서 파는 것 (그림 items/<key>: 손에 들거나 머리 위에 톡). 기념품(인형)은 objects/plush_<종>, 장신구는 items/acc_* (ACCESSORIES)라 여기 없다.
+ * hold = 들고 다니는 동안 먹는지 (eat: 먹고 마시며 걷기, keep: 들고만 간다).
+ */
+export const SHOP_ITEMS = {
+  food_cotton_candy: { name: '솜사탕', hold: 'eat' },
+  food_skewer: { name: '꼬치', hold: 'eat' },
+  food_waffle: { name: '와플', hold: 'eat' },
+  food_lemonade: { name: '레모네이드', hold: 'eat' },
+  food_cocoa: { name: '코코아', hold: 'eat' },
+  food_croissant: { name: '크루아상', hold: 'eat' },
+  food_cream_bun: { name: '크림빵', hold: 'eat' },
+  food_pasta: { name: '파스타', hold: 'eat' },
+  food_stew: { name: '스튜', hold: 'eat' },
+  food_pancakes: { name: '팬케이크', hold: 'eat' },
+  food_icecream: { name: '아이스크림', hold: 'eat' },
+  bouquet: { name: '꽃다발', hold: 'keep' },
+  photo: { name: '기념사진', hold: 'keep' },
+  fortune_slip: { name: '점괘', hold: 'keep' },
+} as const satisfies Record<string, { name: string; hold: 'eat' | 'keep' }>;
+export type ShopItemId = keyof typeof SHOP_ITEMS;
+
+/**
+ * 가게가 손님에게 주는 것 (산 때, 머무는 가게는 다 머문 뒤): 기분 +, 끈기 +, 걸음 배수 speed (sec초), 운 luck (± sec초, 점집은 goodChance로 +: 등급·크기는 FORTUNE),
+ * 반짝이 sparkleSec (미용실 레벨 1: 레벨·입담은 SALON), 지갑 회복 wallet (처음 지갑의 비율, walletMax까지: 여관), 머무는 시간 연장 visitSec (여관).
+ */
+export interface ShopEffect {
+  readonly mood: number;
+  readonly patience?: number;
+  readonly speed?: { readonly mult: number; readonly sec: number };
+  readonly luck?: { readonly add: number; readonly sec: number; readonly goodChance: number };
+  readonly sparkleSec?: number;
+  readonly wallet?: number;
+  readonly walletMax?: number;
+  readonly visitSec?: number;
+}
+
+/**
+ * 가게 한 줄. service = 손님이 하는 일:
+ *   counter = 계산대에서 사서 들고 간다 (간식·음료·빵·장신구·점괘·기념품·꽃다발),
+ *   stay = 계산대에서 낸 뒤 가게 안 자리에서 stay초 머문다 (식당 테이블·미용실 의자·여관 방·온천 탕·사진관 배경판),
+ *   ride = 계산대(표 파는 곳)에서 낸 뒤 탈것 자리에 타고, 한 바퀴(stay초)를 같이 돈다 (회전목마·관람차),
+ *   truck = 길을 다니는 트럭 앞에서 산다 (아이스크림 트럭).
+ * price[레벨-1] = 기본 값 (코인, 놀이 한판과 비슷하거나 조금 비싸게), menu = 파는 것과 값 배수 k·고르는 무게 w (없으면 서비스만).
+ * slots[레벨-1] = 머무는·타는 자리 수 (catalog.ts 자리 수까지), serviceSec[레벨-1] = 계산대에서 사는 초 (주인 진행이 빠르게),
+ * hold = 산 것을 들고 다니는 초, hidden = 머무는 동안 안 보인다 (여관 방·미용실 안), once = 한 방문에 한 번만.
+ * unlock = 짓는 비용과 회관 레벨, upgrade = 레벨 2·3 비용. owner = 가게 주인 (짓으면 같이 온다, 그림 characters/<art>).
+ */
+export interface ShopDef {
+  readonly name: string;
+  readonly desc: string;
+  readonly category: ShopCategory;
+  readonly service: 'counter' | 'stay' | 'ride' | 'truck';
+  readonly price: readonly number[];
+  readonly menu: readonly { readonly item: ShopItemId; readonly k: number; readonly w: number }[];
+  readonly effect: ShopEffect;
+  readonly slots: readonly number[];
+  readonly serviceSec: readonly number[];
+  readonly stay?: readonly [number, number];
+  readonly hold?: number;
+  readonly hidden?: boolean;
+  readonly once?: boolean;
+  readonly unlock: { readonly coins: number; readonly hall: number; readonly mats?: Partial<Record<MaterialId, number>> };
+  readonly upgrade: readonly { readonly coins: number; readonly mats?: Partial<Record<MaterialId, number>> }[];
+  readonly owner: { readonly art: string; readonly name: string; readonly stats: StaffStats };
+}
+
+const M = (item: ShopItemId, k = 1, w = 1): { item: ShopItemId; k: number; w: number } => ({ item, k, w });
+
+export const SHOPS = {
+  snack_stall: {
+    name: '간식 노점', desc: '솜사탕·꼬치·와플. 들고 걸으며 먹는다 (지면 하나 사 먹고 기운을 차린다)', category: 'food', service: 'counter',
+    price: [9, 10, 11], menu: [M('food_cotton_candy', 1, 1.2), M('food_skewer', 1.2), M('food_waffle', 1.4, 0.8)],
+    effect: { mood: 8, patience: 0 }, slots: [0, 0, 0], serviceSec: [2.4, 2.1, 1.8], hold: 9,
+    unlock: { coins: 90, hall: 1 }, upgrade: [{ coins: 160 }, { coins: 380, mats: { mat_caramel: 2 } }],
+    owner: { art: 'clerk_snack', name: '솜사탕 소년', stats: { pace: 3, charm: 3, welcome: 3 } },
+  },
+  drink_stand: {
+    name: '음료 가판', desc: '레모네이드·코코아. 홀짝 마시면 걸음이 조금 빨라진다', category: 'food', service: 'counter',
+    price: [8, 9, 10], menu: [M('food_lemonade', 1, 1.2), M('food_cocoa', 1.2)],
+    effect: { mood: 6, speed: { mult: 1.15, sec: 45 } }, slots: [0, 0, 0], serviceSec: [2.0, 1.8, 1.6], hold: 7,
+    unlock: { coins: 100, hall: 1 }, upgrade: [{ coins: 170 }, { coins: 400, mats: { mat_lotus: 2 } }],
+    owner: { art: 'clerk_drink', name: '레몬 소녀', stats: { pace: 4, charm: 2, welcome: 3 } },
+  },
+  bakery: {
+    name: '빵집', desc: '크루아상·크림빵. 빵 봉지를 들고 가며 기운이 난다 (끈기 +)', category: 'food', service: 'counter',
+    price: [10, 11, 12], menu: [M('food_croissant'), M('food_cream_bun', 1.2)],
+    effect: { mood: 5, patience: 1 }, slots: [0, 0, 0], serviceSec: [2.6, 2.3, 2.0], hold: 10,
+    unlock: { coins: 160, hall: 2 }, upgrade: [{ coins: 260 }, { coins: 560, mats: { mat_wool: 2 } }],
+    owner: { art: 'clerk_bakery', name: '콧수염 제빵사', stats: { pace: 3, charm: 3, welcome: 3 } },
+  },
+  restaurant: {
+    name: '식당', desc: '파스타·스튜·팬케이크. 바깥 테이블에 앉아 먹고 크게 회복한다 (종마다 좋아하는 메뉴)', category: 'food', service: 'stay',
+    price: [17, 20, 23], menu: [M('food_pasta'), M('food_stew', 0.9), M('food_pancakes', 1.1)],
+    effect: { mood: 18, patience: 1 }, slots: [2, 3, 4], serviceSec: [2.8, 2.5, 2.2], stay: [9, 13], hold: 0,
+    unlock: { coins: 380, hall: 3 }, upgrade: [{ coins: 520 }, { coins: 1000, mats: { mat_veggie: 4 } }],
+    owner: { art: 'clerk_restaurant', name: '국자 아주머니', stats: { pace: 3, charm: 4, welcome: 3 } },
+  },
+  icecream_truck: {
+    name: '아이스크림 트럭', desc: '길을 따라 천천히 다니는 트럭. 멈추면 손님들이 졸졸 모인다', category: 'food', service: 'truck',
+    price: [8, 9, 10], menu: [M('food_icecream')],
+    effect: { mood: 10 }, slots: [0, 0, 0], serviceSec: [1.9, 1.7, 1.5], hold: 8,
+    unlock: { coins: 220, hall: 2 }, upgrade: [{ coins: 360 }, { coins: 720, mats: { mat_jelly: 2 } }],
+    owner: { art: 'clerk_icecream', name: '아이스크림 아저씨', stats: { pace: 3, charm: 3, welcome: 4 } },
+  },
+  accessory_shop: {
+    name: '장신구 가게', desc: '장신구 10종. 이긴 손님이 사서 단다 (나중에 전당포에 맡길 수도…)', category: 'style', service: 'counter',
+    price: [0, 0, 0], menu: [],
+    effect: { mood: 12 }, slots: [0, 0, 0], serviceSec: [3.0, 2.6, 2.2], hold: 0,
+    unlock: { coins: 260, hall: 2 }, upgrade: [{ coins: 420 }, { coins: 900, mats: { mat_pearl: 1 } }],
+    owner: { art: 'clerk_accessory', name: '리본 언니', stats: { pace: 2, charm: 4, welcome: 4 } },
+  },
+  beauty_salon: {
+    name: '미용실', desc: '털·머리 다듬기. 들어갔다 반짝이며 나온다 (한동안 반짝이)', category: 'style', service: 'stay',
+    price: [15, 17, 19], menu: [],
+    effect: { mood: 14, sparkleSec: 60 }, slots: [1, 2, 2], serviceSec: [1.6, 1.4, 1.2], stay: [6, 8], hidden: true, once: true,
+    unlock: { coins: 420, hall: 4 }, upgrade: [{ coins: 560 }, { coins: 1100, mats: { mat_feather: 2 } }],
+    owner: { art: 'clerk_salon', name: '빗질 청년', stats: { pace: 4, charm: 3, welcome: 2 } },
+  },
+  inn: {
+    name: '여관', desc: '하룻밤 푹 자고 오래 머문다 (끈기·지갑 조금 회복). 창에 불이 꺼지고, 나올 땐 졸린 얼굴', category: 'rest', service: 'stay',
+    price: [28, 32, 36], menu: [],
+    effect: { mood: 10, patience: 3, wallet: 0.25, walletMax: 30, visitSec: 150 }, slots: [2, 3, 4], serviceSec: [2.2, 2.0, 1.8], stay: [40, 55], hidden: true, once: true,
+    unlock: { coins: 600, hall: 4 }, upgrade: [{ coins: 760 }, { coins: 1400, mats: { mat_mugwort: 2 } }],
+    owner: { art: 'clerk_inn', name: '열쇠 할머니', stats: { pace: 2, charm: 4, welcome: 4 } },
+  },
+  hot_spring: {
+    name: '온천', desc: '따끈한 물에 몸 담그기. 녹아내린 얼굴로 기분이 크게 오른다', category: 'rest', service: 'stay',
+    price: [13, 15, 17], menu: [],
+    effect: { mood: 22 }, slots: [2, 3, 4], serviceSec: [1.8, 1.6, 1.4], stay: [10, 14], once: true,
+    unlock: { coins: 400, hall: 3 }, upgrade: [{ coins: 540 }, { coins: 1050, mats: { mat_cloudpuff: 2 } }],
+    owner: { art: 'clerk_spring', name: '온천 할아버지', stats: { pace: 2, charm: 4, welcome: 3 } },
+  },
+  fortune_teller: {
+    name: '점집', desc: '점괘 한 장. 한동안 운이 조금 좋아지거나 나빠진다 (신남·시무룩)', category: 'fun', service: 'counter',
+    price: [8, 9, 10], menu: [M('fortune_slip')],
+    effect: { mood: 3, luck: { add: 0.04, sec: 150, goodChance: 0.7 } }, slots: [0, 0, 0], serviceSec: [3.2, 2.8, 2.4], hold: 4, once: true,
+    unlock: { coins: 120, hall: 1 }, upgrade: [{ coins: 200 }, { coins: 450, mats: { mat_foxbead: 1 } }],
+    owner: { art: 'clerk_fortune', name: '수정구슬 언니', stats: { pace: 2, charm: 4, welcome: 4 } },
+  },
+  carousel: {
+    name: '회전목마', desc: '목마가 빙글빙글. 탄 손님이 신난다', category: 'fun', service: 'ride',
+    price: [8, 9, 10], menu: [],
+    effect: { mood: 12 }, slots: [2, 3, 4], serviceSec: [1.4, 1.2, 1.0], stay: [14, 14],
+    unlock: { coins: 280, hall: 2 }, upgrade: [{ coins: 420 }, { coins: 880, mats: { mat_bell: 1 } }],
+    owner: { art: 'ride_carousel', name: '종소리 아저씨', stats: { pace: 3, charm: 4, welcome: 3 } },
+  },
+  ferris_wheel: {
+    name: '관람차', desc: '곤돌라가 천천히 돌며 손님이 위로. 마을이 한눈에', category: 'fun', service: 'ride',
+    price: [11, 13, 15], menu: [],
+    effect: { mood: 16 }, slots: [3, 4, 6], serviceSec: [1.4, 1.2, 1.0], stay: [24, 24], once: true,
+    unlock: { coins: 650, hall: 5 }, upgrade: [{ coins: 800 }, { coins: 1500, mats: { mat_feather: 2 } }],
+    owner: { art: 'ride_ferris', name: '관람차 소녀', stats: { pace: 3, charm: 3, welcome: 4 } },
+  },
+  photo_studio: {
+    name: '사진관', desc: '배경판 앞에서 포즈, 찰칵! 종마다 첫 사진이 사진첩에 모인다', category: 'gift', service: 'stay',
+    price: [12, 13, 14], menu: [M('photo')],
+    effect: { mood: 10 }, slots: [1, 1, 1], serviceSec: [1.6, 1.4, 1.2], stay: [3.5, 4.5], hold: 6, once: true,
+    unlock: { coins: 320, hall: 3 }, upgrade: [{ coins: 480 }, { coins: 950, mats: { mat_ink: 2 } }],
+    owner: { art: 'clerk_photo', name: '찰칵 청년', stats: { pace: 3, charm: 3, welcome: 4 } },
+  },
+  souvenir_shop: {
+    name: '기념품 가게', desc: '손님 인형·기념품. 떠나는 길에 들러 인형을 안고 기분 좋게 간다', category: 'gift', service: 'counter',
+    price: [14, 16, 18], menu: [],
+    effect: { mood: 10 }, slots: [0, 0, 0], serviceSec: [2.4, 2.1, 1.8], hold: 30, once: true,
+    unlock: { coins: 400, hall: 4 }, upgrade: [{ coins: 540 }, { coins: 1050, mats: { mat_pebble: 2 } }],
+    owner: { art: 'clerk_souvenir', name: '인형 할머니', stats: { pace: 2, charm: 4, welcome: 4 } },
+  },
+  flower_shop: {
+    name: '꽃집', desc: '꽃다발. 같이 논 친한 손님에게 걸어가 건넨다 (둘 다 하트)', category: 'gift', service: 'counter',
+    price: [10, 11, 12], menu: [M('bouquet')],
+    effect: { mood: 4 }, slots: [0, 0, 0], serviceSec: [2.2, 2.0, 1.8], hold: 30,
+    unlock: { coins: 180, hall: 2 }, upgrade: [{ coins: 300 }, { coins: 620, mats: { mat_dew: 1 } }],
+    owner: { art: 'clerk_flower', name: '꽃다발 아가씨', stats: { pace: 3, charm: 4, welcome: 3 } },
+  },
+} as const satisfies Record<ShopId, ShopDef>;
+
+/** 가게 한 줄 (선택 칸까지 한 모양으로). */
+export function shopDef(s: ShopId): ShopDef {
+  return SHOPS[s];
+}
+
+/** 가게 주인의 역할 이름 (진행자 자리 하나: 놀이부스의 '진행자'처럼). */
+export const SHOP_OWNER_ROLE = '가게 주인';
+
+/**
+ * 손님이 가게에 들르는 마음 (sim/shops.ts shopWants·chooseShop). decide 한 번에 chance로 가게를 떠올린다 (기분·흐름이 바꾼다: 지면 먹거리, 따면 장신구·놀이기구),
+ * 가게를 다녀온 뒤 cooldownSec 동안은 다시 안 가고, 한 방문에 maxPerVisit곳까지. 아직 한판도 안 한 손님은 newcomer 배수.
+ * 낸 뒤에도 남길 코인 = 가장 싼 한판 × min(남은 끈기, reserveRounds)과 처음 지갑 × reserveLow 가운데 큰 것 (가게 때문에 돈이 떨어져 전당포·은행으로 가지 않게,
+ * 떠나는 길의 기념품은 0). 거리 무게 = 1 + 길 칸 / nearCells (부스 고르기와 같이).
+ * queueCap = 줄이 이보다 길면 안 간다, queueGiveUpSec = 줄에서 이만큼 기다리면 다른 걸 한다.
+ * souvenirChance = 떠나기 전 기념품 가게에 들를 확률 (딴 적이 있거나 지갑에 souvenirWallet 이상 남았고 기분 souvenirMood 이상, 대박이면 × 1.5, 남은 코인 souvenirWallet마다 + souvenirChance × 0.5).
+ */
+export const SHOP_VISIT = {
+  chance: 0.6,
+  lowMoodBonus: 0.12,
+  streakBonus: 0.05,
+  cooldownSec: 25,
+  maxPerVisit: 4,
+  newcomer: 0.15,
+  reserveRounds: 3,
+  reserveLow: 0.55,
+  nearCells: 24,
+  queueCap: 4,
+  queueGiveUpSec: 60,
+  souvenirChance: 0.25,
+  souvenirMood: 55,
+  souvenirWallet: 60,
+  /** 흐름(streak)은 한판마다: 이기면 +1 (대박 +2), 지면 -1, 그 사이로 줄어든다 (최대 ±4). */
+  streakMax: 4,
+} as const;
+
+/**
+ * 종마다 좋아하는 메뉴 (식당·간식 고르기 무게 ×favorite, 식당에서 먹으면 기분 +favoriteMood, stuffedChance로 배 터지게 먹고 드러눕는다).
+ * 미식가는 stuffedChance × 2. 빠진 종은 무작위.
+ */
+export const SPECIES_FOOD: Partial<Record<SpeciesId, ShopItemId>> = {
+  dragon: 'food_skewer',
+  crab: 'food_stew',
+  goblin: 'food_stew',
+  pudding: 'food_pancakes',
+  radish: 'food_cream_bun',
+  kabocha: 'food_pancakes',
+  bat: 'food_cotton_candy',
+  ghost: 'food_cotton_candy',
+  turtle: 'food_pasta',
+  otter: 'food_skewer',
+  octopus: 'food_pasta',
+  jellyfish: 'food_lemonade',
+  whale: 'food_icecream',
+  dokkaebi: 'food_skewer',
+  mole: 'food_croissant',
+  golem: 'food_stew',
+  cloud: 'food_cotton_candy',
+  owl: 'food_cocoa',
+  sheep: 'food_waffle',
+  moonrabbit: 'food_cream_bun',
+  mimic: 'food_waffle',
+  gumiho: 'food_pasta',
+  haetae: 'food_croissant',
+  ssukddeok: 'food_cocoa',
+  raccoon: 'food_pancakes',
+  sprout: 'food_lemonade',
+  cactus: 'food_icecream',
+};
+/**
+ * 배 터지게 먹기 (식당): 좋아하는 메뉴면 stuffedChance (미식가 × 2), 미식가는 다른 메뉴도 foodieStuffed. 배 터진 손님은 stuffedSec초 테이블 옆에 드러눕고
+ * (Monster.lying: 화면이 눕힌다), 근처 손님이 watchChance로 웃거나 걱정한다 (watchRadius 안). 일어나면 waddle초 동안 뒤뚱뒤뚱 (걸음 × mult).
+ */
+export const FOOD_LIKE = { favorite: 3, favoriteMood: 8, stuffedChance: 0.45, foodieStuffed: 0.2, stuffedSec: 3.6, watchRadius: 320, watchChance: 0.55, waddle: { mult: 0.8, sec: 16 } } as const;
+
+/**
+ * 장신구 가게 (ACCESSORIES를 판다): 값 = 장신구 값(전당포가 쳐 주는 값의 가운데) × markup[레벨-1]. 레벨 1은 귀하지 않은 것만, 2는 실크햇까지, 3은 다.
+ * 손님은 비어 있는 몸 자리 (단 것·맡긴 것이 없는 자리)의 장신구만 산다. 산 장신구의 값(value) = 그 값 범위 가운데 (전당포에 맡기면 그만큼).
+ * wantWin = 이긴 흐름이거나 대박을 낸 손님이 사고 싶은 배수 (그 밖은 × other).
+ */
+export const ACCESSORY_SHOP = {
+  markup: [1.4, 1.35, 1.3],
+  rareFrom: { acc_tophat: 2, acc_mini_crown: 3, acc_pearl_necklace: 3 } as Partial<Record<AccessoryId, number>>,
+  wantWin: 3,
+  other: 0.3,
+} as const;
+
+/** 사진관 사진첩: 종마다 처음 찍은 사진 (GameState.photoAlbum). 사진첩에 없는 종은 사진관에 가고 싶은 마음 × newSpecies. */
+export const PHOTO = { newSpecies: 2.5 } as const;
+
+/**
+ * 꽃집: 꽃다발을 산 손님이 친한 손님(같은 판에서 논·같은 부스에 앉은 손님, Monster.friends)에게 걸어가 건넨다: 둘 다 기분 +mood, 하트.
+ * 친한 손님이 마을에 없으면 꽃집에 가지 않는다. giveUpSec 안에 못 닿으면 그냥 들고 다닌다. reach = 건네는 거리 (세계 px).
+ */
+/**
+ * 꽃 고르기: 꽃집 무게 want (주는 손님 기분 minMood 이상, 시무룩한 친구가 있으면 comfortMinMood부터), 단체 놀이에서 같이 논 친구 (Monster.groupFriends)가 있으면 × group,
+ * 기분 sadBelow 아래인 친구가 있으면 × comfort (그 친구에게: 위로 꽃, 받은 손님 기분 +comfortMood). 건넬 친구는 시무룩한 친구 → 단체 놀이 친구 → 한자리에 있는 (놀거나 줄·쉬기·구경 중인) 가까운 친구.
+ */
+export const FLOWER = { mood: 10, giveUpSec: 40, reach: 90, friendsMax: 6, want: 2.4, minMood: 50, comfortMinMood: 35, group: 1.6, comfort: 1.8, sadBelow: 55, comfortMood: 16 } as const;
+
+/**
+ * 진행자 팁: 크게 딴 손님 (받은 코인 minPayout 이상이고 건 코인의 bigMult배 이상, 또는 대박·항아리 축제)이 chance(대박 jackpotChance)로
+ * 받은 코인의 share를 진행자에게 (1~max코인, 마을 수입: 진행자는 마을 주민이다). 빚 걸기 판의 채무자는 주지 않는다.
+ */
+export const TIP = { minPayout: 20, bigMult: 3, chance: 0.4, jackpotChance: 0.7, share: 0.06, max: 20, reactChance: 0.5 } as const;
+/** 성격마다 팁 확률 배수 (흥부자는 잘 주고 겁쟁이는 망설인다, 0.95까지). 팁을 준 손님은 결과 반응이 끝나면 TIP.reactChance로 '진행자님 고마워요'. */
+export const TIP_TRAIT: Partial<Record<TraitId, number>> = { cheerful: 1.35, bold: 1.15, coward: 0.7 };
+
+/**
+ * 아이스크림 트럭: 길(마을 입구와 이어진 길 칸) 위를 speed px/초로 다니다가 driveCells 칸쯤 가서 stopSec초 선다. 서 있으면 callRadius 안 손님이 사러 온다
+ * (움직이는 트럭도 따라간다: 졸졸). 줄이 있거나 따라오는 손님이 waitNear px 안이면 holdMax초까지 더 선다. 따라가다 followSec 안에 못 사면 그만둔다.
+ */
+export const TRUCK = { speed: 62, stopSec: [9, 14], driveCells: [6, 16], holdMax: 12, waitNear: 600, callRadius: 900, followSec: 26, startSec: 4 } as const;
+
+/** 놀이기구: 첫 손님이 타고 boardSec 뒤 (자리가 다 차면 fullSec 뒤) 출발, 한 바퀴 = SHOPS.stay[0]초 (회전목마는 laps바퀴). */
+export const RIDE = { boardSec: 7, fullSec: 1.2, carouselLaps: 2, ferrisLaps: 1 } as const;
+
+/**
+ * 한판 결과가 손님 마음에 남기는 것 (Monster.urge, sec초 동안): 가게 고르기를 바꾼다.
+ *   comfort = 지는 흐름 (흐름 comfortStreak 이하, 또는 지고 기분 lowMood 아래): 먹거리·온천으로 달랜다.
+ *   sweet = 아깝게 놓침: 달콤한 것 (솜사탕·와플·크림빵·아이스크림·코코아).
+ *   celebrate = 대박·항아리 축제·이기는 흐름 (celebrateStreak 이상): 식당 한 상·놀이기구·사진·장신구·미용실.
+ * 남아 있으면 decide에서 가게를 떠올릴 확률 +chance, 그 가게들 무게 ×weight, 메뉴는 URGE_MENU 쪽으로. 그 가게에서 사면 풀린다.
+ * comfort·celebrate 손님은 한판 뒤 leaveSeat 확률로 자리를 털고 가게로 (갈 가게가 골라지면, 같은 자리에서 다시 하기 전에: 먹으러·축하하러).
+ */
+export type ShopUrge = 'comfort' | 'sweet' | 'celebrate';
+export const SHOP_URGE = { sec: 90, chance: 0.2, weight: 2.2, comfortStreak: -2, lowMood: 40, celebrateStreak: 2, leaveSeat: 0.3 } as const;
+export const URGE_SHOPS: Readonly<Record<ShopUrge, readonly ShopId[]>> = {
+  comfort: ['snack_stall', 'drink_stand', 'bakery', 'restaurant', 'icecream_truck', 'hot_spring'],
+  sweet: ['snack_stall', 'drink_stand', 'bakery', 'icecream_truck'],
+  celebrate: ['restaurant', 'carousel', 'ferris_wheel', 'photo_studio', 'accessory_shop', 'beauty_salon'],
+};
+/** 기분마다 끌리는 메뉴 (고르는 무게 × k). */
+export const URGE_MENU: Readonly<Record<ShopUrge, Partial<Record<ShopItemId, number>>>> = {
+  comfort: { food_stew: 1.8, food_cocoa: 1.8, food_skewer: 1.5, food_cream_bun: 1.4 },
+  sweet: { food_cotton_candy: 2, food_waffle: 2, food_cream_bun: 1.8, food_icecream: 1.5, food_cocoa: 1.5 },
+  celebrate: { food_pancakes: 2, food_pasta: 1.4 },
+};
+
+/** 배고픔: 먹거리 가게 무게 × clamp((지금 - 마지막으로 먹은 때 Monster.ateAt, 없으면 온 때) / sec, min, max). 먹고 나면 한동안 덜 간다. */
+export const HUNGER = { sec: 140, min: 0.3, max: 2 } as const;
+
+/**
+ * 점괘 (점집): 대길 great ('오늘 운수 대통!') · 길 good · 흉 bad ('흑, 흉이래'). 주인 입담 1점마다 charmShift만큼 흉에서 길로.
+ * luck = 한판 운 (±, SHOPS.fortune_teller.effect.luck.sec초), mood = 기분 (입담 더하기 전). 운이 붙은 손님의 한판이 점괘대로면 (좋은 점괘에 이김, 흉에 짐)
+ * trueChance로 결과 반응 대신 '점괘대로다!'·'점괘가 맞았어…'.
+ */
+export const FORTUNE = {
+  great: { chance: 0.15, luck: 0.06, mood: 10 },
+  good: { chance: 0.55, luck: 0.03, mood: 4 },
+  bad: { luck: -0.04, mood: -6 },
+  charmShift: 0.03,
+  trueChance: 0.35,
+} as const;
+
+/** 미용실 반짝이: 레벨마다 sparkleSec초 + 주인 입담 1점(3 넘는)마다 perCharm초. 반짝이는 동안 진 판의 기분 하락 × moodLossScale (예뻐진 김에 덜 속상하다). */
+export const SALON = { sparkleSec: [60, 90, 120], perCharm: 10, moodLossScale: 0.8 } as const;
+
+/** 온천: 기분 + effect.mood + (toward - 기분) × k (처진 손님일수록 크게). 지는 흐름(흐름 -2 이하)이면 끈기 +losingPatience. */
+export const SPRING = { toward: 85, k: 0.4, losingPatience: 1 } as const;
+
 // ── 주민 (진행자) ───────────────────────────────────────────────────────
 
 /** 진행자 능력치 1~5: 진행(한판이 빨라진다), 입담(한판마다 기분 +), 손님맞이(그 부스로 오는 손님 +). */

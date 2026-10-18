@@ -1,7 +1,8 @@
-// 진행자 고르기 판 (부스 패널·주민 탭이 같이 쓴다): 자리 하나에 세울 진행자, 또는 진행자 하나가 옮겨 갈 자리.
-// 자리에 다른 진행자가 있으면 sim이 서로 자리를 바꾼다 (api.ts assign).
+// 진행자 고르기 판 (부스 패널·주민 탭이 같이 쓴다): 자리 하나에 세울 진행자, 또는 진행자 하나가 옮겨 갈 자리 (가게 주인 자리 포함: 다섯째 묶음).
+// 자리에 다른 진행자가 있으면 sim이 서로 자리를 바꾼다 (api.ts assign·assignShop).
 
-import { BOOTH_IDS, boothDef, STAFF_STAT_NAMES, type BoothId } from '../data/defs.ts';
+import { BOOTH_IDS, boothDef, SHOP_IDS, SHOP_OWNER_ROLE, SHOPS, STAFF_STAT_NAMES, type BoothId } from '../data/defs.ts';
+import { shopOwned, shopOwner } from '../sim/shops.ts';
 import { suits } from '../sim/staff.ts';
 import { josa } from '../sim/text.ts';
 import type { Staff } from '../sim/types.ts';
@@ -10,6 +11,7 @@ import { boothShort, postName, roleName, roleStat, staffWhere } from './labels.t
 import type { MenuItem } from './menu.ts';
 import type { UiCtx } from './panel.ts';
 import { mapPic, staffPic } from './pics.ts';
+import { catalogPic } from './panels/build.ts';
 
 /** 그림 있는 진행자가 이 자리에 어울리나 (sim의 자동 배치와 같은 규칙: sim/staff.ts suits). */
 export function suitsPost(st: Pick<Staff, 'name' | 'art'>, b: BoothId, role: number): boolean {
@@ -40,6 +42,8 @@ export function openRoleMenu(ctx: UiCtx, anchor: HTMLElement, b: BoothId, role: 
     if (suitsPost(st, b, role)) notes.push('잘 어울려요');
     if (host !== undefined && st.id !== host.id) notes.push(st.post !== null ? '서로 자리를 바꿔요' : `${josa(host.name, '은', '는')} 쉬어요`);
     else if (host === undefined && st.post !== null && leavingStops(st)) notes.push(`옮기면 ${josa(boothShort(st.post.booth), '이', '가')} 멈춰요`);
+    // 가게 주인을 부스에 세우면 그 가게는 문을 닫는다 (다섯째 묶음).
+    if (st.id !== host?.id && (st.shop ?? null) !== null) notes.push(`${josa(SHOPS[st.shop as keyof typeof SHOPS].name, '이', '가')} 문을 닫아요`);
     return {
       icon: staffPic(st.art, st.name),
       label: `${st.name} Lv.${st.level}`,
@@ -97,6 +101,31 @@ export function openPostMenu(ctx: UiCtx, anchor: HTMLElement, st: Staff): void {
       });
     });
   }
+  // 가게 주인 자리 (지은 가게마다): 다른 가게 주인이 있으면 서로 바꾼다.
+  for (const k of SHOP_IDS) {
+    if (!shopOwned(s, k)) continue;
+    const mine = st.shop === k;
+    const holder = shopOwner(s, k);
+    const notes: string[] = [];
+    if (mine) notes.push('지금 맡은 자리');
+    else if (holder !== null) notes.push(`지금: ${holder.name}`, (st.shop ?? null) !== null ? '서로 바꿔요' : `${josa(holder.name, '은', '는')} 쉬어요`);
+    else notes.push('비어 있어요 (가게가 쉬는 중)');
+    if (!mine && leavingStops(st) && st.post !== null) notes.push(`${josa(boothShort(st.post.booth), '이', '가')} 멈춰요`);
+    items.push({
+      icon: catalogPic(k, SHOPS[k].name),
+      label: `${SHOPS[k].name} ${SHOP_OWNER_ROLE}`,
+      sub: notes.join(' · '),
+      right: `손님맞이 ${st.stats.welcome}`,
+      active: mine,
+      onPick: () => {
+        if (!mine) ctx.act(ctx.sim.assignShop(st.id, k));
+      },
+    });
+  }
   if (st.post !== null) items.push({ label: '쉬게 하기', sub: leavingStops(st) ? `${josa(boothShort(st.post.booth), '이', '가')} 멈춰요` : '쉬는 동안 다른 자리에 세울 수 있어요', onPick: () => ctx.act(ctx.sim.assign(st.id, null)) });
+  else if ((st.shop ?? null) !== null) {
+    const k = st.shop as keyof typeof SHOPS;
+    items.push({ label: '쉬게 하기', sub: `${josa(SHOPS[k].name, '이', '가')} 문을 닫아요`, onPick: () => ctx.act(ctx.sim.assignShop(st.id, null)) });
+  }
   ctx.menu.open(anchor, `${st.name}의 자리`, items, h('div', 'mpv-menu-empty', '열린 놀이부스가 없어요.'));
 }

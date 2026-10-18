@@ -1,14 +1,16 @@
-// 도감 탭: 마을 기록, 그리고 [손님 | 인형] 보기.
+// 도감 탭: 마을 기록, 그리고 [손님 | 인형 | 사진] 보기.
 // 손님: 구역마다 종 칸(못 본 종은 그림자), 고른 종의 방문·본 반응·모은 인형 (고른 종 카드는 그 구역 칸 바로 아래에).
 // 인형: 인형 뽑기 부스에서 뽑은 인형 (objects/plush_<종>, 모은 수). 못 모은 인형은 그림자.
+// 사진: 사진관 사진첩 (다섯째 묶음, ui/panels/album.ts): 종마다 처음 찍은 사진, 못 찍은 종은 그림자.
 
 import { BOOTH_IDS, BOOTHS, isGroupBooth, SPECIES, SPECIES_IDS, TRAITS, type BoothId, type SpeciesId } from '../../data/defs.ts';
-import { DEBT_REACT_KINDS, debtReactionLabels, reactionLabels, type ReactTier } from '../../sim/reactions.ts';
+import { DEBT_REACT_KINDS, debtReactionLabels, reactionLabels, SHOP_REACT_KINDS, shopReactionLabels, type ReactTier } from '../../sim/reactions.ts';
 import { btn, fmt, h, revealInSheet, setText } from '../dom.ts';
 import { boothLockText, boothTiny, AREAS, DISTRICT_ORDER, itemName, speciesDistrict } from '../labels.ts';
 import { BasePanel, type DexView } from '../panel.ts';
 import { itemIcon, monsterPic, plushPic } from '../pics.ts';
 import { secHead, segmented } from '../widgets.ts';
+import { albumCount, buildAlbum } from './album.ts';
 
 /**
  * 놀이마다 결과 반응 묶음 (도감의 '본 반응'을 놀이별로): 자기 반응 표가 있는 부스는 하나씩,
@@ -25,6 +27,8 @@ const TIERS: readonly ReactTier[] = ['jackpot', 'win', 'nearMiss', 'lose'];
 
 /** 넷째 묶음 반응 이름 (전당포·은행 볼일, 파산, 일터, 빚 걸기 판, 다 갚음): 놀이 묶음 다음 한 줄. */
 const DEBT_LABELS: ReadonlySet<string> = new Set(DEBT_REACT_KINDS.flatMap((k) => debtReactionLabels(k)));
+/** 다섯째 묶음 가게 반응 이름 (먹기·놀이기구·점괘·꽃 선물 …): 전당포 줄 다음 한 줄. */
+const SHOP_LABELS: ReadonlySet<string> = new Set(SHOP_REACT_KINDS.flatMap((k) => shopReactionLabels(k)));
 
 const PLAY_GROUPS: readonly PlayGroup[] = (() => {
   // 공통 표의 이름은 공통 묶음 몫 (처음 네 부스, 항아리 축제 대박도 이 표). 자기 표가 있는 부스는 공통 표에 없는 이름만.
@@ -54,7 +58,14 @@ export class DexPanel extends BasePanel {
 
   sig(): string {
     const d = this.st.dex;
-    return [this.view, this.selected, this.sim.hallLevel(), BOOTH_IDS.map((b) => (this.st.booths[b].unlocked ? 1 : 0)).join(''), ...SPECIES_IDS.map((s) => `${d[s]?.visits ?? -1}:${d[s]?.reactions.length ?? 0}:${d[s]?.plush ?? 0}`)].join('|');
+    return [
+      this.view,
+      this.selected,
+      this.sim.hallLevel(),
+      BOOTH_IDS.map((b) => (this.st.booths[b].unlocked ? 1 : 0)).join(''),
+      ...SPECIES_IDS.map((s) => `${d[s]?.visits ?? -1}:${d[s]?.reactions.length ?? 0}:${d[s]?.plush ?? 0}:${this.st.photoAlbum[s] ?? -1}`),
+      this.st.shops.photo_studio.level,
+    ].join('|');
   }
 
   protected build(): void {
@@ -83,6 +94,7 @@ export class DexPanel extends BasePanel {
         [
           { key: 'species', label: ['손님 ', h('small', null, `${seen.length}/${SPECIES_IDS.length}`)] },
           { key: 'plush', label: ['인형 ', h('small', null, `${plushKinds}/${SPECIES_IDS.length}`)] },
+          { key: 'photo', label: ['사진 ', h('small', null, `${albumCount(s)}/${SPECIES_IDS.length}`)] },
         ],
         this.view,
         (v) => {
@@ -93,6 +105,7 @@ export class DexPanel extends BasePanel {
     );
 
     if (this.view === 'plush') this.buildPlush();
+    else if (this.view === 'photo') buildAlbum(this.ctx, this.el);
     else this.buildSpecies();
   }
 
@@ -220,6 +233,19 @@ export class DexPanel extends BasePanel {
           'mpv-react-play',
           h('div', 'head', h('span', 'nm', '전당포·은행·일터'), h('small', null, `${debt.length} / ${DEBT_LABELS.size}`)),
           h('div', 'mpv-labels', ...debt.map((r) => h('span', 'mpv-label debt', r))),
+        ),
+      );
+    }
+    // 가게 (다섯째 묶음)
+    const shop = [...left].filter((l) => SHOP_LABELS.has(l));
+    for (const l of shop) left.delete(l);
+    if (shop.length > 0) {
+      el.append(
+        h(
+          'div',
+          'mpv-react-play',
+          h('div', 'head', h('span', 'nm', '가게·놀이기구'), h('small', null, `${shop.length} / ${SHOP_LABELS.size}`)),
+          h('div', 'mpv-labels', ...shop.map((r) => h('span', 'mpv-label', r))),
         ),
       );
     }

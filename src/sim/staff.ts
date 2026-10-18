@@ -16,6 +16,11 @@ const HOST_ARTS = HOST_PRESETS.slice(0, 4).map((p) => p.art);
 const STAT_KEYS: readonly (keyof StaffStats)[] = ['pace', 'charm', 'welcome'];
 export const STAT_MAX = 5;
 
+/** 쉬는 중 (부스 자리도 가게도 맡지 않았다: 다섯째 묶음의 가게 주인은 post가 null이어도 일하는 중). */
+export function isIdle(s: Pick<Staff, 'post' | 'shop'>): boolean {
+  return s.post === null && (s.shop ?? null) === null;
+}
+
 export function isPreset(c: Candidate): boolean {
   return HOST_PRESETS.some((p) => p.name === c.name && p.art === c.art);
 }

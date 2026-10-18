@@ -20,9 +20,11 @@ export function nameSubject(m: Pick<Monster, 'nickname' | 'species'>): string {
   return josa(displayName(m), '이', '가');
 }
 
-/** 걷는 빠르기 (파산한 손님은 느리게: LABOR.walkMult). */
+/** 걷는 빠르기 (파산한 손님은 느리게: LABOR.walkMult, 음료를 마셨으면 한동안 빠르게: Monster.buffs.speed). */
 export function speedOf(m: Monster): number {
-  return (SPECIES[m.species].floats ? SIM.floatSpeed : SIM.walkSpeed) * (m.bankrupt === true ? LABOR.walkMult : 1);
+  const b = m.buffs;
+  const drink = b !== undefined && (b.speedSec ?? 0) > 0 ? (b.speed ?? 1) : 1;
+  return (SPECIES[m.species].floats ? SIM.floatSpeed : SIM.walkSpeed) * (m.bankrupt === true ? LABOR.walkMult : 1) * drink;
 }
 
 export function faceToward(m: Monster, x: number): void {

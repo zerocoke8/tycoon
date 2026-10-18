@@ -1,4 +1,6 @@
-// 짓기 탭 = 마을 꾸미기 목록 (DESIGN 6.1 배치형 마을). 위 묶음 줄: 놀이부스 · 큰 시설 · 가게·건물 · 장식 · 길 · 땅.
+// 짓기 탭 = 마을 꾸미기 목록 (DESIGN 6.1 배치형 마을). 위 묶음 줄 (두 줄): 놀이부스 · 큰 시설 · 가게 · 놀이기구 / 건물 · 장식 · 길 · 땅.
+//  - 가게·놀이기구 (다섯째 묶음, DESIGN 3.8): 가게는 먹거리·꾸미기·쉼·재미·기념·선물로 나눠, 놀이기구(회전목마·관람차)는 따로.
+//    카드마다 차지하는 칸·파는 것·값·효과·가게 주인·잠긴 까닭·짓기 또는 업그레이드·자리 버튼, 그림을 누르면 가게 시트 (ui/panels/shop.ts).
 //  - 놀이부스·큰 시설·가게·건물: 카드마다 차지하는 칸(5×5칸)·입구 앞 길·값·잠긴 까닭·보관함·레벨. 보관함에 있는 것이 맨 위, 잠긴 것은 맨 아래.
 //    가지지 않았으면 [열고 놓기]·[짓고 놓기], 보관함이면 [지도에 놓기] = 지도 짓기 모드 (✓로 놓을 때 산다).
 //    놓였으면 업그레이드 + [옮기기]·[보관하기] (입구 앞 길이 끊겼으면 알림 + [길 잇기]).
@@ -8,16 +10,19 @@
 // 그리고 건물 하나만 보는 시트, 닫힌 부스 시트, 놓인 것 하나(장식) 시트, 다른 패널이 쓰는 자리 버튼 줄(placeRow).
 
 import { catalogKind, catalogName, footprint, storable, type CatalogKey } from '../../data/catalog.ts';
-import { BOOTH_IDS, BOOTHS, boothDef, BUILD_HALL, BUILDINGS, DECOR, DECOR_IDS, isGroupBooth, type BoothId, type BuildingId, type DecorId } from '../../data/defs.ts';
+import { BOOTH_IDS, BOOTHS, boothDef, BUILD_HALL, BUILDINGS, DECOR, isGroupBooth, SHOP_CATEGORIES, SHOP_IDS, SHOPS, type BoothId, type BuildingId, type DecorId, type ShopCategory, type ShopId } from '../../data/defs.ts';
+import { SHOP_LAYOUT } from '../../data/catalog.ts';
+import { isRide, shopIdleReason, shopOwner, shopPriceRange } from '../../sim/shops.ts';
 import type { CatalogEntry, Cost, Result } from '../../sim/api.ts';
 import { boothIdleReason } from '../../sim/booths.ts';
 import { CELL, CHUNKS, GRID, cellCenter, type Pt } from '../../data/map.ts';
 import { josa } from '../../sim/text.ts';
-import { btn, fmt, h } from '../dom.ts';
+import { btn, fmt, h, revealInSheet } from '../dom.ts';
 import { icon, type IconName } from '../icons.ts';
 import { boothEffect, boothLockText, boothRolesText, boothRule, BUILDING_IDS, buildingEffect, buildingMaxLevel, hallUnlocks } from '../labels.ts';
 import { BasePanel, type TabId, type UiCtx } from '../panel.ts';
-import { mapPic } from '../pics.ts';
+import { mapPic, pic, placeholder } from '../pics.ts';
+import { shopEffectText, shopStayText } from '../shopText.ts';
 import { costChips, secHead, type Live } from '../widgets.ts';
 
 /** 넷째 묶음 건물 (전당포·은행·일터, DESIGN 3.7): 처음엔 없고, 누르면 자기 시트 (ui/panels/debt.ts). */
@@ -27,25 +32,38 @@ export const isDebtBuilding = (id: BuildingId): boolean => DEBT_BUILDINGS.includ
 /** 건물 그림 key (map/<key>): 일터는 따로 그림이 없어 광산 입구로. */
 export const buildingArt = (id: BuildingId): string => (id === 'workyard' ? 'mine_entrance' : id);
 
-/** 놓을 수 있는 것의 그림 key (map/<key>). */
+/** 놓을 수 있는 것의 그림 key (map/<key>). 가게는 대표 그림 (트럭 차고는 이정표: 트럭 그림은 racers/, catalogPic을 쓴다). */
 export function catalogArt(key: CatalogKey): string {
   switch (catalogKind(key)) {
     case 'booth':
       return BOOTHS[key as BoothId].building;
     case 'building':
       return buildingArt(key as BuildingId);
+    case 'shop': {
+      const p = SHOP_LAYOUT[key as ShopId].parts[0];
+      return p !== undefined && p.group === 'map' ? p.key : 'signpost';
+    }
     default:
       return key;
   }
 }
 
+/** 놓을 수 있는 것의 작은 그림 (가게는 그 그림 묶음 그대로: 트럭 = racers/icecream_truck). */
+export function catalogPic(key: CatalogKey, name: string, cls = ''): HTMLSpanElement {
+  if (key === 'icecream_truck') return pic('racers', ['icecream_truck'], () => placeholder(name.slice(0, 2), 'var(--dd-paper)', true), cls);
+  return mapPic(catalogArt(key), name, cls);
+}
+
 // ── 묶음 ──
 
-export type BuildCat = 'booth' | 'big' | 'shop' | 'decor' | 'road' | 'land';
+/** 묶음: store = 다섯째 묶음 가게 (먹거리·꾸미기 …), ride = 놀이기구 (회전목마·관람차), shop = 마을 건물 (회관·공방·전당포 …: 옛 '가게·건물'). */
+export type BuildCat = 'booth' | 'big' | 'store' | 'ride' | 'shop' | 'decor' | 'road' | 'land';
 const CATS: readonly { readonly id: BuildCat; readonly name: string; readonly icon: IconName }[] = [
   { id: 'booth', name: '놀이부스', icon: 'booth' },
   { id: 'big', name: '큰 시설', icon: 'facility' },
-  { id: 'shop', name: '가게·건물', icon: 'shop' },
+  { id: 'store', name: '가게', icon: 'shop' },
+  { id: 'ride', name: '놀이기구', icon: 'ride' },
+  { id: 'shop', name: '건물', icon: 'village' },
   { id: 'decor', name: '장식', icon: 'decor' },
   { id: 'road', name: '길', icon: 'road' },
   { id: 'land', name: '땅', icon: 'land' },
@@ -56,11 +74,13 @@ export function isBuildCat(v: string | null | undefined): v is BuildCat {
   return CATS.some((c) => c.id === v);
 }
 
-/** 이 열쇠가 든 묶음: 단체 놀이 부스·일터 = 큰 시설, 그 밖 부스 = 놀이부스, 장식, 나머지 건물 = 가게·건물. */
+/** 이 열쇠가 든 묶음: 단체 놀이 부스·일터 = 큰 시설, 그 밖 부스 = 놀이부스, 가게 (다섯째 묶음) = 가게 (회전목마·관람차 = 놀이기구), 장식, 나머지 건물 = 건물. */
 export function catOf(key: CatalogKey): BuildCat {
   switch (catalogKind(key)) {
     case 'booth':
       return isGroupBooth(key as BoothId) ? 'big' : 'booth';
+    case 'shop':
+      return isRide(key as ShopId) ? 'ride' : 'store';
     case 'decor':
       return 'decor';
     default:
@@ -209,7 +229,7 @@ function idleText(ctx: UiCtx, b: BoothId): string {
 }
 
 /** 차지하는 칸·입구 꼬리표: [5×5칸] [입구에 길 필요]. */
-function fpTags(key: CatalogKey): HTMLElement {
+export function fpTags(key: CatalogKey): HTMLElement {
   const fp = footprint(key);
   return h('span', 'mpv-fp', h('span', 'mpv-tag', `${fp.w}×${fp.h}칸`), fp.entry !== undefined ? h('span', 'mpv-tag', '입구에 길 필요') : null);
 }
@@ -223,6 +243,8 @@ function cutPlaced(ctx: UiCtx): CatalogKey[] {
 export class BuildPanel extends BasePanel {
   /** 고른 묶음. */
   cat: BuildCat = 'booth';
+  /** 다음 그리기 뒤 굴려 보여 주고 반짝일 카드 (목표 칩 '간식 노점을 지어 보세요' 등). */
+  focus: CatalogKey | null = null;
 
   constructor(ctx: UiCtx) {
     super(ctx, 'mpv-build');
@@ -259,12 +281,27 @@ export class BuildPanel extends BasePanel {
       JSON.stringify(s.village.decor),
       ...BUILDING_IDS.map((id) => s.buildings[id].level),
       ...BOOTH_IDS.map((b) => `${s.booths[b].unlocked ? 1 : 0}${s.booths[b].level}${s.booths[b].staff.map((x) => (x === null ? 0 : 1)).join('')}`),
+      ...SHOP_IDS.map((k) => `${s.shops[k].level}${s.shops[k].owner === null ? 0 : 1}`),
     ].join(',');
   }
 
   protected build(): void {
     const entries = this.sim.catalog();
     this.el.append(this.catBar(entries));
+    const focus = this.focus;
+    this.focus = null;
+    if (focus !== null) {
+      requestAnimationFrame(() => {
+        const card = this.el.querySelector(`[data-key="${focus}"]`);
+        if (!(card instanceof HTMLElement)) return;
+        // 묶음 줄이 위에 붙어 있으니 그 아래로.
+        const bar = this.el.querySelector('.mpv-cats');
+        revealInSheet(card, (bar instanceof HTMLElement ? bar.offsetHeight : 0) + 4, true, false);
+        card.classList.remove('flash');
+        void card.offsetWidth;
+        card.classList.add('flash');
+      });
+    }
     switch (this.cat) {
       case 'road':
         this.buildRoad();
@@ -306,10 +343,75 @@ export class BuildPanel extends BasePanel {
     const rank = (e: CatalogEntry): number => (e.stored > 0 ? 0 : e.owned > 0 || e.lock === null ? 1 : 2);
     const sorted = list.map((e, i) => ({ e, i })).sort((a, b) => rank(a.e) - rank(b.e) || a.i - b.i);
     const owned = list.filter((e) => e.owned > 0).length;
-    const title = this.cat === 'booth' ? '놀이부스' : this.cat === 'big' ? '큰 시설' : '가게·건물';
+    if (this.cat === 'store') {
+      this.buildStores(list);
+      return;
+    }
+    if (this.cat === 'ride') {
+      this.el.append(secHead('놀이기구', `${owned} / ${list.length} · 이긴 손님이 신나게 타요`), h('div', 'mpv-hint', '손님 여럿이 같이 타고 한 바퀴를 돌아요. 첫 손님이 타면 곧 출발해요.'));
+      for (const { e } of sorted) this.el.append(this.shopCard(e));
+      return;
+    }
+    const title = this.cat === 'booth' ? '놀이부스' : this.cat === 'big' ? '큰 시설' : '건물';
     this.el.append(secHead(title, this.cat === 'shop' ? '[짓고 놓기]로 지도에 자리를 골라요' : this.cat === 'big' ? `${owned} / ${list.length}` : `${owned} / ${list.length} 열림`));
     if (this.cat === 'big') this.el.append(h('div', 'mpv-hint', '손님 여럿이 같이 노는 큰 마당이에요. 땅을 넉넉히 넓혀 두면 놓기 쉬워요.'));
     for (const { e } of sorted) this.el.append(catalogKind(e.key) === 'booth' ? this.boothCard(e.key as BoothId) : e.key in BUILDINGS ? this.buildingCard(e.key as BuildingId) : this.genericCard(e));
+  }
+
+  /** 가게 (다섯째 묶음): 묶음(먹거리·꾸미기·쉼·재미·기념·선물)마다 카드. 보관함 → 가진 것·지을 수 있는 것 → 잠긴 것. */
+  private buildStores(list: readonly CatalogEntry[]): void {
+    const owned = list.filter((e) => e.owned > 0).length;
+    this.el.append(secHead('가게', `${owned} / ${list.length} · 손님이 놀이 말고도 코인을 써요`));
+    const rank = (e: CatalogEntry): number => (e.stored > 0 ? 0 : e.owned > 0 || e.lock === null ? 1 : 2);
+    for (const cat of Object.keys(SHOP_CATEGORIES) as ShopCategory[]) {
+      const rows = list.filter((e) => SHOPS[e.key as ShopId].category === cat);
+      if (rows.length === 0) continue;
+      this.el.append(h('div', 'mpv-note', SHOP_CATEGORIES[cat].name));
+      for (const e of rows.map((x, i) => ({ x, i })).sort((a, b) => rank(a.x) - rank(b.x) || a.i - b.i)) this.el.append(this.shopCard(e.x));
+    }
+  }
+
+  /**
+   * 가게·놀이기구 카드: 이름·칸·하는 일, 값·효과 (놀이기구는 한 바퀴 초·자리), 가게 주인, 잠긴 까닭과 짓기 (주인이 같이 와요) 또는 업그레이드·자리 버튼.
+   * 그림을 누르면 가게 시트 (지은 뒤: 이번 매상·지금 손님·메뉴).
+   */
+  private shopCard(e: CatalogEntry): HTMLElement {
+    const s = e.key as ShopId;
+    const d = SHOPS[s];
+    const lv = this.st.shops[s].level;
+    const owned = lv >= 1;
+    const stored = e.stored > 0;
+    const badge = !owned ? h('span', 'mpv-lv off', '아직 없어요') : stored ? h('span', 'mpv-lv store', '보관함') : h('span', 'mpv-lv', `Lv.${lv}/${d.upgrade.length + 1}`);
+    const body = h('div', 'mpv-grow', h('div', 'mpv-title', d.name, badge), h('div', 'mpv-desc', d.desc), fpTags(s));
+    const [lo, hi] = shopPriceRange(this.st, s);
+    if (hi > 0) body.append(effLine('값', lo === hi ? `${lo}코인` : `${lo}~${hi}코인`));
+    body.append(effLine('효과', shopEffectText(s)));
+    if (isRide(s)) {
+      const stay = shopStayText(s);
+      if (stay !== null) body.append(effLine('타기', `${stay} · 자리 ${d.slots.join('→')}`));
+    }
+    const owner = shopOwner(this.st, s);
+    body.append(effLine('주인', owned ? (owner !== null ? owner.name : '비어 있어요 (진행자를 세우면 열어요)') : `${d.owner.name} (지으면 같이 와요)`));
+    if (!owned) {
+      if (e.lock !== null) body.append(h('div', 'mpv-lock', e.lock));
+      body.append(costAction(this.ctx, this.live, e.cost, '짓고 놓기', () => startPlace(this.ctx, s), '지을 수 없어요', e.lock !== null, 'green small'));
+    } else {
+      const row = placeRow(this.ctx, s);
+      if (stored && row !== null) body.append(row);
+      if (!stored && shopIdleReason(this.st, s) === 'owner') body.append(h('div', 'mpv-warn', '가게 주인이 없어 쉬는 중이에요'));
+      body.append(costAction(this.ctx, this.live, this.sim.shopUpgradeCost(s), '업그레이드', () => this.sim.upgradeShop(s)));
+      if (!stored && row !== null) body.append(row);
+    }
+    const thumb = h('button', 'mpv-thumb', catalogPic(s, d.name));
+    thumb.type = 'button';
+    thumb.setAttribute('aria-label', `${d.name} 보기`);
+    thumb.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      this.ctx.showShop(s);
+    });
+    const card = h('div', !owned ? (e.lock !== null ? 'mpv-card dim locked' : 'mpv-card dim') : stored ? 'mpv-card stored' : 'mpv-card', thumb, body);
+    card.dataset.key = s;
+    return card;
   }
 
   /** 레벨이 없는 놓을 것 (새로 더해진 가게 등): 이름·칸·값·잠긴 까닭과 자리 버튼만. */
@@ -327,7 +429,7 @@ export class BuildPanel extends BasePanel {
       const row = placeRow(this.ctx, key);
       if (row !== null) body.append(row);
     }
-    return h('div', !owned ? (e.lock !== null ? 'mpv-card dim locked' : 'mpv-card dim') : stored ? 'mpv-card stored' : 'mpv-card', h('span', 'mpv-thumb', mapPic(catalogArt(key), name)), body);
+    return h('div', !owned ? (e.lock !== null ? 'mpv-card dim locked' : 'mpv-card dim') : stored ? 'mpv-card stored' : 'mpv-card', h('span', 'mpv-thumb', catalogPic(key, name)), body);
   }
 
   /** 장식: 작은 칸 판. */
@@ -385,7 +487,7 @@ export class BuildPanel extends BasePanel {
         h(
           'div',
           'mpv-card mpv-cut',
-          h('span', 'mpv-thumb sm', mapPic(catalogArt(key), catalogName(key))),
+          h('span', 'mpv-thumb sm', catalogPic(key, catalogName(key))),
           h('div', 'mpv-grow', h('div', 'mpv-title sm', catalogName(key)), h('div', 'mpv-warn', roadIssue(this.ctx, key) === 'cut' ? '길이 마을 입구와 끊겼어요' : '입구 앞에 길이 없어요')),
           btn('butter small', [icon('road'), '길 잇기'], () => joinRoad(this.ctx, key)),
         ),
@@ -457,7 +559,9 @@ export class BuildPanel extends BasePanel {
       body.append(costAction(this.ctx, this.live, this.sim.buildingUpgradeCost(id), '업그레이드', () => this.sim.upgradeBuilding(id), '최고 레벨이에요', lock !== null));
       if (!stored && row !== null) body.append(row);
     }
-    return h('div', unbuilt ? (lock !== null ? 'mpv-card dim locked' : 'mpv-card dim') : stored ? 'mpv-card stored' : 'mpv-card', thumb, body);
+    const card = h('div', unbuilt ? (lock !== null ? 'mpv-card dim locked' : 'mpv-card dim') : stored ? 'mpv-card stored' : 'mpv-card', thumb, body);
+    card.dataset.key = id;
+    return card;
   }
 
   private boothCard(b: BoothId): HTMLElement {
@@ -498,7 +602,9 @@ export class BuildPanel extends BasePanel {
       body.append(costAction(this.ctx, this.live, this.sim.boothUpgradeCost(b), '업그레이드', () => this.sim.upgradeBooth(b)));
       if (!stored && row !== null) body.append(row);
     }
-    return h('div', bs.unlocked ? (stored ? 'mpv-card stored' : 'mpv-card') : lock !== null ? 'mpv-card dim locked' : 'mpv-card dim', thumb, body);
+    const card = h('div', bs.unlocked ? (stored ? 'mpv-card stored' : 'mpv-card') : lock !== null ? 'mpv-card dim locked' : 'mpv-card dim', thumb, body);
+    card.dataset.key = b;
+    return card;
   }
 }
 
@@ -610,7 +716,7 @@ export class LockedBoothPanel extends BasePanel {
   }
 }
 
-/** 놓인 것 하나 (지도에서 장식을 눌렀을 때): 옮기기·보관하기. */
+/** 놓인 것 하나 (지도에서 장식을 눌렀을 때): 옮기기·보관하기. 가게는 ui.ts가 가게 시트 (ui/panels/shop.ts)로 연다. */
 export class PlacedPanel extends BasePanel {
   id = 0;
 
@@ -620,7 +726,7 @@ export class PlacedPanel extends BasePanel {
   }
 
   sig(): string {
-    return `${this.id}|${this.sim.village().stamp.place}`;
+    return `${this.id}|${this.sim.village().stamp.place}|${this.sim.village().stamp.road}`;
   }
 
   protected build(): void {

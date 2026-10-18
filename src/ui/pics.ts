@@ -152,3 +152,14 @@ export function plushPic(species: SpeciesId, name: string, cls = ''): HTMLSpanEl
 export function racerPic(key: string, name: string, color: string, cls = ''): HTMLSpanElement {
   return pic('racers', [key], () => placeholder(name.slice(0, 1), color, true), cls);
 }
+
+/**
+ * 'group/key' 그림 (다섯째 묶음: 손에 든 것 'items/food_waffle'·'objects/plush_dragon', 산 장신구 'items/acc_ribbon').
+ * 없으면 이름 첫 글자 동그라미.
+ */
+export function artPic(art: string, name: string, cls = ''): HTMLSpanElement {
+  const i = art.indexOf('/');
+  const group = i > 0 ? art.slice(0, i) : 'items';
+  const key = i > 0 ? art.slice(i + 1) : art;
+  return pic(group, [key], () => placeholder(name.slice(0, 1) || '?', 'var(--dd-orange)'), cls);
+}

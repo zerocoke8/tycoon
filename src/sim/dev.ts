@@ -2,8 +2,9 @@
 // 새 부스 연출을 만들 때 쓴다: 주소 ?all=1·?unlockAll=1 (main.ts, 저장하지 않는다), scripts/sim-check.ts --selftest.
 
 import { Rng } from '../core/rng.ts';
-import { ACCESSORIES, ACCESSORY_IDS, BOOTH_IDS, BUILD_HALL, DECOR, DECOR_IDS, GOODS, PRECIOUS, type AccessoryDef, type AccessoryId, type BuildingId, type DecorId, type GoodId, type MaterialId, type PreciousId } from '../data/defs.ts';
-import { CHUNKS } from '../data/map.ts';
+import { ACCESSORIES, ACCESSORY_IDS, BOOTH_IDS, BUILD_HALL, DECOR, DECOR_IDS, GOODS, PRECIOUS, SHOP_IDS, type AccessoryDef, type AccessoryId, type BuildingId, type DecorId, type GoodId, type MaterialId, type PreciousId, type ShopId } from '../data/defs.ts';
+import { footprint } from '../data/catalog.ts';
+import { CELL, CHUNKS, cellAt } from '../data/map.ts';
 import type { SimApi } from './api.ts';
 import { createMonster } from './monsters.ts';
 import type { Sim } from './sim.ts';
@@ -126,6 +127,34 @@ export function devBuildDebt(sim: SimApi): void {
   }
   st.coins = Math.max(st.coins, 2000);
   sim.bus.emit('buildingUpgraded', { id: 'workyard', level: st.buildings.workyard.level });
+}
+
+/**
+ * 개발용 (주소 ?shops=1, sim-check): 가게 15곳을 (회관 레벨·비용 없이) 열고 주인을 들여, 광장(분수)에서 가까운 빈 땅부터 길까지 이어 자동 배치한다
+ * (큰 가게부터, 자리가 모자라면 이웃 땅을 산다). 놓지 못한 가게는 보관함에 남는다. 돌려주는 값 = 놓인 가게 수.
+ * ?unlockAll=1과 같이 쓰면 광장 둘레는 부스·건물로 차 있어 가게는 마을 바깥 빈 땅 (지도 양 끝)에 놓인다: 가게 거리 연출은 ?shops=1만으로 본다.
+ */
+export function devShops(sim: Sim, only?: readonly ShopId[]): number {
+  const st = sim.state;
+  const v0 = villageOf(st);
+  const anchor = v0.placed('fountain') !== undefined ? v0.art('fountain') : v0.gateSpawn();
+  const near = cellAt({ x: anchor.x, y: anchor.y - CELL });
+  const area = (s: ShopId): number => footprint(s).w * footprint(s).h;
+  const list = [...(only ?? SHOP_IDS)].sort((a, b) => area(b) - area(a));
+  let placed = 0;
+  for (const s of list) {
+    let ok = sim.devOpenShop(s, near);
+    for (let tries = 0; !ok && tries < 8; tries++) {
+      const next = Array.from({ length: CHUNKS.w * CHUNKS.h }, (_, i) => sim.chunk(i)).filter((c) => !c.owned && c.adjacent).sort((a, b) => a.ring - b.ring || a.price - b.price)[0];
+      if (next === undefined) break;
+      addChunk(st, next.index);
+      ok = sim.autoPlace(s, true, near).ok;
+    }
+    if (ok) placed++;
+  }
+  sim.bus.emit('villageChanged', { what: 'place' });
+  sim.bus.emit('staffChanged', {});
+  return placed;
 }
 
 /** 개발용 (주소 ?debtors=N): 일터를 짓고 채무자 n명을 바로 일터에 (빚 20~70). */

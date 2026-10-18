@@ -9,6 +9,7 @@ import { createMonster } from './monsters.ts';
 import { gateDistance, roadPoint } from './path.ts';
 import { idleGroup } from './group/core.ts';
 import { raceOutcome } from './race.ts';
+import { newShops } from './shops.ts';
 import { presetCandidates } from './staff.ts';
 import { TUNE } from './tuning.ts';
 import type { BoothState, GameState, RaceResult, RacerIndex, Staff, StaffId } from './types.ts';
@@ -18,9 +19,10 @@ export const SAVE_KEY = 'mpv-save-v1';
 /**
  * 2: 진행자 자리(BoothState.staff, Staff.post), 손님 재료(Monster.mats), 경주장. 3: 단체 놀이 엔진 (BoothState.race → group).
  * 4: 넷째 묶음 (손님 장신구·맡긴 장신구·빚, 전당포 컬렉션, 전당포·은행·일터 건물). 5: 배치형 마을 (GameState.village, 구역 districts는 없앰).
- * 2·3·4는 이어서 읽는다 (migrate2 → migrate3 → migrate4), 그보다 옛 저장은 새로 시작.
+ * 6: 다섯째 묶음 가게 (GameState.shops·photoAlbum·shopTotals, 손님의 가게 칸은 없어도 된다).
+ * 2·3·4·5는 이어서 읽는다 (migrate2 → migrate3 → migrate4 → migrate5), 그보다 옛 저장은 새로 시작.
  */
-export const SAVE_VERSION = 5;
+export const SAVE_VERSION = 6;
 
 /** 처음부터 열린 부스와 그 진행자. */
 const START_BOOTHS: readonly BoothId[] = ['slot', 'oddeven'];
@@ -94,6 +96,9 @@ export function newGame(seed?: number): GameState {
     debtTotals: { pawned: 0, redeemed: 0, forfeited: 0, loans: 0, repaid: 0, bankrupt: 0, relieved: 0, forgiven: 0, matches: 0, laborMats: 0, laborBy: { farm: 0, mine: 0 } },
     debtMatchAt: {},
     debtCheck: DEBT_MATCH.checkSec,
+    shops: newShops(),
+    photoAlbum: {},
+    shopTotals: { visits: 0, served: 0, revenue: 0, tips: 0, tipCoins: 0, gifts: 0, photos: 0, innStays: 0, accessories: 0, byShop: {} },
   };
   addOpeningGuests(state, rng);
   state.rng = rng.state;
@@ -154,13 +159,14 @@ export function normalizeState(raw: unknown): GameState | null {
   if (isObj(raw) && raw.version === 2) migrate2(raw);
   if (isObj(raw) && raw.version === 3) migrate3(raw);
   if (isObj(raw) && raw.version === 4) migrate4(raw);
+  if (isObj(raw) && raw.version === 5) migrate5(raw);
   if (!isObj(raw) || raw.version !== SAVE_VERSION) return null;
   if (typeof raw.coins !== 'number' || !Number.isFinite(raw.coins)) return null;
   if (!Array.isArray(raw.monsters) || !Array.isArray(raw.staff) || !isObj(raw.booths) || !isObj(raw.buildings)) return null;
   const base = newGame(typeof raw.rng === 'number' ? raw.rng : 1) as unknown as Record<string, unknown>;
   const st = raw as Record<string, unknown>;
   for (const [k, v] of Object.entries(base)) if (!(k in st)) st[k] = v;
-  for (const key of ['materials', 'precious', 'goods', 'buildings', 'booths', 'debtTotals', 'village'] as const) {
+  for (const key of ['materials', 'precious', 'goods', 'buildings', 'booths', 'debtTotals', 'village', 'shops', 'shopTotals'] as const) {
     const have = st[key];
     const def = base[key];
     if (!isObj(have) || !isObj(def)) return null;
@@ -401,6 +407,14 @@ function migrate4(raw: Record<string, unknown>): void {
     m.phaseTime = 0;
   });
   raw.version = 5;
+}
+
+/**
+ * 저장 5 → 6 (다섯째 묶음 가게): 가게·사진첩·누적 기록은 normalizeState가 newGame 값으로 채운다 (가게는 아직 없다: 레벨 0).
+ * 손님의 가게 칸(shop·held·buffs …)은 없어도 되는 칸이라 그대로.
+ */
+function migrate5(raw: Record<string, unknown>): void {
+  raw.version = 6;
 }
 
 /** 저장된 게임 (없거나 버전이 다르면 null). */

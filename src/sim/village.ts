@@ -7,8 +7,8 @@
 //  - 길찾기 바탕 (sim/path.ts route가 쓴다): 길 칸 사이 최단 칸 길 cellPath (너비 우선, 목적지마다 거리 지도를 길이 바뀔 때까지 둔다).
 // 손님은 길 칸 위로만 걷고, 건물 입구 앞 길 칸에서 문(door)으로 들어가 안쪽 자리로 간다. 입구가 길로 마을 입구와 이어지지 않은 건물엔 손님이 오지 않는다.
 
-import { BOOTH_LAYOUT, BUILDING_LAYOUT, CHIEF_AT, DECOR_BASE, DIG_GEO, FOUNTAIN_REST, GATE_SPAWN, KITE_GEO, RACE_GEO, SHOP_GEO, SSIREUM_GEO, TUG_GEO, YARD_GEO, BOAT_GEO, artBase, catalogKind, footprint, type BoothSpot, type CatalogKey, type DigGeo, type KiteGeo, type PondShape, type RaceGeo, type Rect, type RingGeo, type ShopGeo, type TugGeo, type WorkFacilitySpot, type YardGeo } from '../data/catalog.ts';
-import { DECOR, DECOR_AURA, LAND, WORK_FACILITIES, type BoothId, type BuildingId, type DecorId, type WorkFacility } from '../data/defs.ts';
+import { BOOTH_LAYOUT, BUILDING_LAYOUT, CAROUSEL_GEO, CHIEF_AT, DECOR_BASE, DIG_GEO, FERRIS_GEO, FOUNTAIN_REST, GATE_SPAWN, KITE_GEO, RACE_GEO, SHOP_GEO, SHOP_LAYOUT, SSIREUM_GEO, TRUCK_GEO, TUG_GEO, YARD_GEO, BOAT_GEO, artBase, catalogKind, footprint, type BoothSpot, type CarouselGeo, type CatalogKey, type DigGeo, type FerrisGeo, type KiteGeo, type PondShape, type RaceGeo, type Rect, type RingGeo, type ShopGeo, type ShopPart, type TugGeo, type WorkFacilitySpot, type YardGeo } from '../data/catalog.ts';
+import { DECOR, DECOR_AURA, LAND, WORK_FACILITIES, type BoothId, type BuildingId, type DecorId, type ShopId, type WorkFacility } from '../data/defs.ts';
 import { CELL, CHUNK, CHUNKS, DEFAULT_DECOR, DEFAULT_PLACED, DEFAULT_ROADS, GRID, LAND_START, cellCenter, cellIndex, chunkIndex, chunkRing, type Cell, type LoopCourse, type Pt } from '../data/map.ts';
 import type { GameState, Placed, VillageState } from './types.ts';
 
@@ -37,6 +37,21 @@ export interface BoatGeo {
   readonly course: LoopCourse;
   readonly pond: PondShape;
   readonly watch: readonly Rect[];
+}
+
+/**
+ * 세계 좌표 가게 모양 (catalog.ts ShopLayout + 놓인 자리): 그림 조각·계산대·줄·주인·자리.
+ * 트럭은 계산대·줄이 길 위의 트럭을 따라다녀서 sim/shops.ts shopCounterPt·shopQueuePt로 읽는다 (여기 것은 차고 앞).
+ */
+export interface ShopSpot {
+  readonly parts: readonly ShopPart[];
+  readonly counter: Pt;
+  readonly queue: readonly Pt[];
+  readonly owner: Pt;
+  readonly ownerLook: Pt;
+  readonly slots: readonly Pt[];
+  readonly slotLook: readonly Pt[];
+  readonly pickup: Pt | null;
 }
 
 /** 놓기 검사 결과. bad = 놓을 수 없는 칸 (미리보기를 빨갛게), entry = 입구 앞 칸 (없으면 null), entryRoad = 그 칸이 마을 입구와 이어진 길. */
@@ -303,6 +318,40 @@ export class Village {
       const g = SHOP_GEO[s];
       return { counter: sps(g.counter, o), npc: sp(g.npc, o), art: g.art };
     });
+  }
+
+  /** 가게 모양 (세계 좌표, 놓이지 않았으면 OFF 둘레). */
+  shopSpot(s: ShopId): ShopSpot {
+    return this.cached(`shopSpot:${s}`, () => {
+      const L = SHOP_LAYOUT[s];
+      const o = this.origin(s);
+      const slots = sps(L.slots, o);
+      return {
+        parts: L.parts.map((p) => ({ ...p, at: sp(p.at, o) })),
+        counter: sp(L.counter, o),
+        queue: sps(L.queue, o),
+        owner: sp(L.owner, o),
+        ownerLook: sp(L.ownerLook, o),
+        slots,
+        slotLook: L.slotLook !== undefined ? sps(L.slotLook, o) : slots.map(() => sp(L.owner, o)),
+        pickup: L.pickup !== undefined ? sp(L.pickup, o) : null,
+      };
+    });
+  }
+
+  /** 회전목마 판 (세계 좌표). */
+  carousel(): CarouselGeo {
+    return this.cached('carousel', () => ({ ...CAROUSEL_GEO, center: sp(CAROUSEL_GEO.center, this.origin('carousel')) }));
+  }
+
+  /** 관람차 바퀴 (세계 좌표). */
+  ferris(): FerrisGeo {
+    return this.cached('ferris', () => ({ ...FERRIS_GEO, hub: sp(FERRIS_GEO.hub, this.origin('ferris_wheel')) }));
+  }
+
+  /** 아이스크림 트럭 차고 자리 (세계 좌표, 트럭 아래 가운데). */
+  truckHome(): Pt {
+    return sp(TRUCK_GEO.home, this.origin('icecream_truck'));
   }
 
   yard(): YardGeo {
@@ -729,7 +778,7 @@ const TOUCH_COST = 8;
  * spread = 위·아래로 다른 건물에 딱 붙은 자리를 덜 고른다 (땅이 넉넉할 때: 옛 저장 옮기기·개발용 ?all). 땅을 아껴 쓰는 촌장(sim-check)은 끈다
  * (흩어 놓으면 빈 땅이 조각나 큰 시설이 들어갈 자리가 늦게 난다).
  */
-export function findSpot(state: GameState, key: CatalogKey, prefer?: Cell, spread = false): { x: number; y: number; road: Cell[] } | null {
+export function findSpot(state: GameState, key: CatalogKey, prefer?: Cell, spread = false, near?: Cell): { x: number; y: number; road: Cell[] } | null {
   if (catalogKind(key) === 'decor') {
     const c = findDecorSpot(state, key as DecorId);
     return c === null ? null : { x: c.x, y: c.y, road: [] };
@@ -740,8 +789,9 @@ export function findSpot(state: GameState, key: CatalogKey, prefer?: Cell, sprea
     const g = v.placed('gate');
     return g === undefined ? cellIndex(GRID.w >> 1, GRID.h - 1) : v.entryCellIndex(g);
   })();
-  const gx = ge % GRID.w;
-  const gy = Math.floor(ge / GRID.w);
+  // near를 주면 마을 입구 대신 그 칸에 가까운 자리 (개발용 ?shops=1: 광장 둘레).
+  const gx = near?.x ?? ge % GRID.w;
+  const gy = near?.y ?? Math.floor(ge / GRID.w);
   // 이어진 길에서 빈 칸으로 번지는 거리 (새 길을 몇 칸 깔아야 하나).
   const dist = new Int32Array(N).fill(-1);
   const q: number[] = [];

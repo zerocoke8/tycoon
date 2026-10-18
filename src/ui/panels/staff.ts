@@ -1,13 +1,15 @@
-// 주민 탭: 진행자 자리(열린 부스의 자리마다 누가 맡았나), 고용한 진행자(능력치, 맡은 자리, 레벨 업), 고용 후보(어울리는 자리).
+// 주민 탭: 진행자 자리(열린 부스의 자리마다 누가 맡았나), 가게 주인 자리 (다섯째 묶음: 지은 가게마다), 고용한 진행자(능력치, 맡은 자리, 레벨 업), 고용 후보(어울리는 자리).
 
-import { BOOTH_IDS, boothDef, BUILDINGS, STAFF_STAT_NAMES, type BoothId } from '../../data/defs.ts';
-import { hirePost } from '../../sim/staff.ts';
+import { BOOTH_IDS, boothDef, BUILDINGS, SHOP_IDS, SHOP_OWNER_ROLE, SHOPS, STAFF_STAT_NAMES, type BoothId, type ShopId } from '../../data/defs.ts';
+import { shopOwned, shopOwner } from '../../sim/shops.ts';
+import { hirePost, isIdle } from '../../sim/staff.ts';
 import { josa } from '../../sim/text.ts';
 import type { Candidate, Staff } from '../../sim/types.ts';
 import { btn, fmtSec, h, revealInSheet, setText } from '../dom.ts';
 import { bestStat, boothShort, boothTiny, postName, presetPostOf, roleStat, staffWhere } from '../labels.ts';
 import { BasePanel } from '../panel.ts';
 import { staffPic } from '../pics.ts';
+import { openShopOwnerMenu } from './shop.ts';
 import { openPostMenu, openRoleMenu } from '../staffMenu.ts';
 import { costChips, secHead, statBlock } from '../widgets.ts';
 
@@ -29,7 +31,8 @@ export class StaffPanel extends BasePanel {
   sig(): string {
     const s = this.st;
     return [
-      s.staff.map((st) => `${st.id}:${st.level}:${st.post === null ? '-' : `${st.post.booth}.${st.post.role}`}:${st.stats.pace}${st.stats.charm}${st.stats.welcome}`).join(','),
+      s.staff.map((st) => `${st.id}:${st.level}:${st.post === null ? '-' : `${st.post.booth}.${st.post.role}`}:${st.shop ?? '-'}:${st.stats.pace}${st.stats.charm}${st.stats.welcome}`).join(','),
+      SHOP_IDS.map((k) => `${s.shops[k].level}.${s.shops[k].owner ?? '-'}`).join(','),
       s.candidates.map((c) => `${c.name}:${c.cost}`).join(','),
       BOOTH_IDS.map((b) => `${s.booths[b].unlocked ? 1 : 0}${s.booths[b].staff.join('/')}`).join(','),
       s.buildings.office.level,
@@ -66,11 +69,22 @@ export class StaffPanel extends BasePanel {
     const closed = BOOTH_IDS.filter((b) => !s.booths[b].unlocked).length;
     if (closed > 0) this.el.append(h('div', 'mpv-note', `닫힌 놀이부스 ${closed}곳은 열면 자리가 생겨요 (짓기 탭)`));
 
+    // 가게 주인 자리 (다섯째 묶음): 지은 가게마다 한 칸 (누르면 주인 고르기). 짓기 = 주인이 같이 온다.
+    const shops = SHOP_IDS.filter((k) => shopOwned(s, k));
+    if (shops.length > 0) {
+      const own = shops.filter((k) => shopOwner(s, k) !== null).length;
+      this.el.append(secHead(`${SHOP_OWNER_ROLE} 자리`, `${own} / ${shops.length} · 누르면 바꿔요`));
+      const g = h('div', 'mpv-posts');
+      for (const k of shops) g.append(this.shopCell(k));
+      this.el.append(g);
+    }
+
     // 고용한 진행자
     this.el.append(secHead('진행자', `${s.staff.length}명`));
     if (s.staff.length === 0) this.el.append(h('div', 'mpv-empty', '아직 고용한 진행자가 없어요'));
     // 쉬는 진행자 먼저 (자리를 줄 사람), 그다음 자리 차례 (부스 순서·역할 순서).
-    const rank = (st: Staff): number => (st.post === null ? -1 : BOOTH_IDS.indexOf(st.post.booth) * 10 + st.post.role);
+    // 가게 주인 (다섯째 묶음)은 맨 뒤.
+    const rank = (st: Staff): number => (st.post !== null ? BOOTH_IDS.indexOf(st.post.booth) * 10 + st.post.role : isIdle(st) ? -1 : 1000);
     for (const st of [...s.staff].sort((x, y) => rank(x) - rank(y))) this.el.append(this.staffCard(st));
 
     // 고용 후보
@@ -116,11 +130,29 @@ export class StaffPanel extends BasePanel {
     return cell;
   }
 
+  /** 가게 주인 자리 한 칸: 주인 그림 (없으면 +), 가게 이름, 이름 (비어 있으면 붉게: 가게가 쉰다). */
+  private shopCell(k: ShopId): HTMLElement {
+    const o = shopOwner(this.st, k);
+    const cell = h(
+      'button',
+      o !== null ? 'mpv-post' : 'mpv-post empty need',
+      o !== null ? staffPic(o.art, o.name) : h('span', 'mpv-pic plus', '+'),
+      h('span', 'l', h('small', null, SHOPS[k].name), h('b', null, o !== null ? o.name : '세워 주세요'), h('small', 'stat', o !== null ? `손님맞이 ${o.stats.welcome}` : '비면 가게가 쉬어요')),
+    );
+    cell.type = 'button';
+    cell.setAttribute('aria-label', `${SHOPS[k].name} ${SHOP_OWNER_ROLE} 고르기`);
+    cell.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openShopOwnerMenu(this.ctx, cell, k);
+    });
+    return cell;
+  }
+
   private staffCard(st: Staff): HTMLElement {
     const post = st.post;
     const focus = post === null ? null : roleStat(post.booth, post.role);
     const where = focus === null ? staffWhere(st) : `${staffWhere(st)} · ${STAFF_STAT_NAMES[focus]} 담당`;
-    const move = btn('sub small', post === null ? '자리 주기 ▾' : '자리 ▾', () => openPostMenu(this.ctx, move, st));
+    const move = btn('sub small', isIdle(st) ? '자리 주기 ▾' : '자리 ▾', () => openPostMenu(this.ctx, move, st));
 
     const cost = this.sim.staffLevelUpCost(st.id);
     let lvl: HTMLElement;
@@ -132,9 +164,9 @@ export class StaffPanel extends BasePanel {
     }
     return h(
       'div',
-      post === null ? 'mpv-card idle' : 'mpv-card',
+      isIdle(st) ? 'mpv-card idle' : 'mpv-card',
       h('span', 'mpv-thumb', staffPic(st.art, st.name)),
-      h('div', 'mpv-grow', h('div', 'mpv-title', st.name, h('span', 'mpv-lv', `Lv.${st.level}`)), h('div', post === null ? 'mpv-desc rest' : 'mpv-desc', where), statBlock(st.stats, focus), h('div', 'mpv-act wrap', move, lvl)),
+      h('div', 'mpv-grow', h('div', 'mpv-title', st.name, h('span', 'mpv-lv', `Lv.${st.level}`)), h('div', isIdle(st) ? 'mpv-desc rest' : 'mpv-desc', where), statBlock(st.stats, focus), h('div', 'mpv-act wrap', move, lvl)),
     );
   }
 

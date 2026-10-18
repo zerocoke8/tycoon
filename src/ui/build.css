@@ -240,24 +240,24 @@
   top: -6px;
   z-index: 2;
   display: grid;
-  /* 글이 긴 묶음(놀이부스·가게·건물)에 조금 더 (길·땅도 44px는 넘는다) */
-  grid-template-columns: 1.12fr 1.02fr 1.22fr 0.88fr 0.84fr 0.84fr;
-  gap: 3px;
+  /* 여덟 묶음을 네 칸 두 줄로 (그림 옆에 이름: 360px 폰에서도 칸마다 80px 넘게, 높이 44px) */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
   margin: -6px -12px 4px;
-  padding: 8px 8px;
+  padding: 7px 8px;
   background: var(--dd-paper);
   border-bottom: 2px dashed rgba(59, 42, 32, 0.18);
 }
 .mpv-cat {
   position: relative;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
-  gap: 1px;
-  min-height: 52px;
+  gap: 3px;
+  min-height: 44px;
   min-width: 0;
-  padding: 4px 0 3px;
+  padding: 2px 2px;
   border-radius: 12px;
   border: 2px solid transparent;
   background: transparent;
@@ -269,20 +269,24 @@
   pointer-events: auto;
 }
 .mpv-cat .mpv-svg {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
 }
 .mpv-cat .nm {
   white-space: nowrap;
+  font-size: 13.5px;
 }
 @media (max-width: 374px) {
   .mpv-cat {
-    font-size: 11px;
-    letter-spacing: -0.6px;
+    gap: 2px;
+    letter-spacing: -0.5px;
+  }
+  .mpv-cat .nm {
+    font-size: 12.5px;
   }
   .mpv-cat .mpv-svg {
-    width: 24px;
-    height: 24px;
+    width: 21px;
+    height: 21px;
   }
 }
 .mpv-cat.on {

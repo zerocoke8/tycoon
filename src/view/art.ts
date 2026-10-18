@@ -8,7 +8,7 @@
 //   - 기준점 = 캔버스 좌표의 한 점 (예: 손님 몬스터의 발 (512, 870)). anchor = ((px - trim.x) / trim.w, (py - trim.y) / trim.h).
 
 import { Assets, Container, Graphics, Sprite, Text, type Texture } from 'pixi.js';
-import { BOOTH_IDS, boothDef, HOST_PRESETS, SPECIES, type BoothId } from '../data/defs.ts';
+import { BOOTH_IDS, boothDef, HOST_PRESETS, SHOPS, SPECIES, type BoothId } from '../data/defs.ts';
 
 export interface ArtTrim {
   x: number;
@@ -68,8 +68,10 @@ const OBJECT_BOOTHS: Readonly<Record<string, readonly BoothId[]>> = {
 };
 
 const boothReady = (b: BoothId, hall: number): boolean => boothDef(b).unlock.hall <= hall;
-/** 진행자가 아닌 마을 주민 그림 (넷째 묶음: 전당포 주인·은행원·일터 반장). 늘 불러온다. */
-const NPC_ARTS: readonly string[] = ['pawnbroker', 'banker', 'foreman'];
+/** 진행자가 아닌 마을 주민 그림 (넷째 묶음: 전당포 주인·은행원·일터 반장, 다섯째 묶음: 가게 주인). 늘 불러온다. */
+const NPC_ARTS: readonly string[] = ['pawnbroker', 'banker', 'foreman', ...Object.values(SHOPS).map((s) => s.owner.art)];
+/** 다섯째 묶음 가게의 지도 그림 (놀이기구 바퀴·곤돌라, 목마·트럭): 늘 불러온다 (개발용 ?shops=1은 회관 레벨과 상관없이 연다). */
+const SHOP_OBJECTS: ReadonlySet<string> = new Set(['objects/ferris_wheel', 'objects/ferris_gondola', 'racers/carousel_horse', 'racers/icecream_truck']);
 const speciesHall = (s: string): number | undefined => (SPECIES as Readonly<Record<string, { readonly hall: number } | undefined>>)[s]?.hall;
 
 /**
@@ -79,6 +81,7 @@ const speciesHall = (s: string): number | undefined => (SPECIES as Readonly<Reco
  * 회관이 오르면 loadArtForHall로 더 불러온다 (main.ts). 그동안 자리 표시였던 그림은 불러오는 대로 바뀐다.
  */
 function wanted(group: string, key: string, hall: number): boolean {
+  if (SHOP_OBJECTS.has(id(group, key))) return true;
   switch (group) {
     case 'monsters': {
       const h = speciesHall(key.slice(0, key.lastIndexOf('_')));
@@ -113,7 +116,7 @@ function wanted(group: string, key: string, hall: number): boolean {
 /** 작게 줄여 그리는 그림만 mipmap (지도 위 건물·손님·주민·효과·코인·경주 선수). 확대 화면에서 거의 1:1로 그리는 그림은 끈다 (메모리 1/3 아낌). */
 const MIPMAP_GROUPS = new Set(['map', 'monsters', 'characters', 'fx', 'items', 'racers']);
 /** 그 밖에 지도 위에 작게 그리는 그림 (연날리기 연은 지도 하늘 층에 작게). */
-const MIPMAP_KEYS = new Set(['objects/kite_red', 'objects/kite_blue', 'objects/kite_yellow', 'objects/kite_green']);
+const MIPMAP_KEYS = new Set(['objects/kite_red', 'objects/kite_blue', 'objects/kite_yellow', 'objects/kite_green', 'objects/ferris_wheel', 'objects/ferris_gondola']);
 
 /** 그림 하나를 다시 받아 보는 횟수. */
 const LOAD_RETRIES = 3;

@@ -11,8 +11,8 @@
 // 숫자·검사는 sim (SimApi.canPlace·place·move·paintRoad·eraseRoad·buyChunk), 여기는 보여 주기와 입력만.
 
 import { Container, Graphics, Text } from 'pixi.js';
-import { BOOTH_LAYOUT, BUILDING_LAYOUT, FLOORS, KITE_GEO, RACE_GEO, YARD_GEO, artBase, catalogKind, footprint, type CatalogKey } from '../data/catalog.ts';
-import { BOOTHS, type BoothId, type BuildingId } from '../data/defs.ts';
+import { BOOTH_LAYOUT, BUILDING_LAYOUT, FLOORS, KITE_GEO, RACE_GEO, SHOP_LAYOUT, TRUCK_GEO, YARD_GEO, artBase, catalogKind, footprint, type CatalogKey } from '../data/catalog.ts';
+import { BOOTHS, type BoothId, type BuildingId, type ShopId } from '../data/defs.ts';
 import { CELL, CHUNK, CHUNKS, GRID, GROUND_STYLE, cellIndex, type Cell, type Pt } from '../data/map.ts';
 import type { Result, SimApi } from '../sim/api.ts';
 import { underRoof, type PlaceCheck, type Village } from '../sim/village.ts';
@@ -75,11 +75,13 @@ const LABEL_SCREEN = 16;
 
 const NONE: BuildMode = { kind: 'none' };
 
-/** 유령 그림 한 조각 (건물 기준 상대 자리, 배율 k = 세계 px / 캔버스 px). */
+/** 유령 그림 한 조각 (건물 기준 상대 자리, 배율 k = 세계 px / 캔버스 px, group = 그림 묶음 (없으면 map), anchor = 캔버스 기준점 (없으면 아래 가운데)). */
 interface GhostPart {
   readonly art: string;
   readonly at: Pt;
   readonly k: number;
+  readonly group?: string;
+  readonly anchor?: Pt;
 }
 
 /** 지도에 서는 그림 그대로 (buildings.ts와 같은 그림·배율): 부스 = 부스 그림 + 소품, 일터 = 밭·광산·소품, 그 밖 = 하나. */
@@ -101,6 +103,12 @@ function ghostParts(key: CatalogKey): GhostPart[] {
       }
       const L = BUILDING_LAYOUT[key as BuildingId] as (typeof BUILDING_LAYOUT)[BuildingId] | undefined;
       return [{ art: key, at: L?.base ?? artBase(key), k: L?.k ?? ART_SCALE.building }];
+    }
+    case 'shop': {
+      // 가게 (다섯째 묶음): 그림 조각 그대로, 트럭 차고는 트럭.
+      const s = key as ShopId;
+      if (s === 'icecream_truck') return [{ art: 'icecream_truck', group: 'racers', at: TRUCK_GEO.home, k: TRUCK_GEO.k }];
+      return SHOP_LAYOUT[s].parts.map((p) => ({ art: p.key, group: p.group, at: p.at, k: p.k, ...(p.anchor === undefined ? {} : { anchor: p.anchor }) }));
     }
     default:
       return [{ art: key, at: artBase(key), k: ART_SCALE.prop }];
@@ -388,7 +396,7 @@ export class BuildModeView {
     if (wx >= x0 - pad && wx <= x0 + fp.w * CELL + pad && wy >= y0 - pad && wy <= y0 + fp.h * CELL + pad) return true;
     // 그림 (발자국 위로 삐져나간 지붕).
     const p = ghostParts(key)[0];
-    const m = p === undefined ? undefined : artMeta('map', p.art);
+    const m = p === undefined ? undefined : artMeta(p.group ?? 'map', p.art);
     if (p === undefined || m === undefined) return false;
     const w = m.trim.w * p.k;
     const h = m.trim.h * p.k;
@@ -650,8 +658,8 @@ export class BuildModeView {
     const parts: ArtNode[] = [];
     const list = ghostParts(key);
     for (const p of list) {
-      const a = new ArtNode({ k: p.k, anchor: 'bottom', placeholder: { w: (fp.w * CELL * 0.8) / p.k, h: (fp.h * CELL * 0.9) / p.k, color: 0xd9c7a6 } });
-      a.setArt('map', p.art);
+      const a = new ArtNode({ k: p.k, anchor: p.anchor ?? 'bottom', placeholder: { w: (fp.w * CELL * 0.8) / p.k, h: (fp.h * CELL * 0.9) / p.k, color: 0xd9c7a6 } });
+      a.setArt(p.group ?? 'map', p.art);
       a.position.set(p.at.x, p.at.y);
       node.addChild(a);
       parts.push(a);

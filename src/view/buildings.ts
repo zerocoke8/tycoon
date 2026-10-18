@@ -311,7 +311,8 @@ export class BuildingsView {
       const kind = catalogKind(p.key);
       if (kind === 'booth') this.addBooth(v, p.key as BoothId, p);
       else if (kind === 'building') this.addBuilding(v, p.key as BuildingId, p);
-      else this.decorNodes.set(p.id, this.addDecor(p.key, v.artOf(p), (p.id * 7) % 3 === 0));
+      // 가게 (다섯째 묶음)는 view/shops.ts ShopsView가 세운다.
+      else if (kind === 'decor') this.decorNodes.set(p.id, this.addDecor(p.key, v.artOf(p), (p.id * 7) % 3 === 0));
     }
     // 촌장 (마을회관 앞).
     if (v.placed('hall') !== undefined) {

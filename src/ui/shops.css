@@ -1,0 +1,746 @@
+/* 다섯째 묶음 가게 UI (ui/panels/shop.ts 가게 시트, ui/panels/album.ts 사진첩, 손님 카드의 가게 줄). 토큰은 ui.css :root. */
+
+/* ── 가게 시트: 머리 ── */
+.mpv-shop-head .mpv-thumb {
+  width: 76px;
+  height: 76px;
+}
+.mpv-shop-st {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-family: var(--dd-font-round);
+  font-size: 14.5px;
+  line-height: 1.25;
+  color: #3f6b2e;
+}
+.mpv-shop-st .dot {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-green);
+  animation: mpv-shop-blink 1.6s ease-in-out infinite;
+}
+.mpv-shop-st.idle {
+  color: #b2402c;
+}
+.mpv-shop-st.idle .dot {
+  background: var(--dd-red);
+  animation: none;
+}
+@keyframes mpv-shop-blink {
+  50% {
+    opacity: 0.45;
+  }
+}
+.mpv-shop-today {
+  margin-top: 0;
+}
+.mpv-shop-sum {
+  margin: 2px 4px 2px;
+}
+.mpv-shop-sum small {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+/* 가게 주인 */
+.mpv-owner {
+  align-items: center;
+}
+.mpv-owner > .mpv-btn {
+  flex: none;
+  align-self: center;
+}
+.mpv-owner .mpv-stats {
+  gap: 8px;
+}
+.mpv-owner.none {
+  background: #fbe9e2;
+}
+.mpv-owner .mpv-pic.plus,
+.mpv-seat .mpv-pic.plus {
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 2px dashed var(--dd-ink-soft);
+  font-family: var(--dd-font-round);
+  font-size: 20px;
+  color: var(--dd-ink-soft);
+}
+
+/* ── 자리 (식당 테이블·여관 방·온천 탕·미용실 의자·사진관 배경판·목마·곤돌라) ── */
+.mpv-seats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.mpv-seat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 52px;
+  padding: 4px 8px 4px 4px;
+  border-radius: 13px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  text-align: left;
+}
+button.mpv-seat {
+  pointer-events: auto;
+}
+button.mpv-seat:active {
+  background: var(--dd-paper-2);
+}
+.mpv-seat.coming {
+  border-style: dashed;
+}
+.mpv-seat.empty {
+  border-style: dashed;
+  border-color: rgba(59, 42, 32, 0.4);
+  background: transparent;
+  color: var(--dd-ink-soft);
+}
+.mpv-seat.locked {
+  border-style: dashed;
+  border-color: rgba(59, 42, 32, 0.25);
+  background: rgba(234, 219, 189, 0.5);
+  color: var(--dd-ink-soft);
+  opacity: 0.8;
+}
+.mpv-seat > .mpv-pic.plus {
+  width: 34px;
+  height: 34px;
+  margin: 2px;
+}
+.mpv-seat .face {
+  position: relative;
+  flex: none;
+  display: grid;
+  width: 42px;
+  height: 42px;
+}
+.mpv-seat .face > .mpv-pic:first-child {
+  width: 42px;
+  height: 42px;
+  font-size: 16px;
+}
+.mpv-seat .face .emote {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  width: 22px;
+  height: 22px;
+  animation: mpv-seat-float 2s ease-in-out infinite;
+}
+.mpv-seat .face .food {
+  position: absolute;
+  bottom: -2px;
+  right: -6px;
+  width: 22px;
+  height: 22px;
+}
+/* 온천: 손님이 물에 잠긴 모습 (아래 반을 김 서린 물로) */
+.mpv-seat.soak .face::after {
+  content: '';
+  position: absolute;
+  left: -3px;
+  right: -3px;
+  bottom: -2px;
+  height: 46%;
+  border-radius: 40% 40% 10px 10px / 30% 30% 10px 10px;
+  border-top: 2px solid var(--dd-ink);
+  background: rgba(142, 200, 238, 0.82);
+}
+@keyframes mpv-seat-float {
+  50% {
+    transform: translateY(-3px);
+  }
+}
+.mpv-seat .l {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.2;
+}
+.mpv-seat .l b {
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-seat .l small {
+  font-size: 11.5px;
+  color: var(--dd-ink-soft);
+}
+
+/* 놀이기구 한 바퀴 */
+.mpv-ride {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 14px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  font-family: var(--dd-font-round);
+  font-size: 14.5px;
+}
+.mpv-ride .mpv-grow {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.mpv-ride .flag .mpv-svg {
+  width: 34px;
+  height: 34px;
+}
+.mpv-ride[data-phase='running'] .flag .mpv-svg {
+  animation: mpv-ride-spin 3s linear infinite;
+}
+.mpv-ride[data-phase='running'] {
+  background: #e8f4dc;
+}
+.mpv-ride[data-phase='boarding'] {
+  background: #fff4cf;
+}
+@keyframes mpv-ride-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── 아이스크림 트럭: 작은 길 지도 ── */
+.mpv-truck {
+  gap: 6px;
+}
+.mpv-truckmap {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 210px;
+  border-radius: 12px;
+  border: 2px solid var(--dd-ink);
+  background: #a9c97d;
+  overflow: hidden;
+}
+.mpv-truckmap .bg {
+  fill: #a9c97d;
+}
+.mpv-truckmap .bld {
+  fill: rgba(246, 235, 213, 0.75);
+  stroke: rgba(59, 42, 32, 0.35);
+  stroke-width: 0.08;
+}
+.mpv-truckmap .gate {
+  fill: #8cc47a;
+  stroke: var(--dd-ink);
+  stroke-width: 0.1;
+}
+.mpv-truckmap .home {
+  fill: var(--dd-butter);
+  stroke: var(--dd-ink);
+  stroke-width: 0.12;
+}
+.mpv-truckmap .road {
+  fill: #ebc68e;
+}
+.mpv-truckmap .road.cut {
+  fill: #d9b98f;
+  opacity: 0.6;
+}
+.mpv-truckmap .route {
+  fill: none;
+  stroke: #e46f5a;
+  stroke-width: 0.22;
+  stroke-dasharray: 0.45 0.32;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  animation: mpv-route 1.2s linear infinite;
+}
+@keyframes mpv-route {
+  to {
+    stroke-dashoffset: -0.77;
+  }
+}
+.mpv-truckmap .stop path {
+  fill: #e46f5a;
+  stroke: var(--dd-ink);
+  stroke-width: 0.1;
+  stroke-linejoin: round;
+}
+.mpv-truckmap .truck .sell {
+  fill: rgba(243, 211, 106, 0.55);
+  stroke: var(--dd-ink);
+  stroke-width: 0.08;
+  opacity: 0;
+}
+.mpv-truckmap .truck.selling .sell {
+  opacity: 1;
+  animation: mpv-sell 1.4s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+@keyframes mpv-sell {
+  50% {
+    transform: scale(1.2);
+  }
+}
+.mpv-truck-st {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--dd-font-round);
+  font-size: 14.5px;
+  line-height: 1.25;
+}
+.mpv-truck-st .mpv-btn {
+  flex: none;
+}
+
+/* ── 장신구 가게 진열 (전당포 진열장 칸을 그대로) ── */
+.mpv-stock .mpv-acc-cell .slot b {
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 12.5px;
+  color: var(--dd-wood-3);
+}
+
+/* ── 꽃집: 최근 선물 ── */
+.mpv-gifts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mpv-gift {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 4px;
+  border-radius: 13px;
+  border: 2px solid var(--dd-ink);
+  background: #fdeef0;
+}
+.mpv-gift .who {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 44px;
+  flex: 1;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  pointer-events: auto;
+}
+.mpv-gift .who .mpv-pic {
+  width: 36px;
+  height: 36px;
+}
+.mpv-gift .who .nm {
+  font-family: var(--dd-font-round);
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-gift .arrow .mpv-pic {
+  width: 28px;
+  height: 28px;
+}
+.mpv-gift .when {
+  flex: none;
+  font-size: 11px;
+  color: var(--dd-ink-soft);
+}
+
+/* ── 메뉴 ── */
+.mpv-menu-card {
+  gap: 4px;
+}
+.mpv-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 2px 0;
+  border-bottom: 1.5px dashed rgba(59, 42, 32, 0.18);
+}
+.mpv-menu-row .pic {
+  flex: none;
+  display: grid;
+  width: 38px;
+  height: 38px;
+}
+.mpv-menu-row .pic .mpv-pic {
+  width: 38px;
+  height: 38px;
+  font-size: 15px;
+}
+.mpv-menu-row .l {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+.mpv-menu-row .l b {
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 15.5px;
+}
+.mpv-menu-row .l small {
+  font-size: 11.5px;
+  color: var(--dd-ink-soft);
+}
+.mpv-chip.price {
+  flex: none;
+  height: 28px;
+  font-size: 14px;
+}
+.mpv-chip.price .mpv-pic {
+  width: 21px;
+  height: 21px;
+}
+.mpv-chip.price.sm {
+  height: 26px;
+  font-size: 13px;
+  padding-right: 7px;
+}
+
+/* ── 지금 손님 ── */
+.mpv-guest .buy {
+  width: 28px;
+  height: 28px;
+}
+.mpv-recent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+.mpv-recent:empty {
+  display: none;
+}
+.mpv-recent .lab {
+  font-family: var(--dd-font-round);
+  font-size: 12.5px;
+  color: var(--dd-ink-soft);
+  margin-right: 2px;
+}
+.mpv-chip.sale {
+  height: 28px;
+  max-width: 100%;
+  padding: 0 8px 0 2px;
+  font-size: 12.5px;
+  background: var(--dd-paper);
+}
+.mpv-chip.sale .nm {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-chip.sale b {
+  font-weight: normal;
+  margin-left: 2px;
+}
+.mpv-chip.sale small {
+  margin-left: 3px;
+  font-family: var(--dd-font-body);
+  font-size: 10.5px;
+  color: var(--dd-ink-soft);
+}
+
+/* ── 사진첩 ── */
+/* 사진 한 장: 크림색 테두리 즉석 사진 (아래가 두껍다), 안 = 배경판 앞에서 찍은 손님 */
+.mpv-photo {
+  --tilt: 0deg;
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 5px 5px 15px;
+  border-radius: 4px;
+  border: 2px solid var(--dd-ink);
+  background: #fffdf6;
+  box-shadow: 0 2px 0 rgba(59, 42, 32, 0.35);
+  transform: rotate(var(--tilt));
+}
+.mpv-photo .shot {
+  position: relative;
+  display: grid;
+  place-items: end center;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border-radius: 2px;
+  border: 1.5px solid rgba(59, 42, 32, 0.55);
+  background-color: #cfe6f5;
+  background-repeat: no-repeat;
+  background-size: 150% auto;
+  background-position: 50% 32%;
+}
+.mpv-photo .shot .who {
+  width: 92%;
+  height: 92%;
+  margin-bottom: -4%;
+}
+.mpv-photo .shot .mpv-ph {
+  width: 60%;
+  height: 60%;
+  margin-bottom: 20%;
+  font-size: 20px;
+}
+.mpv-photo.none {
+  background: var(--dd-paper-2);
+  box-shadow: none;
+}
+.mpv-photo.none .shot {
+  background: rgba(59, 42, 32, 0.08);
+  border-style: dashed;
+}
+.mpv-photo.none .shot .who img {
+  filter: brightness(0);
+  opacity: 0.22;
+}
+.mpv-photo.none .shot .mpv-ph {
+  background: var(--dd-ink-soft);
+  color: var(--dd-paper);
+  opacity: 0.45;
+}
+.mpv-album-sub {
+  margin: 8px 4px 4px;
+  font-family: var(--dd-font-round);
+}
+.mpv-album {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 10px 8px;
+}
+.mpv-album-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-height: 44px;
+  padding: 6px 4px 4px;
+  border: none;
+  background: transparent;
+  text-align: center;
+  pointer-events: auto;
+}
+.mpv-album-cell:active .mpv-photo {
+  transform: rotate(var(--tilt)) scale(0.96);
+}
+.mpv-album-cell .name {
+  margin-top: 4px;
+  font-family: var(--dd-font-round);
+  font-size: 13px;
+  line-height: 1.2;
+}
+.mpv-album-cell .sub {
+  font-size: 11px;
+  color: var(--dd-ink-soft);
+}
+.mpv-album-cell.none .name {
+  color: var(--dd-ink-soft);
+}
+/* 사진관 시트: 최근 찍은 사진 넷 */
+.mpv-album-card {
+  gap: 6px;
+}
+.mpv-album-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 2px 4px;
+}
+.mpv-album-strip > .mpv-note {
+  grid-column: 1 / -1;
+}
+.mpv-photo.mini {
+  padding: 3px 3px 9px;
+}
+.mpv-album-card .mpv-act {
+  margin-top: 4px;
+}
+
+/* 짓기 탭: 목표 칩이 가리킨 카드 반짝 */
+.mpv-card.flash {
+  animation: mpv-card-flash 1.6s ease-out 1;
+}
+@keyframes mpv-card-flash {
+  0%,
+  40% {
+    box-shadow: 0 0 0 4px var(--dd-butter), var(--dd-pop-s);
+  }
+  100% {
+    box-shadow: var(--dd-pop-s);
+  }
+}
+
+/* ── 손님 카드: 가게 줄 (손에 든 것·반짝·점괘·걸음·팁, 산 것) ── */
+.mpv-mcard-shop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+.mpv-mcard-shop .mpv-chip {
+  height: 28px;
+  padding: 0 9px 0 3px;
+  font-size: 13px;
+}
+.mpv-mcard-shop .mpv-chip .mpv-pic {
+  width: 22px;
+  height: 22px;
+}
+.mpv-chip.held {
+  background: #fff4cf;
+}
+.mpv-chip.held.eat .mpv-pic {
+  animation: mpv-nom 0.5s steps(2) infinite;
+}
+@keyframes mpv-nom {
+  50% {
+    transform: translateY(-1.5px) rotate(-6deg);
+  }
+}
+.mpv-chip.buff {
+  padding: 0 9px;
+}
+.mpv-chip.buff.sparkle {
+  background: #fdf0ff;
+  border-color: #8a5aa8;
+  color: #6b3f8a;
+}
+.mpv-chip.buff.good {
+  background: #e3f3d8;
+  color: #3f6b2e;
+}
+.mpv-chip.buff.bad {
+  background: #e9e2f2;
+  color: #5a4a78;
+}
+.mpv-chip.buff.speed {
+  background: #e2f1fb;
+}
+.mpv-chip.tip {
+  background: #fff1c2;
+}
+.mpv-mcard-buys {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.mpv-mcard-buys .lab {
+  font-family: var(--dd-font-round);
+  font-size: 12.5px;
+  color: var(--dd-ink-soft);
+}
+.mpv-mcard-buys button {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  height: 28px;
+  min-width: 44px;
+  padding: 0 6px 0 2px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  font-family: var(--dd-font-round);
+  font-size: 12.5px;
+  pointer-events: auto;
+}
+.mpv-mcard-buys button .mpv-pic {
+  width: 22px;
+  height: 22px;
+}
+/* 보이는 알약은 28px, 누르는 곳은 위아래로 넓혀 44px (작은 폰에서 옆 칩을 잘못 누르지 않게). */
+.mpv-mcard-buys button {
+  position: relative;
+}
+.mpv-mcard-buys button::before {
+  content: '';
+  position: absolute;
+  inset: -8px -2px;
+}
+/* 미용실 반짝이 (지도와 같이 한동안) */
+.mpv-mcard-face .sparkle {
+  position: absolute;
+  top: -8px;
+  left: -10px;
+  width: 30px;
+  height: 30px;
+  animation: mpv-twinkle 1.2s ease-in-out infinite;
+}
+.mpv-mcard-face .sparkle.b {
+  top: auto;
+  left: auto;
+  bottom: -2px;
+  right: -8px;
+  width: 22px;
+  height: 22px;
+  animation-delay: 0.6s;
+}
+@keyframes mpv-twinkle {
+  50% {
+    transform: scale(0.7) rotate(20deg);
+    opacity: 0.55;
+  }
+}
+.mpv-owner-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mpv-owner-top .mpv-btn {
+  flex: none;
+}
+.mpv-owner .mpv-note {
+  margin-top: 3px;
+  font-size: 11.5px;
+}
+.mpv-ride .mpv-bar {
+  flex: none;
+  height: 12px;
+}
+/* 보관함·길이 끊긴 가게: 머리 카드 바로 아래 [지도에 놓기]·[길 잇기] */
+.mpv-shop-head + .mpv-place {
+  margin: -4px 0 10px;
+}
+.mpv-shop-head + .mpv-place .mpv-act {
+  margin-top: 0;
+}
+/* 놓인 가게의 시트는 조금 낮게: 위 띠 (머리 칩 아래)에 가게와 손님 모습이 보이게 (72%면 지붕 끝만 보였다). */
+.mpv-sheet.mpv-shopsheet {
+  height: 58%;
+}
+/* 짧은 폰 (높이 720 아래): 시트를 더 낮게, 첫 화면에 이 가게만의 것 (메뉴·값·효과)이 머리 카드 바로 아래,
+   주인 칸은 능력치 풀이를 빼고 한 덩이로. */
+@media (max-height: 720px) {
+  .mpv-sheet.mpv-shopsheet {
+    height: 52%;
+  }
+  .mpv-shoppanel > .mpv-shop-head,
+  .mpv-shoppanel > .mpv-shop-head + .mpv-place {
+    order: -2;
+  }
+  .mpv-shoppanel > .mpv-shop-menu {
+    order: -1;
+  }
+  .mpv-shoppanel .mpv-owner .mpv-stats,
+  .mpv-shoppanel .mpv-owner .mpv-note {
+    display: none;
+  }
+}

@@ -22,15 +22,17 @@
 //   ?debtors=N      일터를 짓고 채무자 N명을 바로 일터에 (일·빚 걸기 판 보기, 저장하지 않는다)
 //   ?match=<booth>  (?debtors=N·?all=1과 같이) 처음에 그 부스(ssireum·tug)에 빚 걸기 판을 연다
 //   ?acc=1          모든 손님에게 장신구를 자리마다 하나씩 (장신구 붙는 점 맞추기, 저장하지 않는다)
+//   ?shops=1        가게 15곳을 (회관 레벨·비용 없이) 열고 주인을 들여 광장 가까이 길까지 이어 놓는다 (다섯째 묶음, 저장하지 않는다).
+//                   ?shops=snack_stall,carousel처럼 몇 곳만도.
 // 잡히지 않은 오류는 index.html의 빨간 오류 상자에 쌓인다 (헤드리스 --dump-dom에서도 보인다).
 
 import './style.css';
 import { Application, UPDATE_PRIORITY } from 'pixi.js';
 import { tweens } from './core/tween.ts';
 import { isCatalogKey } from './data/catalog.ts';
-import { BOOTH_IDS, SIM, type BoothId } from './data/defs.ts';
+import { BOOTH_IDS, SHOP_IDS, SIM, type BoothId, type ShopId } from './data/defs.ts';
 import type { Pt } from './data/map.ts';
-import { devAccessories, devBroke, devDecorate, devGiveGoods, devOpenAll, devSeedDebtors } from './sim/dev.ts';
+import { devAccessories, devBroke, devDecorate, devGiveGoods, devOpenAll, devSeedDebtors, devShops } from './sim/dev.ts';
 import { Sim, loadGame, newGame } from './sim/sim.ts';
 import type { GameState } from './sim/types.ts';
 import { createUi } from './ui/ui.ts';
@@ -70,7 +72,15 @@ const DEV = {
   broke: params.get('broke') === '1',
   acc: params.get('acc') === '1',
   debtors: Math.max(0, Math.min(30, Math.floor(num('debtors') ?? 0))),
+  shops: params.get('shops'),
 };
+/** ?shops= 값 → 놓을 가게 ('1'이면 모두, 아니면 쉼표로 고른 가게). 없으면 null. */
+const DEV_SHOPS: readonly ShopId[] | null = (() => {
+  const v = DEV.shops;
+  if (v === null || v === '' || v === '0') return null;
+  if (v === '1') return SHOP_IDS;
+  return v.split(',').filter((k): k is ShopId => (SHOP_IDS as readonly string[]).includes(k));
+})();
 /** ?at= 값 → 세계 좌표 ('x,y' 또는 부스·건물 이름이면 놓인 그림 자리 위쪽). */
 function atPoint(sim: Sim, v: string | null): Pt | null {
   if (v === null || v === '') return null;
@@ -85,7 +95,7 @@ function atPoint(sim: Sim, v: string | null): Pt | null {
 }
 
 /** fresh 게임은 저장하지 않는다 (진짜 저장을 덮지 않게). */
-const SAVING = !DEV.fresh && !DEV.all && !DEV.broke && !DEV.acc && DEV.debtors === 0;
+const SAVING = !DEV.fresh && !DEV.all && !DEV.broke && !DEV.acc && DEV.debtors === 0 && DEV_SHOPS === null;
 
 /** 지금 배속 (개발 서버에서는 콘솔 mpv.setSpeed(n)으로 바꿀 수 있다). */
 let speed = DEV.speed;
@@ -172,7 +182,7 @@ async function waitFonts(): Promise<void> {
 // ── 게임 상태 ──
 
 function startState(): { state: GameState; loaded: boolean } {
-  const saved = DEV.fresh || DEV.all || DEV.broke || DEV.acc || DEV.debtors > 0 ? null : loadGame();
+  const saved = DEV.fresh || DEV.all || DEV.broke || DEV.acc || DEV.debtors > 0 || DEV_SHOPS !== null ? null : loadGame();
   const state = saved ?? newGame(DEV.seed ?? undefined);
   if (DEV.coins !== null) state.coins = Math.max(0, Math.floor(DEV.coins));
   return { state, loaded: saved !== null };
@@ -230,6 +240,11 @@ async function boot(): Promise<void> {
   const match = params.get('match');
   if (match === 'ssireum' || match === 'tug') sim.devDebtMatch(match);
   if (DEV.acc) devAccessories(sim);
+  if (DEV_SHOPS !== null) {
+    devShops(sim, DEV_SHOPS);
+    // 회관 레벨과 상관없이 가게를 다 열었으니 그림도 다 (기념품 인형·관람차 등: 회관 1에서도 자리 표시가 아니게, 놀이기구 조각을 세우기 전에).
+    await loadArtForHall(5);
+  }
   // ?only=<부스>: 그 부스만 열어 둔다 (손님이 다 그리로 간다: 새 부스 연출 확인용, ?all=1과 같이).
   const only = params.get('only');
   if (DEV.all && only !== null && (BOOTH_IDS as readonly string[]).includes(only)) for (const b of BOOTH_IDS) if (b !== only) sim.state.booths[b].unlocked = false;

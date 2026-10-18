@@ -900,6 +900,208 @@ export function debtReactionLabels(kind: DebtReactKind): string[] {
 /** 넷째 묶음 반응 종류 모두 (시험용). */
 export const DEBT_REACT_KINDS = Object.keys(DEBT_REACT) as DebtReactKind[];
 
+/**
+ * 다섯째 묶음 (DESIGN 3.8) 가게 반응 종류. goShop = 가게로 걸어가기 시작할 때 (걸으며 작게: goShopSad = 지고 달래러·단 게 당겨서, goShopHappy = 따서 축하하러),
+ * snack·drink·bread·icecream = 산 것을 받아 들고, feast = 식당에서 다 먹음, favorite = 좋아하는 메뉴, stuffed = 배 터지게 먹고 드러눕기,
+ * stuffedUp = 드러누웠다 일어남, flopWatch = 드러누운 손님을 본 근처 손님, accessory = 새 장신구를 달고 반짝, salon = 미용실에서 반짝이며 나옴,
+ * innWake = 여관에서 졸린 얼굴로 나옴, soak = 온천에서 녹아내림, fortuneGood (열쇠 'great' 대길·'good' 길)·fortuneBad = 점괘,
+ * fortuneTrue·fortuneCurse = 운이 붙은 손님의 한판이 점괘대로 (좋은 점괘에 이김·흉에 짐), ride = 놀이기구 한 바퀴, photo = 찰칵,
+ * souvenir = 인형을 안고, giftGive·giftGet = 꽃 선물, giftComfort·giftThanks = 시무룩한 친구에게 위로 꽃 (주는·받는 손님), tip = 진행자에게 팁,
+ * lonely = 꽃을 건넬 친구를 못 찾음.
+ */
+export type ShopReactKind =
+  | 'goShop'
+  | 'goShopSad'
+  | 'goShopHappy'
+  | 'snack'
+  | 'drink'
+  | 'bread'
+  | 'icecream'
+  | 'feast'
+  | 'favorite'
+  | 'stuffed'
+  | 'stuffedUp'
+  | 'flopWatch'
+  | 'accessory'
+  | 'salon'
+  | 'innWake'
+  | 'soak'
+  | 'fortuneGood'
+  | 'fortuneBad'
+  | 'fortuneTrue'
+  | 'fortuneCurse'
+  | 'ride'
+  | 'photo'
+  | 'souvenir'
+  | 'giftGive'
+  | 'giftGet'
+  | 'giftComfort'
+  | 'giftThanks'
+  | 'tip'
+  | 'lonely';
+
+/** 시무룩한 쪽 반응 (성격 무게·세기를 슬픔으로 본다). */
+const SHOP_NEGATIVE: ReadonlySet<ShopReactKind> = new Set(['fortuneBad', 'fortuneCurse', 'lonely', 'goShopSad']);
+
+const SHOP_REACT: Record<ShopReactKind, readonly Cand[]> = {
+  // 걸으며 작게 (연출 없이 이모트만).
+  goShop: [
+    c('base', 'note', 'none', '뭐 사 먹을까', 0.8, 1.4, 'main', 'bright'),
+    c('joy', 'heart', 'none', '두근두근 쇼핑', 0.8, 1.4, 'loud'),
+    c('base', 'sweat', 'none', '조금만 쓰자…', 0.8, 1.4, 'calm'),
+    c('base', 'note', 'none', '구경만 할까', 0.8, 1.4, 'calm'),
+  ],
+  goShopSad: [
+    c('base', 'sweat', 'none', '배고파…', 0.8, 1.6, 'main'),
+    c('sad', 'tear', 'none', '단 게 당겨', 0.8, 1.6, 'tear'),
+    c('base', 'note', 'none', '기분 전환하자!', 0.8, 1.4, 'bright'),
+    c('sad', 'storm', 'none', '위로가 필요해', 0.8, 1.6, 'gloom'),
+  ],
+  goShopHappy: [
+    c('joy', 'sparkle', 'none', '한턱 쏜다!', 0.9, 1.6, 'main', 'loud'),
+    c('joy', 'note', 'none', '기념으로 하나!', 0.85, 1.4, 'bright'),
+    c('joy', 'heart', 'none', '오늘은 사치다~', 0.85, 1.4, 'loud'),
+    c('base', 'sparkle', 'none', '딴 김에…', 0.8, 1.4, 'calm'),
+  ],
+  snack: [
+    c('joy', 'yum', 'hop', '냠냠', 0.9, 1.6, 'main'),
+    c('joy', 'heart', 'squash', '달콤해!', 0.9, 1.6, 'bright', 'loud'),
+    c('base', 'yum', 'none', '오물오물', 0.8, 1.6, 'calm'),
+    c('joy', 'yum', 'hop', '기운이 난다!', 0.9, 1.6, 'bright'),
+    c('base', 'yum', 'squash', '한 입만 더…', 0.8, 1.6, 'gloom'),
+  ],
+  drink: [
+    c('joy', 'yum', 'hop', '홀짝', 0.9, 1.4, 'main'),
+    c('joy', 'note', 'squash', '시원해!', 0.9, 1.4, 'bright'),
+    c('base', 'yum', 'none', '후루룩', 0.8, 1.4, 'calm'),
+    c('joy', 'sparkle', 'hop', '발걸음이 가볍다', 0.9, 1.4, 'loud'),
+  ],
+  bread: [
+    c('joy', 'yum', 'hop', '갓 구운 빵!', 0.9, 1.6, 'main'),
+    c('base', 'heart', 'none', '빵 냄새…', 0.8, 1.6, 'calm'),
+    c('joy', 'note', 'squash', '빵 봉지 한가득', 0.9, 1.6, 'loud'),
+    c('joy', 'yum', 'hop', '든든해!', 0.9, 1.6, 'bright'),
+  ],
+  icecream: [
+    c('joy', 'yum', 'hop', '아이스크림!', 1.0, 1.6, 'main', 'loud'),
+    c('joy', 'heart', 'squash', '차가워 달콤해', 0.9, 1.6, 'bright'),
+    c('agony', 'shock', 'tremble', '머리가 띵', 0.9, 1.6, 'calm'),
+    c('joy', 'yum', 'bounceLoop', '녹기 전에 냠!', 0.9, 1.6, 'loud'),
+  ],
+  feast: [
+    c('joy', 'yum', 'bigHop', '배부르다!', 1.1, 2.2, 'main', 'loud'),
+    c('joy', 'heart', 'bounceLoop', '든든한 한 끼', 1.0, 2.2, 'bright'),
+    c('base', 'yum', 'squash', '잘 먹었습니다', 0.9, 2.0, 'calm'),
+    c('joy', 'yum', 'hop', '냠냠 쩝쩝', 1.0, 2.0, 'loud'),
+  ],
+  favorite: [
+    c('joy', 'sparkle', 'bigHop', '최고의 맛!', 1.3, 2.6, 'main', 'loud'),
+    c('joy', 'heart', 'spin', '이거 제일 좋아!', 1.2, 2.4, 'bright'),
+    c('joy', 'tear', 'tremble', '눈물 나게 맛있어', 1.1, 2.6, 'tear'),
+  ],
+  stuffed: [
+    c('joy', 'yum', 'slump', '배 터지겠다…', 1.2, 3.4, 'main'),
+    c('joy', 'sweat', 'slump', '데굴데굴 배부름', 1.1, 3.2, 'calm'),
+    c('agony', 'sweat', 'slump', '너무 많이 먹었다…', 1.1, 3.2, 'gloom'),
+  ],
+  stuffedUp: [
+    c('base', 'sweat', 'squash', '영차… 일어났다', 0.9, 1.8, 'main', 'calm'),
+    c('joy', 'yum', 'hop', '그래도 맛있었어', 0.9, 1.8, 'bright'),
+    c('base', 'sweat', 'tremble', '배가 출렁출렁', 0.9, 1.8, 'loud'),
+  ],
+  flopWatch: [
+    c('joy', 'note', 'hop', '푸핫!', 0.8, 1.6, 'main', 'loud'),
+    c('base', 'sweat', 'none', '괜찮아…?', 0.8, 1.6, 'calm'),
+    c('base', 'shock', 'none', '저렇게 맛있나', 0.8, 1.6, 'bright'),
+  ],
+  accessory: [
+    c('joy', 'sparkle', 'spin', '새 장신구 반짝!', 1.2, 2.4, 'main', 'loud'),
+    c('joy', 'heart', 'bigHop', '어울려?', 1.1, 2.4, 'bright'),
+    c('base', 'sparkle', 'hop', '조금 비쌌지만…', 0.9, 2.0, 'calm'),
+    c('joy', 'sparkle', 'squash', '멋쟁이 됐다', 1.0, 2.2, 'bright'),
+  ],
+  salon: [
+    c('joy', 'sparkle', 'spin', '반짝반짝!', 1.2, 2.4, 'main', 'loud'),
+    c('joy', 'heart', 'hop', '말끔해졌다!', 1.0, 2.2, 'bright'),
+    c('joy', 'sparkle', 'squash', '반짝반짝 새 모습', 1.1, 2.4, 'bright'),
+    c('base', 'heart', 'none', '거울 보고 싶다', 0.9, 2.2, 'calm'),
+  ],
+  innWake: [
+    c('base', 'sleep', 'squash', '푹 잤다…', 0.9, 2.6, 'main', 'calm'),
+    c('joy', 'sleep', 'hop', '개운해!', 1.0, 2.4, 'bright'),
+    c('base', 'sleep', 'tremble', '아직 졸려…', 0.9, 2.6, 'gloom'),
+    c('base', 'sleep', 'none', '노곤노곤', 0.9, 2.6, 'calm'),
+  ],
+  soak: [
+    c('joy', 'heart', 'slump', '녹아내린다…', 1.0, 2.6, 'main', 'calm'),
+    c('joy', 'note', 'bounceLoop', '따끈따끈', 1.0, 2.4, 'bright'),
+    c('joy', 'sparkle', 'hop', '뽀송뽀송!', 1.0, 2.2, 'loud'),
+    c('base', 'sleep', 'slump', '노곤노곤', 1.0, 2.6, 'calm'),
+    c('joy', 'heart', 'none', '여기가 천국', 1.0, 2.4, 'bright'),
+  ],
+  fortuneGood: [
+    ...only('great', [c('joy', 'sparkle', 'bigHop', '오늘 운수 대통!', 1.3, 2.6, 'main', 'loud'), c('joy', 'sparkle', 'spin', '대길이다!', 1.2, 2.4, 'bright'), c('joy', 'tear', 'tremble', '이런 점괘 처음이야', 1.1, 2.6, 'tear')]),
+    ...only('good', [c('joy', 'note', 'hop', '좋은 점괘!', 1.0, 2.2, 'main', 'bright'), c('base', 'heart', 'none', '길하대', 0.9, 2.0, 'calm'), c('joy', 'note', 'squash', '느낌이 좋아', 1.0, 2.0, 'loud')]),
+  ],
+  fortuneBad: [
+    c('sad', 'storm', 'slump', '흑, 흉이래', 1.0, 2.4, 'main', 'gloom'),
+    c('agony', 'sweat', 'tremble', '조심하래…', 0.9, 2.2, 'calm'),
+    c('sad', 'tear', 'none', '점괘가 무서워', 1.0, 2.4, 'tear'),
+    c('base', 'sweat', 'shake', '안 믿을 거야!', 0.9, 2.0, 'loud'),
+  ],
+  fortuneTrue: [
+    c('joy', 'sparkle', 'bigHop', '점괘대로다!', 1.2, 2.6, 'main', 'loud'),
+    // '역시 대길!'은 대길 점괘만 (sim이 buffs.fortune을 열쇠로 준다).
+    ...only('great', [c('joy', 'note', 'spin', '역시 대길!', 1.1, 2.4, 'bright')]),
+    c('joy', 'heart', 'hop', '점쟁이님 고마워요', 1.0, 2.4, 'calm'),
+  ],
+  fortuneCurse: [
+    c('sad', 'storm', 'slump', '점괘가 맞았어…', 1.1, 2.6, 'main', 'gloom'),
+    c('agony', 'tear', 'tremble', '흉이라더니…', 1.1, 2.6, 'tear'),
+    c('agony', 'sweat', 'shake', '이게 다 점괘 탓', 1.0, 2.4, 'loud', 'angry'),
+  ],
+  ride: [
+    c('joy', 'note', 'bounceLoop', '빙글빙글 신난다!', 1.1, 2.4, 'main', 'loud'),
+    c('joy', 'heart', 'bigHop', '또 타고 싶어!', 1.1, 2.4, 'bright'),
+    c('joy', 'sparkle', 'spin', '어지러워 히히', 1.0, 2.2, 'calm'),
+    c('joy', 'sparkle', 'hop', '마을이 다 보였어', 1.0, 2.2, 'bright'),
+  ],
+  photo: [
+    c('joy', 'sparkle', 'hop', '찰칵! 브이', 1.1, 2.0, 'main', 'loud'),
+    c('joy', 'heart', 'squash', '예쁘게 나왔다', 1.0, 2.0, 'bright'),
+    c('base', 'sweat', 'tremble', '눈 감았나…', 0.9, 2.0, 'calm'),
+    c('joy', 'note', 'hop', '오늘을 남기자', 1.0, 2.0, 'bright'),
+  ],
+  souvenir: [
+    c('joy', 'heart', 'hop', '인형 꼭 안고', 1.0, 2.2, 'main'),
+    c('joy', 'sparkle', 'squash', '오늘의 기념!', 1.0, 2.0, 'bright', 'loud'),
+    c('base', 'heart', 'none', '또 올게요', 0.9, 2.2, 'calm'),
+  ],
+  giftGive: [c('joy', 'heart', 'hop', '이거 받아!', 1.1, 2.2, 'main', 'loud'), c('base', 'heart', 'squash', '쑥스러워…', 1.0, 2.2, 'calm'), c('joy', 'note', 'hop', '같이 놀아 줘서 고마워', 1.0, 2.2, 'bright')],
+  giftGet: [c('joy', 'heart', 'bigHop', '고마워!', 1.2, 2.4, 'main', 'loud'), c('joy', 'sparkle', 'spin', '꽃이다!', 1.1, 2.2, 'bright'), c('joy', 'tear', 'tremble', '감동…', 1.0, 2.4, 'tear')],
+  giftComfort: [c('base', 'heart', 'hop', '기운 내!', 1.0, 2.2, 'main'), c('base', 'heart', 'squash', '다음엔 이길 거야', 1.0, 2.2, 'bright'), c('joy', 'heart', 'none', '토닥토닥', 0.9, 2.2, 'calm')],
+  giftThanks: [c('joy', 'tear', 'tremble', '훌쩍… 고마워', 1.1, 2.6, 'main', 'tear'), c('joy', 'heart', 'bigHop', '기운 났다!', 1.2, 2.4, 'bright'), c('joy', 'heart', 'squash', '친구 최고', 1.0, 2.4, 'loud')],
+  tip: [c('joy', 'heart', 'hop', '진행자님 고마워요', 0.9, 1.6, 'main'), c('joy', 'note', 'squash', '팁 톡!', 0.9, 1.6, 'loud'), c('base', 'heart', 'none', '덕분에 땄어요', 0.85, 1.6, 'calm')],
+  lonely: [c('sad', 'sweat', 'none', '어디 갔지…', 0.8, 1.8, 'main', 'calm'), c('sad', 'tear', 'none', '꽃만 들고…', 0.8, 1.8, 'tear')],
+};
+
+/** 다섯째 묶음 가게 반응 (sim이 monsterReact로 낸다). key = 후보 열쇠 (점괘 'great'·'good': only가 맞는 후보만, 없으면 다). */
+export function shopReaction(rng: Rng, kind: ShopReactKind, m: Monster, key?: string): Reaction {
+  const positive = !SHOP_NEGATIVE.has(kind);
+  const all = SHOP_REACT[kind];
+  const fit = key === undefined ? all : all.filter((x) => x.only === undefined || x.only === key);
+  const cand = choose(rng, fit.length > 0 ? fit : all, m, positive);
+  return build(cand, intensityOf(cand, m.traits, m.mood, positive, 1));
+}
+
+/** 다섯째 묶음 반응 이름 (도감·시험용). key를 주면 그 열쇠의 후보만. */
+export function shopReactionLabels(kind: ShopReactKind, key?: string): string[] {
+  return SHOP_REACT[kind].filter((x) => key === undefined || x.only === undefined || x.only === key).map((x) => x.label);
+}
+
+/** 다섯째 묶음 반응 종류 모두 (시험용). */
+export const SHOP_REACT_KINDS = Object.keys(SHOP_REACT) as ShopReactKind[];
+
 /** 간식을 받았을 때. 빈털터리였으면 웃으며 떠나는 큰 반응. */
 export function snackReaction(rng: Rng, m: Monster): Reaction {
   if (m.broke === true) return build(c('joy', 'heart', 'bigHop', '웃으며 안녕', 1.3, 3.0), 1.3);

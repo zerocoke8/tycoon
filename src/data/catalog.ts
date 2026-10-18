@@ -10,13 +10,13 @@
 // 큰 시설(경주장·오리배 연못·연날리기 언덕·줄다리기 마당·보물찾기 마당·밀어내기 대결장·일터)의 안쪽 모양(경주로·물길·연 하늘·밧줄·땅 팔 자리·일터 자리)도 상대 좌표.
 // 셋째·넷째 묶음 때의 고정 지도(옛 map.ts)에서 옮겨 온 숫자다: 큰 시설은 그때의 모양 그대로, 보통 부스는 부스 그림 기준 자리 그대로 5×5 칸에 맞췄다.
 
-import type { BoothId, BuildingId, DecorId, WorkFacility } from './defs.ts';
-import { BOOTHS, BOOTH_IDS, BUILDINGS, DECOR, DECOR_IDS } from './defs.ts';
+import type { BoothId, BuildingId, DecorId, ShopId, WorkFacility } from './defs.ts';
+import { BOOTHS, BOOTH_IDS, BUILDINGS, DECOR, DECOR_IDS, SHOPS, SHOP_IDS } from './defs.ts';
 import { CELL, type Cell, type LoopCourse, type Pt } from './map.ts';
 
-/** 놓을 수 있는 것: 놀이부스, 건물, 장식. */
-export type CatalogKey = BoothId | BuildingId | DecorId;
-export type CatalogKind = 'booth' | 'building' | 'decor';
+/** 놓을 수 있는 것: 놀이부스, 건물, 가게 (다섯째 묶음), 장식. */
+export type CatalogKey = BoothId | BuildingId | ShopId | DecorId;
+export type CatalogKind = 'booth' | 'building' | 'shop' | 'decor';
 
 export interface Rect {
   readonly x: number;
@@ -542,6 +542,310 @@ export const BUILDING_LAYOUT: Record<BuildingId, { readonly fp: Footprint; reado
   workyard: { fp: { w: 12, h: 8, entry: { x: 6, y: 8 }, door: { x: 624, y: 750 } }, base: { x: 576, y: 760 } },
 };
 
+// ── 가게 (다섯째 묶음, DESIGN 3.8) ──
+
+/** 가게 그림 한 조각: group/key 그림을 at(건물 기준 px)에 배율 k로 (anchor = 캔버스 기준점, 없으면 아래 가운데), flat = 바닥층. */
+export interface ShopPart {
+  readonly group: 'map' | 'objects' | 'racers';
+  readonly key: string;
+  readonly at: Pt;
+  readonly k: number;
+  readonly anchor?: Pt;
+  readonly flat?: boolean;
+}
+
+/**
+ * 가게 모양 (건물 기준 px). parts = 그림 (첫째 = 대표 그림: 흐림·레벨 크기·누르기), counter = 손님이 사는 자리 (계산대·표 파는 곳 앞),
+ * queue = 줄 (counter 뒤로, 먼저 온 손님부터), owner = 주인이 서는 점 (ownerLook을 본다: 그림은 왼쪽을 보니 오른쪽을 보면 뒤집는다),
+ * slots = 머무는·타는 자리 (SHOPS.slots 최대만큼: 식당 테이블 옆, 온천 탕, 사진관 배경판 앞, 놀이기구 타는 자리. 숨는 가게(여관·미용실)는 문 안 한 점),
+ * slotLook = 그 자리에서 바라보는 점 (없으면 주인).
+ * pickup = 들고 가는 가게에서 산 손님이 반응하러 비켜서는 점 (계산대에서 80px쯤, 줄과 반대쪽: 다음 손님이 계산대에 올라서도 겹치지 않게).
+ * 줄 점 사이는 80px쯤 (손님 몸이 100px 남짓이라 그보다 좁으면 한 덩이로 보인다), 마당이 좁으면 앞뒤로 엇갈린다.
+ */
+export interface ShopLayout {
+  readonly fp: Footprint;
+  readonly parts: readonly ShopPart[];
+  readonly counter: Pt;
+  readonly queue: readonly Pt[];
+  readonly owner: Pt;
+  readonly ownerLook: Pt;
+  readonly slots: readonly Pt[];
+  readonly slotLook?: readonly Pt[];
+  readonly pickup?: Pt;
+}
+
+/** 가게 그림 배율 (건물 0.44 = 전당포·은행과 같은 크기, 노점은 조금 작게). */
+const SHOP_K = { house: 0.44, stall: 0.4 } as const;
+
+/** 집 모양 가게 (5×4 칸, 전당포와 같은 크기): 그림 아래 앞마당에 계산대·줄 (왼쪽으로, 셋째부터 앞줄로 엇갈려), 주인은 계산대 오른쪽, 산 손님은 오른쪽 아래로 비켜선다. */
+function houseShop(art: string, slots: readonly Pt[] = [], k: number = SHOP_K.house): ShopLayout {
+  return {
+    fp: { w: 5, h: 4, entry: { x: 2, y: 4 }, door: { x: 240, y: 372 } },
+    parts: [{ group: 'map', key: art, at: { x: 240, y: 284 }, k }],
+    counter: { x: 236, y: 318 },
+    queue: [
+      { x: 156, y: 330 },
+      { x: 76, y: 342 },
+      { x: 120, y: 380 },
+      { x: 40, y: 382 },
+    ],
+    owner: { x: 368, y: 308 },
+    ownerLook: { x: 236, y: 318 },
+    slots,
+    pickup: { x: 306, y: 360 },
+  };
+}
+
+/** 노점 (4×4 칸): 가판 그림 앞에 계산대, 주인은 오른쪽, 줄은 왼쪽으로 (셋째부터 앞줄로 엇갈려), 산 손님은 오른쪽 아래로 비켜선다. */
+function stallShop(art: string, k: number = SHOP_K.stall, counterX = 172): ShopLayout {
+  return {
+    fp: { w: 4, h: 4, entry: { x: 1, y: 4 }, door: { x: 144, y: 372 } },
+    parts: [{ group: 'map', key: art, at: { x: 192, y: 266 }, k }],
+    counter: { x: counterX, y: 314 },
+    queue: [
+      { x: counterX - 80, y: 326 },
+      { x: counterX - 136, y: 362 },
+      { x: counterX - 46, y: 380 },
+      { x: counterX - 140, y: 300 },
+    ],
+    owner: { x: 300, y: 300 },
+    ownerLook: { x: counterX, y: 314 },
+    slots: [],
+    pickup: { x: counterX + 70, y: 358 },
+  };
+}
+
+/** 문 안 한 점 (여관 방·미용실 의자: 손님이 들어가 안 보인다). */
+const INSIDE: Pt = { x: 240, y: 290 };
+/** 여관 문 앞 디딤돌 (map/inn 그림의 문 아래, 여관 그림 기준 px): 손님이 문으로 걸어 들어가 숨는다 (view/rest.ts가 여관 그림을 이 줄 뒤로 그린다). */
+const INN_DOOR: Pt = { x: 172, y: 250 };
+
+/**
+ * 회전목마 (5×5 칸, 건물 기준 px): 판 가운데 center, 목마가 도는 타원 rx·ry (판 위), 목마 horses마리 (racers/carousel_horse, 왼쪽을 본다:
+ * 오른쪽으로 도는 쪽은 뒤집는다), 배율 horseK, 위아래 bob px. 탄 손님 i = 목마 i (sim은 slots에 세우고, 화면이 목마 위로 올린다).
+ * 목마 i의 각도 = π/2 + i × 2π/horses + 진행 × laps × 2π (π/2 = 앞, 화면 좌표).
+ */
+export interface CarouselGeo {
+  readonly center: Pt;
+  readonly rx: number;
+  readonly ry: number;
+  readonly horses: number;
+  readonly horseK: number;
+  readonly bob: number;
+}
+export const CAROUSEL_GEO: CarouselGeo = { center: { x: 240, y: 324 }, rx: 112, ry: 42, horses: 4, horseK: 0.165, bob: 9 };
+/** 목마 i의 처음 자리 (각도 π/2 + i × 2π/horses). */
+const carouselSlot = (i: number): Pt => {
+  const g = CAROUSEL_GEO;
+  const a = Math.PI / 2 + (i * Math.PI * 2) / g.horses;
+  return { x: Math.round(g.center.x + Math.cos(a) * g.rx), y: Math.round(g.center.y + Math.sin(a) * g.ry) };
+};
+
+/**
+ * 관람차 (5×5 칸): 바퀴 가운데 hub, 곤돌라 고리 반지름 radius, 곤돌라 gondolas개 (objects/ferris_gondola, 고리 hook에 매달려 늘 똑바로),
+ * 바퀴 그림 objects/ferris_wheel (가운데 wheelAnchor, 배율 wheelK, 돌린다), 곤돌라 배율 gondolaK. 곤돌라 0 = 맨 아래 (타는 곳), 각도 = π/2 + j × 2π/gondolas + 회전.
+ * seats[자리] = 그 자리 손님이 타는 곤돌라 (골고루 떨어지게). 탄 손님은 sim에서는 slots(타는 곳 둘레)에 서고 화면이 곤돌라로 올린다.
+ * 숫자는 그림에서 잰 것 (view/rides.ts): 다리 그림의 축 = hub, 바퀴 그림의 손잡이 구슬 반지름 = 캔버스 407 × wheelK = radius (곤돌라까지 5칸 폭 안에 들게 줄였다),
+ * hook = 곤돌라 그림 고리 안쪽 위 (구슬에 걸리는 점).
+ */
+export interface FerrisGeo {
+  readonly hub: Pt;
+  readonly radius: number;
+  readonly gondolas: number;
+  readonly wheelK: number;
+  readonly wheelAnchor: Pt;
+  readonly gondolaK: number;
+  readonly hook: Pt;
+  readonly seats: readonly number[];
+}
+export const FERRIS_GEO: FerrisGeo = { hub: { x: 240, y: 103 }, radius: 198, gondolas: 8, wheelK: 0.4865, wheelAnchor: { x: 512, y: 512 }, gondolaK: 0.19, hook: { x: 533, y: 205 }, seats: [0, 4, 2, 6, 1, 5] };
+
+/**
+ * 아이스크림 트럭 (차고 3×3 칸): home = 차고에 선 트럭 자리 (아래 가운데), 트럭 그림 racers/icecream_truck (왼쪽을 본다, 배율 k).
+ * 길 위에 선 트럭 (트럭 자리 = 길 칸 가운데)에서: serve = 사는 손님이 서는 점, queue = 줄 (트럭 자리에서 상대 px, 같은 길 칸 안).
+ */
+export interface TruckGeo {
+  readonly home: Pt;
+  readonly k: number;
+  readonly serve: Pt;
+  readonly queue: readonly Pt[];
+}
+export const TRUCK_GEO: TruckGeo = {
+  home: { x: 144, y: 214 },
+  k: 0.3,
+  serve: { x: 0, y: 28 },
+  queue: [
+    { x: -34, y: 32 },
+    { x: 34, y: 32 },
+    { x: -36, y: -22 },
+    { x: 36, y: -22 },
+  ],
+};
+
+/**
+ * 가게 모양. 숫자는 그림(map/<key>)에서 잰 대략 (빌더가 다듬는다). 손님이 드나드는 자리(계산대·줄·자리)는 그림 아래 앞마당이나 그림 속 바닥(온천 물, 회전목마 판).
+ */
+export const SHOP_LAYOUT: Record<ShopId, ShopLayout> = {
+  snack_stall: stallShop('snack_stall', 0.4, 168),
+  drink_stand: stallShop('drink_stand', 0.42, 176),
+  bakery: houseShop('bakery'),
+  // 식당 (6×5): 그림 왼쪽 위, 앞마당 양쪽에 테이블 둘 (map/table_set, 바닥 그림이 아니라 소품), 자리 = 테이블 양옆 (왼쪽 먼저, 화면은 의자에 앉힌다: shopsFood.ts).
+  // 줄은 입구에서 계산대로 오는 가운데 디딤돌 위 (테이블 뒤 의자에 앉은 손님과 겹치지 않게), 주인은 계산대 오른쪽 (오른쪽 테이블 뒤 의자와 떨어지게).
+  restaurant: {
+    fp: { w: 6, h: 5, entry: { x: 2, y: 5 }, door: { x: 240, y: 468 } },
+    parts: [
+      { group: 'map', key: 'restaurant', at: { x: 236, y: 300 }, k: SHOP_K.house },
+      { group: 'map', key: 'table_set', at: { x: 110, y: 418 }, k: 0.17 },
+      { group: 'map', key: 'table_set', at: { x: 430, y: 418 }, k: 0.17 },
+    ],
+    counter: { x: 214, y: 334 },
+    queue: [
+      { x: 254, y: 396 },
+      { x: 294, y: 458 },
+      { x: 222, y: 472 },
+      { x: 152, y: 476 },
+    ],
+    owner: { x: 316, y: 326 },
+    ownerLook: { x: 214, y: 334 },
+    slots: [
+      { x: 44, y: 424 },
+      { x: 364, y: 424 },
+      { x: 176, y: 428 },
+      { x: 496, y: 428 },
+    ],
+    slotLook: [
+      { x: 110, y: 410 },
+      { x: 430, y: 410 },
+      { x: 110, y: 410 },
+      { x: 430, y: 410 },
+    ],
+  },
+  // 트럭 차고 (3×3): 트럭이 길에 나가 있으면 표지판만. 계산대·줄은 트럭 쪽 (TRUCK_GEO: 길 위).
+  icecream_truck: {
+    fp: { w: 3, h: 3, entry: { x: 1, y: 3 }, door: { x: 144, y: 276 } },
+    parts: [{ group: 'map', key: 'signpost', at: { x: 56, y: 150 }, k: 0.2 }],
+    counter: { x: 144, y: 244 },
+    queue: [
+      { x: 64, y: 252 },
+      { x: 224, y: 252 },
+      { x: 40, y: 280 },
+      { x: 248, y: 280 },
+    ],
+    owner: { x: 210, y: 200 },
+    ownerLook: { x: 144, y: 244 },
+    slots: [],
+  },
+  accessory_shop: houseShop('accessory_shop'),
+  beauty_salon: houseShop('beauty_salon', [INSIDE, INSIDE]),
+  inn: houseShop('inn', [INN_DOOR, INN_DOOR, INN_DOOR, INN_DOOR], 0.46),
+  // 온천 (6×5): 탕(그림 왼쪽)에 손님이 몸을 담근다, 탈의실(그림 오른쪽) 앞에 주인·계산대, 입구는 오른쪽 아래.
+  hot_spring: {
+    fp: { w: 6, h: 5, entry: { x: 4, y: 5 }, door: { x: 432, y: 468 } },
+    parts: [{ group: 'map', key: 'hot_spring', at: { x: 270, y: 382 }, k: 0.5 }],
+    counter: { x: 430, y: 412 },
+    queue: [
+      { x: 352, y: 424 },
+      { x: 274, y: 432 },
+      { x: 196, y: 438 },
+      { x: 118, y: 442 },
+    ],
+    owner: { x: 506, y: 398 },
+    ownerLook: { x: 430, y: 412 },
+    // 탕 자리 (물 타원 가운데 (232, 263)·반지름 125×59 안, 앞줄 둘 먼저): 손님은 물에 잠겨 머리·어깨만 (view/rest.ts).
+    slots: [
+      { x: 196, y: 278 },
+      { x: 292, y: 272 },
+      { x: 160, y: 244 },
+      { x: 256, y: 240 },
+    ],
+    slotLook: [
+      { x: 240, y: 262 },
+      { x: 240, y: 262 },
+      { x: 240, y: 262 },
+      { x: 240, y: 262 },
+    ],
+  },
+  // 점집 (4×4): 천막 안 탁자(수정구슬) 오른쪽에 손님, 왼쪽에 점쟁이 (둘이 탁자를 사이에 둔다: view/rest.ts가 천막 그림을 탁자 다리 줄 뒤로 그린다).
+  fortune_teller: {
+    fp: { w: 4, h: 4, entry: { x: 1, y: 4 }, door: { x: 144, y: 372 } },
+    parts: [{ group: 'map', key: 'fortune_teller', at: { x: 192, y: 266 }, k: 0.4 }],
+    counter: { x: 224, y: 252 },
+    queue: [
+      { x: 304, y: 298 },
+      { x: 342, y: 366 },
+      { x: 262, y: 374 },
+      { x: 352, y: 296 },
+    ],
+    owner: { x: 94, y: 256 },
+    ownerLook: { x: 224, y: 252 },
+    slots: [],
+    // 점괘를 받은 손님은 천막 앞 디딤돌로 내려와 반응한다 (다음 손님이 탁자 앞에 앉아도 겹치지 않게).
+    pickup: { x: 168, y: 330 },
+  },
+  // 회전목마 (5×5): 판 위에 목마 넷 (CAROUSEL_GEO), 표 파는 주인은 오른쪽 아래. 계산대·줄은 판 그림 아래 끝(448) 밖.
+  carousel: {
+    fp: { w: 5, h: 5, entry: { x: 2, y: 5 }, door: { x: 240, y: 468 } },
+    parts: [{ group: 'map', key: 'carousel_base', at: { x: 240, y: 448 }, k: 0.6 }],
+    counter: { x: 338, y: 464 },
+    queue: [
+      { x: 176, y: 464 },
+      { x: 98, y: 470 },
+      { x: 34, y: 452 },
+      { x: 60, y: 404 },
+    ],
+    owner: { x: 420, y: 452 },
+    ownerLook: { x: 338, y: 464 },
+    slots: Array.from({ length: CAROUSEL_GEO.horses }, (_, i) => carouselSlot(i)),
+  },
+  // 관람차 (5×5): 다리·바퀴 가운데 (FERRIS_GEO), 타는 곳은 바퀴 아래 표 파는 곳 앞.
+  ferris_wheel: {
+    fp: { w: 5, h: 5, entry: { x: 2, y: 5 }, door: { x: 240, y: 468 } },
+    parts: [
+      { group: 'map', key: 'ferris_frame', at: { x: 240, y: 440 }, k: 0.55 },
+      { group: 'objects', key: 'ferris_wheel', at: FERRIS_GEO.hub, k: FERRIS_GEO.wheelK, anchor: FERRIS_GEO.wheelAnchor },
+    ],
+    counter: { x: 336, y: 452 },
+    queue: [
+      { x: 156, y: 454 },
+      { x: 78, y: 462 },
+      { x: 36, y: 412 },
+      { x: 112, y: 404 },
+    ],
+    owner: { x: 414, y: 440 },
+    ownerLook: { x: 336, y: 452 },
+    // 탄 손님이 서는 곳 (화면이 곤돌라 안으로 올린다: view/rides.ts).
+    slots: [
+      { x: 222, y: 448 },
+      { x: 262, y: 452 },
+      { x: 190, y: 446 },
+      { x: 294, y: 446 },
+      { x: 240, y: 444 },
+      { x: 240, y: 458 },
+    ],
+  },
+  // 사진관 (5×5): 사진관 그림은 왼쪽, 배경판(map/photo_backdrop)은 오른쪽. 손님은 배경판 앞에서 포즈, 주인(사진사)은 그 앞.
+  photo_studio: {
+    fp: { w: 5, h: 5, entry: { x: 2, y: 5 }, door: { x: 240, y: 468 } },
+    parts: [
+      { group: 'map', key: 'photo_studio', at: { x: 150, y: 300 }, k: 0.42 },
+      { group: 'map', key: 'photo_backdrop', at: { x: 372, y: 296 }, k: 0.24 },
+    ],
+    counter: { x: 150, y: 342 },
+    queue: [
+      { x: 82, y: 366 },
+      { x: 40, y: 426 },
+      { x: 118, y: 440 },
+      { x: 196, y: 460 },
+    ],
+    owner: { x: 318, y: 404 },
+    ownerLook: { x: 372, y: 308 },
+    slots: [{ x: 372, y: 308 }],
+    slotLook: [{ x: 318, y: 404 }],
+  },
+  souvenir_shop: houseShop('souvenir_shop'),
+  flower_shop: houseShop('flower_shop'),
+};
+
 /** 장식: 칸 하나, 그림 아래 가운데가 칸 가운데 조금 아래. */
 export const DECOR_FP: Footprint = { w: 1, h: 1 };
 export const DECOR_BASE: Pt = { x: 48, y: 78 };
@@ -574,18 +878,33 @@ export const FLOORS: Partial<Record<CatalogKey, readonly FloorShape[]>> = {
   ...Object.fromEntries(
     (Object.keys(BOOTH_LAYOUT) as BoothId[]).filter((b) => BOOTH_LAYOUT[b].fp === BOOTH_FP).map((b) => [b, [{ kind: 'walk', rect: { x: 2 * CELL, y: 2 * CELL, w: CELL, h: 3 * CELL } }]]),
   ),
+  // 가게 (다섯째 묶음): 입구 길에서 계산대까지 한 칸 폭 디딤돌 (입구 칸 바로 위 줄부터).
+  ...Object.fromEntries(
+    SHOP_IDS.filter((s) => s !== 'icecream_truck').map((s) => {
+      const fp = SHOP_LAYOUT[s].fp;
+      const e = fp.entry ?? { x: 0, y: fp.h };
+      const rows = s === 'snack_stall' || s === 'drink_stand' || s === 'fortune_teller' || fp.h <= 4 ? 1 : 2;
+      return [s, [{ kind: 'walk', rect: { x: e.x * CELL, y: (fp.h - rows) * CELL, w: CELL, h: rows * CELL } }]];
+    }),
+  ),
 };
 
 // ── 고르기 ──
 
 const BUILDING_KEYS = Object.keys(BUILDING_LAYOUT) as BuildingId[];
-/** 놓을 수 있는 모든 것 (부스 → 건물 → 장식). */
-export const CATALOG_KEYS: readonly CatalogKey[] = [...BOOTH_IDS, ...BUILDING_KEYS, ...DECOR_IDS];
+/** 놓을 수 있는 모든 것 (부스 → 건물 → 가게 → 장식). */
+export const CATALOG_KEYS: readonly CatalogKey[] = [...BOOTH_IDS, ...BUILDING_KEYS, ...SHOP_IDS, ...DECOR_IDS];
 
 export function catalogKind(key: CatalogKey): CatalogKind {
   if ((BOOTH_IDS as readonly string[]).includes(key)) return 'booth';
   if ((BUILDING_KEYS as readonly string[]).includes(key)) return 'building';
+  if ((SHOP_IDS as readonly string[]).includes(key)) return 'shop';
   return 'decor';
+}
+
+/** 가게인가 (다섯째 묶음). */
+export function isShopKey(key: string): key is ShopId {
+  return (SHOP_IDS as readonly string[]).includes(key);
 }
 
 export function isCatalogKey(v: string): v is CatalogKey {
@@ -605,18 +924,22 @@ export function footprint(key: CatalogKey): Footprint {
       return BOOTH_LAYOUT[key as BoothId].fp;
     case 'building':
       return BUILDING_LAYOUT[key as BuildingId].fp;
+    case 'shop':
+      return SHOP_LAYOUT[key as ShopId].fp;
     default:
       return DECOR_FP;
   }
 }
 
-/** 그림 자리 (건물 기준 px, 아래 가운데). */
+/** 그림 자리 (건물 기준 px, 아래 가운데). 가게는 대표 그림 (트럭 차고는 트럭이 서는 자리). */
 export function artBase(key: CatalogKey): Pt {
   switch (catalogKind(key)) {
     case 'booth':
       return BOOTH_LAYOUT[key as BoothId].spot.base;
     case 'building':
       return BUILDING_LAYOUT[key as BuildingId].base;
+    case 'shop':
+      return key === 'icecream_truck' ? TRUCK_GEO.home : (SHOP_LAYOUT[key as ShopId].parts[0]?.at ?? { x: 0, y: 0 });
     default:
       return DECOR_BASE;
   }
@@ -634,6 +957,8 @@ export function catalogName(key: CatalogKey): string {
       return BOOTHS[key as BoothId].name;
     case 'building':
       return BUILDINGS[key as BuildingId].name;
+    case 'shop':
+      return SHOPS[key as ShopId].name;
     default:
       return DECOR[key as DecorId].name;
   }

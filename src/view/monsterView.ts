@@ -6,6 +6,10 @@
 // 파산한 손님은 어두운 필터 (view/moodFilter.ts, 다 갚으면 LABOR.reliefSec 동안 걷힌다)·가끔 머리 위 먹구름·터덜터덜 걸음,
 // 일터에서는 괭이·곡괭이질 (내려찍는 프레임에 struck: 먼지·돌 조각은 view/debtMap.ts), 기다릴 때는 쪼그리고 흔들흔들.
 // 되찾는 장신구가 전당포에서 날아오는 동안은 몸에 그리지 않는다 (holdAccessory). 머리 위 표시(빚 게이지·표)는 drawX·drawY·emoteLift.
+// 다섯째 묶음 (DESIGN 3.8): 손에 든 것 (Monster.held: 간식·음료·꽃다발·인형 …, view/held.ts HeldView: 먹으며 걷기·홀짝·인형 꼭 안기, 몇 입마다 냠냠 이모트·부스러기),
+// 숨은 손님 (Monster.hidden: 여관 방·미용실 안) 안 그리기, 미용실 반짝이 (Monster.buffs.sparkleSec: MonstersView가 가끔 반짝이를 띄운다),
+// 음료 걸음 (buffs.speed > 1: 걸을 때 발밑 먼지), 식당에서 배 터지게 먹고 일어난 뒤 뒤뚱 걸음 (buffs.speed < 1: 좌우로 크게 기우뚱).
+// 놀이기구 탄 손님·식당 의자·온천은 rides.ts·shopsFood.ts·rest.ts가 몸을 맡는다 (puppet). 가게 연출은 holdHeld·heldAt으로 날아오는 물건을 손에 잇는다.
 
 import { Container, Graphics, GraphicsContext, Sprite, Texture, type Filter } from 'pixi.js';
 import { LABOR, SPECIES, SPECIES_IDS, type AccessoryId, type AccessorySlot, type GoodId, type SpeciesId } from '../data/defs.ts';
@@ -14,6 +18,7 @@ import type { Accessory, EmoteKind, Monster, MonsterId, Motion, Pose, Reaction }
 import { ART_SCALE, ArtNode, artMeta, artTexture, hasArt, monsterFoot } from './art.ts';
 import { AccessoryLayer, accessoryAnchors, accessoryPlacement } from './accessory.ts';
 import type { FxLayer } from './fx.ts';
+import { HeldView, type HeldBodyOut } from './held.ts';
 import { clamp, follow, type ViewRect } from './mapUtil.ts';
 import { debtFilters } from './moodFilter.ts';
 
@@ -202,10 +207,12 @@ function backOut(t: number): number {
 }
 
 const MO: MotionOut = { dx: 0, dy: 0, rot: 0, sx: 1, sy: 1, flip: 1 };
+/** 손에 든 것 자리 (heldBeat가 고쳐 쓴다). */
+const HELD_PT = { x: 0, y: 0 };
 
 /**
  * 단체 놀이 화면이 이 프레임에 맡기는 손님 몸 (MonstersView.puppet). 매 프레임 다시 준다: 손님을 그린 뒤 풀린다.
- * sim 좌표·상태는 그대로이고 그림만 바뀐다 (누르기 상자도 sim 좌표).
+ * sim 좌표·상태는 그대로이고 그림만 바뀐다 (누르기 상자는 그린 자리를 따라간다: hits).
  */
 export interface MonsterPuppet {
   /** 발 자리를 옮긴다 (세계 px, 그림자·이모트도 같이). */
@@ -274,6 +281,16 @@ export class MonsterView {
   private bodyDx = 0;
   /** 이모트를 더 올린다 (머리 위에 빚 게이지·표가 있을 때, 세계 px). 화면 쪽이 매 프레임 정한다. */
   emoteLift = 0;
+  /** 다섯째 묶음: 손에 든 것 (held.ts), 숨음 (여관 방·미용실 안), 반짝이 (미용실), 빠른 걸음 (음료). */
+  private readonly heldView: HeldView;
+  private readonly heldOut: HeldBodyOut = { sx: 1, sy: 1, dy: 0, rot: 0 };
+  hiddenNow = false;
+  sparkly = false;
+  speedy = false;
+  /** 배 터지게 먹고 일어난 뒤 뒤뚱뒤뚱 (FOOD_LIKE.waddle). */
+  private waddle = false;
+  /** 크게 기운 몸 기울기 (벌러덩·드러눕기, rad, 작으면 0): 머리 점·이모트가 따라간다. */
+  private tilt = 0;
 
   /** 화면 위치 (발, 세계 좌표). */
   x = 0;
@@ -331,6 +348,7 @@ export class MonsterView {
     this.acc = new AccessoryLayer({ k });
     this.skin.addChild(this.acc.back, this.art, this.acc);
     this.body.addChild(this.skin);
+    this.heldView = new HeldView(this.body, m.species, this.seed);
     this.node.addChild(this.body);
     this.node.eventMode = 'none';
     // 손으로 가려 내지만(culled), CullerPlugin이 있어도 같은 답이 나오게.
@@ -492,6 +510,51 @@ export class MonsterView {
     const lab = m.labor;
     this.wantTool = m.phase === 'working' && lab !== null && lab !== undefined ? LABOR.facilities[lab.facility].tool : '';
     this.squat = m.phase === 'waitWork';
+    // 다섯째 묶음: 손에 든 것, 숨음, 반짝이, 빠른 걸음.
+    const h = m.held ?? null;
+    this.heldView.sync(h?.item ?? '', h?.eat === true, h?.left ?? 1, h?.total ?? 1, m.phase === 'toFriend');
+    this.hiddenNow = m.hidden === true;
+    this.sparkly = (m.buffs?.sparkleSec ?? 0) > 0;
+    const fast = (m.buffs?.speedSec ?? 0) > 0 ? (m.buffs?.speed ?? 1) : 1;
+    this.speedy = fast > 1;
+    this.waddle = fast < 1;
+  }
+
+  /** 손에 든 것을 sec초 동안 그리지 않는다 (가게에서 날아오는 동안: view/shopsFood.ts). */
+  holdHeld(sec: number): void {
+    this.heldView.hide(sec);
+  }
+
+  /** 손에 든 것의 자리 (세계 좌표, 몸 기울기는 빼고). 든 게 없으면 앞 손 높이. */
+  heldAt(out: { x: number; y: number }): void {
+    const f = this.flip < 0 ? -1 : 1;
+    const a = this.heldView.at;
+    const x = this.heldView.holding ? a.x : -this.halfW * 0.6;
+    const y = this.heldView.holding ? a.y : -this.headH * 0.4;
+    out.x = this.drawX + this.bodyDx + x * f;
+    out.y = this.drawY + this.bodyDy + y;
+  }
+
+  /** 손에 든 것의 이 프레임 박자: 몇 입마다 냠냠 이모트, 한 입마다 부스러기, 인형 꼬옥이면 작은 하트 (MonstersView가 부른다). */
+  heldBeat(fx: FxLayer, yum: Texture): void {
+    const hv = this.heldView;
+    if (this.hiddenNow || this.leaving) return;
+    if (hv.takeYum() && !this.emoteBusy) this.showEmote(yum, 1.3);
+    if (hv.takeCrumb()) {
+      this.heldAt(HELD_PT);
+      fx.puff(HELD_PT.x, HELD_PT.y + 4, 2, 16, 0xf3dcae);
+    }
+    if (hv.takeHeart()) fx.hearts(this.headX(), this.headY() + 6, 1);
+  }
+
+  /** 걷는 중인가 (발밑 먼지 같은 연출용). */
+  get walking(): boolean {
+    return this.walkBlend > 0.5;
+  }
+
+  /** 지금 이모트가 떠 있나 (가게 연출이 다른 이모트를 덮지 않게). */
+  get emoteBusy(): boolean {
+    return this.emoteT >= 0;
   }
 
   /** 결과 반응 (구경꾼은 작게). */
@@ -530,18 +593,41 @@ export class MonsterView {
 
   /** 머리 위 한 점 (효과 위치). */
   headX(): number {
-    return this.x;
+    return this.drawX + this.bodyDx + Math.sin(this.tilt) * this.headH;
   }
   headY(): number {
-    return this.y + this.bodyDy - this.headH;
+    return this.drawY + this.bodyDy - Math.cos(this.tilt) * this.headH;
   }
 
-  /** 넉넉한 누르기 상자. */
+  /**
+   * 넉넉한 누르기 상자: 그린 자리 (몸 맡기기로 옮기거나 띄운 몸도: 곤돌라·목마에 탄 손님, 식당 의자). 걸음 통통은 빼고 크게 띄운 만큼만 따라간다.
+   */
   hits(wx: number, wy: number): boolean {
-    if (this.leaving) return false;
+    if (this.leaving || this.hiddenNow) return false;
     const hw = Math.max(46, this.halfW + 16);
-    const top = this.y - this.headH - (this.floats ? HOVER + 10 : 0) - 26;
-    return wx >= this.x - hw && wx <= this.x + hw && wy >= top && wy <= this.y + 22;
+    const x = this.drawX + this.bodyDx;
+    const y = this.drawY + this.bigLift();
+    const top = y - this.headH - (this.floats ? HOVER + 10 : 0) - 26;
+    return wx >= x - hw && wx <= x + hw && wy >= top && wy <= y + 22;
+  }
+
+  /** 크게 띄운 몸 높이 (세계 px, 위가 −): 걸음 통통·떠 있는 종의 기본 높이는 뺀다. */
+  private bigLift(): number {
+    const lifted = this.bodyDy + (this.floats ? HOVER : 0);
+    return lifted < -12 ? lifted : 0;
+  }
+
+  /** 카메라가 따라갈 몸 가운데 (그린 자리, 걸음 통통은 뺀다). */
+  get centerX(): number {
+    return this.drawX + this.bodyDx;
+  }
+  get centerY(): number {
+    return this.drawY + this.bigLift() - this.headH * 0.5;
+  }
+
+  /** 누르기 앞뒤 (그린 발 y: 앞에 그린 손님이 먼저). */
+  get hitY(): number {
+    return this.drawY;
   }
 
   /** 그리기 (매 프레임). time = 누적 초, emoteScale = 확대가 작을 때 이모트를 조금 키우는 배율. */
@@ -579,6 +665,12 @@ export class MonsterView {
       dy -= bob * (gloom ? 1.6 : droop ? 3 : 5.5) * wb;
       rot += s * (gloom ? 0.04 : 0.065) * wb;
       sy *= 1 - (1 - bob) * 0.04 * wb;
+      // 뒤뚱 (배가 불러): 걸음마다 좌우로 크게 기우뚱, 조금 납작하고 넓게.
+      if (this.waddle) {
+        rot += s * 0.12 * wb;
+        sx *= 1 + 0.05 * wb;
+        sy *= 1 - 0.03 * wb;
+      }
     }
     if (droop) {
       // 기운 없는 걸음: 살짝 납작하고 앞으로 숙인다 (파산이면 더).
@@ -598,6 +690,14 @@ export class MonsterView {
       rot += Math.sin(time * 1.3 + this.seed) * 0.03;
     }
     if (this.wantTool !== this.toolKey) this.setTool(this.wantTool);
+    // 손에 든 것 (held.ts): 먹는 동안 몸이 오물오물.
+    const hp = this.pose === '' ? 'base' : hasArt('monsters', POSE_KEY[this.species][this.pose]) ? this.pose : 'base';
+    const ho = this.heldOut;
+    this.heldView.update(dt, time, hp, this.halfW, this.headH, ho);
+    sx *= ho.sx;
+    sy *= ho.sy;
+    dy += ho.dy;
+    rot += ho.rot * this.facing * -1;
     this.struck = false;
     if (this.tool !== null) {
       const d = this.toolDef;
@@ -677,8 +777,8 @@ export class MonsterView {
       sy *= pp.sy ?? 1;
     }
 
-    // 나타날 때 톡, 떠날 때 작아지며 흐려짐.
-    let a = pp?.alpha ?? 1;
+    // 나타날 때 톡, 떠날 때 작아지며 흐려짐. 숨은 손님 (여관 방·미용실 안)은 안 보인다.
+    let a = this.hiddenNow ? 0 : (pp?.alpha ?? 1);
     let pop = 1;
     if (this.appear < 1) {
       a = this.appear;
@@ -692,6 +792,7 @@ export class MonsterView {
 
     this.bodyDy = dy;
     this.bodyDx = dx;
+    this.tilt = Math.abs(rot) > 0.3 ? rot : 0;
     const fx = this.x + px;
     const fy = this.y + py;
     this.drawX = fx;
@@ -723,7 +824,11 @@ export class MonsterView {
         // 파산한 손님 (머리 위에 게이지가 있다)은 넓게 볼 때 덜 키운다 (먹구름·땀방울이 머리보다 커지지 않게).
         const s = (EMOTE_SIZE / this.emoteTexSize) * p * (this.gloomy ? Math.min(emoteScale, GLOOMY_EMOTE_MAX) : emoteScale);
         this.emote.scale.set(s);
-        this.emote.position.set(fx + 6, fy + dy - this.headH - 10 - this.emoteLift + Math.sin(e * 3.2) * 3);
+        // 크게 기운 몸 (벌러덩·드러눕기)은 머리가 옆으로 간다: 머리 점을 몸 기울기만큼 돌린다 (걸음 살랑은 그대로).
+        const tilt = this.tilt;
+        const hx = Math.sin(tilt) * this.headH;
+        const hy = Math.cos(tilt) * this.headH;
+        this.emote.position.set(fx + 6 + (tilt !== 0 ? dx + hx : 0), fy + dy - hy - 10 - this.emoteLift + Math.sin(e * 3.2) * 3);
         this.emote.alpha = e > this.emoteDur - 0.35 ? (this.emoteDur - e) / 0.35 : 1;
       }
     }
@@ -751,6 +856,7 @@ export class MonsterView {
   }
 
   destroy(): void {
+    this.heldView.destroy();
     this.node.destroy({ children: true });
     this.shadow.destroy();
     this.emote.destroy();
@@ -874,6 +980,11 @@ export class MonstersView {
       if (v.seen !== frame) v.startLeaving();
       v.update(dt, time, view, emoteScale);
       if (v.wantsGloom()) v.showEmote(this.fx.tex.emote('storm'), GLOOM_SHOW);
+      // 미용실에서 나온 손님: 한동안 가끔 반짝 (화면 연출용 무작위).
+      if (v.sparkly && !v.hiddenNow && Math.random() < dt * 1.6) this.fx.sparkles(v.headX(), v.headY() + v.headH * 0.45, 1, v.halfW + 12);
+      // 다섯째 묶음: 손에 든 것 (몇 입마다 냠냠·부스러기, 인형 꼬옥 하트), 음료 걸음 (발밑 먼지).
+      v.heldBeat(this.fx, this.fx.tex.emote('yum'));
+      if (v.speedy && v.walking && !v.hiddenNow && Math.random() < dt * 2.2) this.fx.puff(v.x - v.facing * v.halfW * 0.5, v.y, 2, 22);
       v.puppet = null;
       if (v.dead) {
         this.byId.delete(v.id);
@@ -889,7 +1000,7 @@ export class MonstersView {
     let best: MonsterView | null = null;
     for (let i = 0; i < this.views.length; i++) {
       const v = this.views[i] as MonsterView;
-      if (v.hits(wx, wy) && (best === null || v.y > best.y)) best = v;
+      if (v.hits(wx, wy) && (best === null || v.hitY > best.hitY)) best = v;
     }
     return best === null ? null : best.id;
   }
