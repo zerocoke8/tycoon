@@ -4,14 +4,18 @@
 // 구름은 구역 사각형에 붙여 깔고(바깥으로 조금만 삐져나옴), 물체층 안에서 구역 아래 변의 y로 정렬한다:
 // 구역 바로 아래에 선 키 큰 건물(예: 북쪽 언덕 아래 마을회관 지붕)이 구름에 가리지 않고 앞에 선다.
 // 바닥에 깔리는 부스 그림·소품(map.ts BoothSpot.flat·props[].flat: 씨름 모래판, 오리배 선착장, 보물찾기 흙더미)은 바닥층(floor)에 그린다: 손님이 그 위에 선다.
+// 넷째 묶음 (DESIGN 3.7): 전당포·은행 (BUILDING_K 배율)과 일터 (WORK_YARD: 밭 = 바닥층, 광산·소품)는 짓기 전(레벨 0)엔 흐린 그림 + 빈 부지 표식,
+// 지으면 주인(전당포 주인·은행원·일터 반장, map.ts SHOP_SPOTS·WORK_YARD.foreman)이 선다.
+// 일터 반장은 일하는 채무자가 있으면 밭 고랑 사이·광산 앞을 오가며 (FOREMAN_ROUTE) 가끔 호루라기를 분다 (foremanWhistle).
+// 장신구·코인이 드나드는 전당포 진열창·은행 문은 shopPort, 재료가 들어가는 바구니·수레는 yardPropTop·yardPropHop.
 
 import { Container, Graphics, Sprite, type Renderer, type Texture } from 'pixi.js';
-import { BOOTHS, BOOTH_IDS, type BoothId, type BuildingId, type OutcomeTier } from '../data/defs.ts';
-import { BOOTH_SPOTS, BUILDING_SPOTS, CHIEF_SPOT, DECOR, DISTRICTS, SPARE_LOTS, type BoothSpot, type District, type DistrictId, type Pt } from '../data/map.ts';
+import { BOOTHS, BOOTH_IDS, BUILD_HALL, WORK_FACILITIES, type BoothId, type BuildingId, type OutcomeTier } from '../data/defs.ts';
+import { BOOTH_SPOTS, BUILDING_K, BUILDING_SPOTS, CHIEF_SPOT, DECOR, DISTRICTS, SHOP_SPOTS, SPARE_LOTS, WORK_YARD, type BoothSpot, type District, type DistrictId, type Pt } from '../data/map.ts';
 import { Rng } from '../core/rng.ts';
 import { ease, tweens } from '../core/tween.ts';
 import type { SimApi } from '../sim/api.ts';
-import { ART_SCALE, ArtNode, artTexture, hasArt } from './art.ts';
+import { ART_SCALE, ArtNode, artMeta, artTexture, hasArt } from './art.ts';
 import type { FxLayer } from './fx.ts';
 import { DISTRICT_IDS, RACE_GATE_FLIP, boxHits, clamp, districtAt, follow, onGrass, type Box, type ViewRect } from './mapUtil.ts';
 
@@ -40,6 +44,13 @@ const PROP_PH: Record<string, { w: number; h: number; color: number }> = {
   planter: { w: 380, h: 260, color: 0xa0703f },
   balloons: { w: 300, h: 560, color: 0xf3d36a },
   lot_sign: { w: 220, h: 300, color: 0xc9995f },
+  ore_cart: { w: 460, h: 340, color: 0x9a948d },
+  crop_basket: { w: 380, h: 300, color: 0xc9995f },
+};
+/** 일터 시설 그림이 없을 때 (밭은 납작하게). */
+const FACILITY_PH: Record<string, { w: number; h: number; color: number }> = {
+  farm_plot: { w: 840, h: 560, color: 0xa0785a },
+  mine_entrance: { w: 900, h: 700, color: 0xb3aea8 },
 };
 const BUILDING_PH = { w: 760, h: 700, color: 0xd9c7a6 };
 /** 바닥에 깔리는 부스 그림의 자리 표시 (납작하게). */
@@ -51,6 +62,45 @@ const PERSON_PH = { w: 560, h: 980, color: 0xf2d0a9 };
 
 /** 촌장이 서 있는 곳 (map.ts). */
 const CHIEF_AT: Pt = CHIEF_SPOT;
+
+/** 전당포 진열창·은행 문 (그림 캔버스 좌표): 맡긴 장신구가 날아 들어가고 코인이 나오는 곳. 그림이 없으면 건물 자리 위. */
+const SHOP_PORT: Record<'pawnshop' | 'bank', Pt> = { pawnshop: { x: 587, y: 779 }, bank: { x: 468, y: 739 } };
+
+/**
+ * 일터 반장이 오가는 길 (WORK_YARD에서 정한다): 집(반장 자리) → 밭 고랑 사이 동쪽 → 서쪽 → 동쪽 → 집 → 광산 앞 → 집.
+ * pause = 닿고 쉬는 초, whistle = 거기서 호루라기를 불 확률, look = 쉴 때 바라보는 곳.
+ */
+interface PatrolStop {
+  readonly at: Pt;
+  readonly pause: number;
+  readonly whistle: number;
+  readonly look: Pt;
+}
+const FOREMAN_ROUTE: readonly PatrolStop[] = (() => {
+  const farm = WORK_YARD.facilities.farm;
+  const mine = WORK_YARD.facilities.mine;
+  const xs = farm.spots.map((p) => p.x);
+  const ys = farm.spots.map((p) => p.y);
+  // 밭 고랑 사이 = 일하는 자리 두 줄의 가운데 높이.
+  const aisle = (Math.min(...ys) + Math.max(...ys)) / 2;
+  // 고랑 양 끝 (일하는 손님을 가리지 않게 자리 줄 밖에서 쉰다).
+  const east = { x: Math.max(...xs) + 95, y: aisle };
+  const west = { x: Math.min(...xs) - 95, y: aisle };
+  const my = Math.max(...mine.spots.map((p) => p.y));
+  const mx = mine.spots.reduce((a, p) => a + p.x, 0) / Math.max(1, mine.spots.length);
+  const home = WORK_YARD.foreman;
+  return [
+    { at: east, pause: 1.2, whistle: 0.2, look: farm.face },
+    { at: west, pause: 2.4, whistle: 0.45, look: { x: east.x, y: aisle } },
+    { at: east, pause: 1.0, whistle: 0, look: farm.face },
+    { at: home, pause: 2.2, whistle: 0.25, look: farm.face },
+    { at: { x: mx, y: my + 70 }, pause: 2.4, whistle: 0.45, look: mine.face },
+    { at: home, pause: 2.6, whistle: 0, look: farm.face },
+  ];
+})();
+/** 반장 걷는 빠르기 (세계 px/초)와 걸음 폭. */
+const FOREMAN_SPEED = 85;
+const FOREMAN_STRIDE = 26;
 /** 나무를 더 흩뿌리는 숲 구역 (map.ts 머리말). 없으면 건너뛴다. */
 const FOREST_DISTRICT = 'west';
 
@@ -97,10 +147,36 @@ interface BoothView {
   readonly potOnCounter: boolean;
 }
 
+/** 일터 반장의 걷기 (집 = WORK_YARD.foreman, FOREMAN_ROUTE를 돈다). */
+interface Patrol {
+  x: number;
+  y: number;
+  /** 다음에 갈 FOREMAN_ROUTE index (일하는 손님이 없으면 집으로). */
+  leg: number;
+  /** 서서 쉬는 남은 초. */
+  pause: number;
+  flip: number;
+  walk: number;
+  phase: number;
+  /** 지금 가는 곳이 집인가 (일하는 손님이 없을 때). */
+  homing: boolean;
+  /** 다독이러 가는 채무자 곁 (foremanCheer, 닿으면 run을 부르고 길로 돌아간다). */
+  visit: { readonly x: number; readonly y: number; readonly look: number; readonly run: () => void } | null;
+}
+
 interface BuildingView {
   readonly id: BuildingId;
+  /** 대표 그림 (일터는 첫 시설). 레벨에 따라 배율이 조금 커진다 (일터는 그대로). */
   readonly node: ArtNode;
   readonly prop: Prop;
+  /** 같이 흐려지고 같이 통통 튀는 그림 (전당포·은행 = 그림 하나, 일터 = 시설 둘 + 소품). key = 그림 이름. */
+  readonly parts: readonly { readonly node: ArtNode; readonly prop: Prop; readonly key: string }[];
+  /** 짓기 전(레벨 0) 빈 부지 표식 (처음부터 있는 건물은 null). */
+  readonly lot: ArtNode | null;
+  /** 주인 (전당포 주인·은행원·일터 반장, 지으면 선다). */
+  readonly npc: HostSlot | null;
+  /** 일터 반장의 걷기 (그 밖은 null). */
+  readonly patrol: Patrol | null;
   readonly hit: Box;
   readonly district: DistrictId | null;
   level: number;
@@ -256,16 +332,45 @@ export class BuildingsView {
       this.ownCloudTex = true;
     }
 
-    // 건물
+    // 건물 (넷째 묶음 건물은 짓기 전 흐리게 + 빈 부지 표식, 지으면 주인이 선다)
     for (const id of Object.keys(BUILDING_SPOTS) as BuildingId[]) {
       const at = BUILDING_SPOTS[id];
-      const node = new ArtNode({ k: ART_SCALE.building, anchor: 'bottom', placeholder: BUILDING_PH });
-      node.setArt('map', id);
-      node.position.set(at.x, at.y);
-      node.zIndex = at.y;
-      layers.objects.addChild(node);
-      const prop = this.addProp(node, at);
-      this.buildings.push({ id, node, prop, hit: nodeBox(node, emptyBox(), 0.08), district: districtAt(at.x, at.y), level: 0 });
+      const parts: { node: ArtNode; prop: Prop; key: string }[] = [];
+      const put = (key: string, p: Pt, k: number, flat: boolean, ph: { w: number; h: number; color: number }, flip = false): void => {
+        const node = new ArtNode({ k, anchor: 'bottom', placeholder: ph });
+        node.setArt('map', key);
+        node.position.set(p.x, p.y);
+        node.zIndex = flat ? FLAT_Z : p.y;
+        if (flip) node.scale.x = -1;
+        this.floorOf(flat).addChild(node);
+        parts.push({ node, prop: this.addProp(node, p), key });
+      };
+      if (id === 'workyard') {
+        for (const f of WORK_FACILITIES) {
+          const fs = WORK_YARD.facilities[f];
+          put(fs.art, fs.at, fs.k, fs.flat, FACILITY_PH[fs.art] ?? BUILDING_PH);
+        }
+        for (const pr of WORK_YARD.props) put(pr.key, pr.at, pr.k, false, PROP_PH[pr.key] ?? { w: 400, h: 300, color: 0xa0703f }, pr.flip === true);
+      } else {
+        put(id, at, BUILDING_K[id] ?? ART_SCALE.building, false, BUILDING_PH);
+      }
+      const first = parts[0] as { node: ArtNode; prop: Prop; key: string };
+      let lot: ArtNode | null = null;
+      if (BUILD_HALL[id] !== undefined) {
+        lot = new ArtNode({ k: ART_SCALE.prop, anchor: 'bottom', placeholder: PROP_PH.lot_sign });
+        lot.setArt('map', 'lot_sign');
+        lot.position.set(at.x, at.y + 30);
+        lot.zIndex = at.y + 30;
+        lot.visible = false;
+        layers.objects.addChild(lot);
+        this.addProp(lot, at);
+      }
+      const npc = this.npcSlot(id);
+      const hit = emptyBox();
+      this.buildingHit(parts, lot, hit);
+      const patrol: Patrol | null =
+        id === 'workyard' && npc !== null ? { x: npc.at.x, y: npc.at.y, leg: 0, pause: 1, flip: npc.flip, walk: 0, phase: 0, homing: true, visit: null } : null;
+      this.buildings.push({ id, node: first.node, prop: first.prop, parts, lot, npc, patrol, hit, district: districtAt(at.x, at.y), level: -1 });
     }
 
     // 놀이부스: 건물, 빈 부지 표식, 상금 항아리, 진행자
@@ -340,6 +445,45 @@ export class BuildingsView {
 
     this.sync();
     this.initialized = true;
+  }
+
+  /** 넷째 묶음 건물의 주인 (전당포 주인·은행원: 계산대를 본다, 일터 반장: 밭을 본다). 없으면 null. */
+  private npcSlot(id: BuildingId): HostSlot | null {
+    let at: Pt;
+    let look: Pt;
+    let art: string;
+    if (id === 'pawnshop' || id === 'bank') {
+      const sh = SHOP_SPOTS[id];
+      at = sh.npc;
+      look = sh.counter[0] ?? BUILDING_SPOTS[id];
+      art = sh.art;
+    } else if (id === 'workyard') {
+      at = WORK_YARD.foreman;
+      look = WORK_YARD.facilities.farm.face;
+      art = 'foreman';
+    } else return null;
+    const node = new ArtNode({ k: ART_SCALE.villager, anchor: 'bottom', placeholder: PERSON_PH });
+    node.setArt('characters', art);
+    node.position.set(at.x, at.y);
+    node.zIndex = at.y;
+    // 그림은 왼쪽을 본다: 볼 곳이 오른쪽이면 뒤집는다.
+    const flip = look.x <= at.x ? 1 : -1;
+    node.scale.x = flip;
+    node.visible = false;
+    this.layers.objects.addChild(node);
+    return { node, prop: this.addProp(node, at), at, flip, art, breath: Math.random() * 6, hopT: -1, hopK: 1 };
+  }
+
+  /** 건물 누르기 상자: 그림들(과 빈 부지 표식)을 합친 상자. */
+  private buildingHit(parts: readonly { readonly node: ArtNode }[], lot: ArtNode | null, out: Box): void {
+    let first = true;
+    for (const p of parts) {
+      const b = nodeBox(p.node, emptyBox(), 0.08);
+      if (first) Object.assign(out, b);
+      else unionBox(out, b);
+      first = false;
+    }
+    if (lot !== null) unionBox(out, nodeBox(lot, emptyBox()));
   }
 
   /** 바닥에 깔리는 그림은 바닥층에 (없으면 물체층 맨 아래). */
@@ -512,6 +656,10 @@ export class BuildingsView {
 
   /** 상태 때문에 숨겨 둔 것(닫힌 부스의 항아리, 진행자 없음)은 구역이 열려도 숨긴 채로. */
   private visibleByState(node: Container): boolean {
+    for (const bv of this.buildings) {
+      if (node === bv.lot) return bv.level < 1;
+      if (bv.npc !== null && node === bv.npc.node) return bv.level >= 1;
+    }
     for (const b of this.booths) {
       if (node === b.pot) return b.unlocked;
       if (node === b.lot) return !b.unlocked;
@@ -557,15 +705,33 @@ export class BuildingsView {
       const bv = this.buildings[i] as BuildingView;
       const lvl = st.buildings[bv.id]?.level ?? 1;
       if (lvl === bv.level) continue;
+      // 지었다 (0 → 1) 또는 레벨이 올랐다.
+      const built = animate && bv.level === 0 && lvl >= 1;
       const up = animate && bv.level > 0 && lvl > bv.level;
       bv.level = lvl;
-      const s = 1 + 0.04 * (lvl - 1);
-      this.setScaleNow(bv.node, s, s);
-      bv.prop.sx = s;
-      bv.prop.sy = s;
-      nodeBox(bv.node, bv.hit, 0.08);
-      nodeBox(bv.node, bv.prop.box, 0, CULL_PAD);
-      if (up) this.celebrate(bv.node, s, s, BUILDING_SPOTS[bv.id]);
+      const open = this.isOpen(bv.district);
+      // 짓기 전: 흐린 그림 + 빈 부지 표식, 주인은 없다.
+      for (const p of bv.parts) p.node.alpha = lvl >= 1 ? 1 : LOCKED_ALPHA;
+      if (bv.lot !== null) bv.lot.visible = lvl < 1 && open;
+      if (bv.npc !== null && !this.busy.has(bv.npc.node)) bv.npc.node.visible = lvl >= 1 && open;
+      // 레벨마다 조금 커진다 (일터는 시설이 여럿이라 그대로).
+      const s = bv.id === 'workyard' ? 1 : 1 + 0.04 * Math.max(0, lvl - 1);
+      if (bv.id !== 'workyard') {
+        this.setScaleNow(bv.node, s, s);
+        bv.prop.sx = s;
+        bv.prop.sy = s;
+        nodeBox(bv.node, bv.prop.box, 0, CULL_PAD);
+      }
+      this.buildingHit(bv.parts, bv.level < 1 ? bv.lot : null, bv.hit);
+      if (built) {
+        for (const p of bv.parts) this.celebrate(p.node, p.prop.sx, p.prop.sy, null);
+        this.fx.confetti(BUILDING_SPOTS[bv.id].x, BUILDING_SPOTS[bv.id].y - 160, 24);
+        this.fx.puff(BUILDING_SPOTS[bv.id].x, BUILDING_SPOTS[bv.id].y, 9, 160);
+        if (bv.npc !== null && open) {
+          bv.npc.node.visible = true;
+          this.celebrate(bv.npc.node, bv.npc.flip, 1, null);
+        }
+      } else if (up) this.celebrate(bv.node, s, s, BUILDING_SPOTS[bv.id]);
     }
     this.syncBooths(animate);
   }
@@ -705,6 +871,102 @@ export class BuildingsView {
     return hv === undefined ? null : { node: hv.node, at: hv.at };
   }
 
+  /** 넷째 묶음 건물의 주인 그림과 서는 점 (전당포 주인·은행원·일터 반장, 없는 건물은 null). 짓기 전엔 node.visible = false. */
+  npcNode(id: BuildingId): { node: ArtNode; at: Pt } | null {
+    const hv = this.buildings.find((b) => b.id === id)?.npc ?? null;
+    return hv === null ? null : { node: hv.node, at: hv.at };
+  }
+
+  /** 넷째 묶음 건물의 주인을 통통 (맡기기·갚기·재료가 나올 때). 짓기 전이면 아무것도 안 한다. */
+  npcHop(id: BuildingId, k = 1): void {
+    const hv = this.buildings.find((b) => b.id === id)?.npc ?? null;
+    if (hv === null || !hv.node.visible) return;
+    hv.hopT = 0;
+    hv.hopK = k;
+  }
+
+  /** 건물 그림들 (일터는 시설 둘 + 소품, 그 밖은 하나). 화면 쪽 연출이 흔들 때. */
+  buildingParts(id: BuildingId): readonly ArtNode[] {
+    return this.buildings.find((b) => b.id === id)?.parts.map((p) => p.node) ?? [];
+  }
+
+  /** 전당포 진열창·은행 문 (세계 좌표, 그림 배율·레벨 크기를 따른다): 장신구가 날아 들어가고 코인이 드나드는 곳. */
+  shopPort(id: 'pawnshop' | 'bank', out: { x: number; y: number }): void {
+    const bv = this.buildings.find((b) => b.id === id);
+    const at = BUILDING_SPOTS[id];
+    const m = artMeta('map', id);
+    if (bv === undefined || m === undefined) {
+      out.x = at.x;
+      out.y = at.y - 90;
+      return;
+    }
+    const p = SHOP_PORT[id];
+    const k = BUILDING_K[id] ?? ART_SCALE.building;
+    // 그림 기준점 = 잘라 낸 그림의 아래 가운데 (ArtNode 'bottom').
+    const ax = m.trim.x + m.trim.w / 2;
+    const ay = m.trim.y + m.trim.h;
+    out.x = bv.node.x + (p.x - ax) * k * bv.node.scale.x;
+    out.y = bv.node.y + (p.y - ay) * k * bv.node.scale.y;
+  }
+
+  /** 일터 소품 (crop_basket·ore_cart) 위 가운데 (재료가 떨어져 들어가는 곳, 세계 좌표). 없으면 false. */
+  yardPropTop(key: string, out: { x: number; y: number }): boolean {
+    const part = this.buildings.find((b) => b.id === 'workyard')?.parts.find((p) => p.key === key);
+    if (part === undefined) return false;
+    const b = nodeBox(part.node, emptyBox());
+    out.x = (b.x0 + b.x1) / 2;
+    // 그림 위 끝에서 조금 아래 (바구니·수레 입구).
+    out.y = b.y0 + (part.node.y - b.y0) * 0.3;
+    return true;
+  }
+
+  /** 일터 소품이 톡 출렁 (재료가 들어왔을 때). */
+  yardPropHop(key: string): void {
+    const part = this.buildings.find((b) => b.id === 'workyard')?.parts.find((p) => p.key === key);
+    if (part === undefined || !part.node.visible || this.busy.has(part.node)) return;
+    this.celebrate(part.node, part.prop.sx, part.prop.sy, null, 0.09);
+  }
+
+  /** 일터 반장이 호루라기를 분다 (통통 + 소리 선 + '삑!'). big = 빚 걸기 판을 부를 때. 짓기 전이면 아무것도 안 한다. */
+  foremanWhistle(big = false): void {
+    this.foremanShout(big ? '삐익!' : '삑!', big ? 1.3 : 0.6, true, big);
+  }
+
+  /** 반장 통통 + 입 앞 글자 (toot = 호루라기 소리 선도). */
+  private foremanShout(text: string, hop: number, toot = false, big = false): void {
+    const bv = this.buildings.find((b) => b.id === 'workyard');
+    const hv = bv?.npc ?? null;
+    if (bv === undefined || hv === null || !hv.node.visible) return;
+    hv.hopT = 0;
+    hv.hopK = hop;
+    const x = bv.patrol?.x ?? hv.at.x;
+    const y = bv.patrol?.y ?? hv.at.y;
+    const dir = -(bv.patrol?.flip ?? hv.flip);
+    // 입: 반장 그림 높이의 약 70% (주민 그림 약 140px).
+    const mx = x + dir * 16;
+    const my = y - 100;
+    if (toot) this.fx.toot(mx + dir * 10, my, dir, big);
+    this.fx.floatText(mx + dir * 30, my - 20, text, 'whistle', big);
+  }
+
+  /**
+   * 반장이 일하는 채무자 (wx, wy)를 다독이러 곁으로 걸어가, 닿으면 호루라기 대신 '힘내!' 하고 run (하트 등)을 부른다.
+   * 반장이 없거나 (짓기 전) 너무 멀면 run을 바로 부른다.
+   */
+  foremanCheer(wx: number, wy: number, run: () => void): void {
+    const bv = this.buildings.find((b) => b.id === 'workyard');
+    const pt = bv?.patrol ?? null;
+    if (bv === undefined || pt === null || bv.npc === null || !bv.npc.node.visible || Math.hypot(wx - pt.x, wy - pt.y) > 900) {
+      run();
+      return;
+    }
+    // 채무자 옆 (반장 쪽에서 다가가 조금 아래에 선다: 손님을 가리지 않게).
+    const side = pt.x <= wx ? -1 : 1;
+    pt.visit?.run();
+    pt.visit = { x: wx + side * 75, y: wy + 14, look: wx, run };
+    pt.pause = 0;
+  }
+
   /** 진행자 한 사람만 통통 (경주장 출발 신호·해설자). 그 자리에 진행자가 없으면 아무것도 안 한다. */
   hostHop(booth: BoothId, role: number, k = 1): void {
     for (const b of this.booths) {
@@ -759,6 +1021,67 @@ export class BuildingsView {
     return !this.isOpen(districtAt(wx, wy));
   }
 
+  /** 일터에 일하거나 기다리는 채무자가 있나 (반장이 오가며 지켜본다). */
+  private yardBusy(): boolean {
+    const list = this.sim.state.monsters;
+    for (let i = 0; i < list.length; i++) {
+      const ph = list[i]?.phase;
+      if (ph === 'working' || ph === 'waitWork') return true;
+    }
+    return false;
+  }
+
+  /** 반장 한 걸음: 일하는 손님이 있으면 FOREMAN_ROUTE를 돌고 (닿으면 쉬며 가끔 호루라기), 없으면 집으로 가서 선다. */
+  private walkForeman(pt: Patrol, busy: boolean, dt: number): void {
+    const home = WORK_YARD.foreman;
+    if (!busy && !pt.homing) {
+      pt.homing = true;
+      pt.pause = 0;
+    } else if (busy && pt.homing) {
+      pt.homing = false;
+      pt.pause = Math.max(pt.pause, 0.8);
+    }
+    const visit = pt.visit;
+    const stop = visit !== null || pt.homing ? null : (FOREMAN_ROUTE[pt.leg % FOREMAN_ROUTE.length] ?? null);
+    const to = visit ?? stop?.at ?? home;
+    let moving = false;
+    if (pt.pause > 0) pt.pause -= dt;
+    else {
+      const dx = to.x - pt.x;
+      const dy = to.y - pt.y;
+      const d = Math.hypot(dx, dy);
+      const step = FOREMAN_SPEED * dt;
+      if (d <= step) {
+        pt.x = to.x;
+        pt.y = to.y;
+        if (visit !== null) {
+          // 다독이기: 채무자를 보고 통통 + '힘내!'.
+          pt.visit = null;
+          pt.pause = 1.6;
+          pt.flip = visit.look <= pt.x ? 1 : -1;
+          this.foremanShout('힘내!', 0.9);
+          visit.run();
+        } else if (stop !== null) {
+          pt.pause = stop.pause;
+          pt.leg = (pt.leg + 1) % FOREMAN_ROUTE.length;
+          pt.flip = stop.look.x <= pt.x ? 1 : -1;
+          if (Math.random() < stop.whistle) this.foremanWhistle(false);
+        } else {
+          pt.pause = 1;
+          pt.flip = WORK_YARD.facilities.farm.face.x <= pt.x ? 1 : -1;
+        }
+      } else {
+        moving = true;
+        pt.x += (dx / d) * step;
+        pt.y += (dy / d) * step;
+        pt.phase += (step / FOREMAN_STRIDE) * Math.PI;
+        // 그림은 왼쪽을 본다: 오른쪽으로 가면 뒤집는다.
+        if (Math.abs(dx) > 4) pt.flip = dx < 0 ? 1 : -1;
+      }
+    }
+    pt.walk += ((moving ? 1 : 0) - pt.walk) * follow(10, dt);
+  }
+
   // ── 매 프레임 ──
 
   update(dt: number, view: ViewRect): void {
@@ -799,6 +1122,36 @@ export class BuildingsView {
         hv.node.scale.set(hv.flip * (1 - br * 0.5), 1 + br);
         hv.node.y = hv.at.y + dy;
       }
+    }
+    // 넷째 묶음 건물의 주인: 숨쉬기 (일터 반장은 걷기).
+    let working = -1;
+    for (let i = 0; i < this.buildings.length; i++) {
+      const bv = this.buildings[i] as BuildingView;
+      const hv = bv.npc;
+      if (hv === null || !hv.node.visible || this.busy.has(hv.node)) continue;
+      let dy = 0;
+      if (hv.hopT >= 0) {
+        hv.hopT += dt;
+        const u = hv.hopT / 0.45;
+        if (u >= 1) hv.hopT = -1;
+        else dy = -Math.sin(Math.PI * u) * 18 * hv.hopK;
+      }
+      const pt = bv.patrol;
+      if (pt !== null) {
+        if (working < 0) working = this.yardBusy() ? 1 : 0;
+        this.walkForeman(pt, working === 1, dt);
+        const bob = Math.abs(Math.sin(pt.phase)) * 5 * pt.walk;
+        const br = Math.sin(t * 2.0 + hv.breath) * 0.012 * (1 - pt.walk);
+        hv.node.scale.set(pt.flip * (1 - br * 0.5), 1 + br);
+        hv.node.rotation = Math.sin(pt.phase) * 0.05 * pt.walk;
+        hv.node.position.set(pt.x, pt.y + dy - bob);
+        if (hv.node.zIndex !== Math.round(pt.y)) hv.node.zIndex = Math.round(pt.y);
+        if (pt.walk > 0.01) nodeBox(hv.node, hv.prop.box, 0, CULL_PAD);
+        continue;
+      }
+      const br = Math.sin(t * 2.0 + hv.breath) * 0.012;
+      hv.node.scale.set(hv.flip * (1 - br * 0.5), 1 + br);
+      hv.node.y = hv.at.y + dy;
     }
     // 촌장: 숨쉬기, 대박이 나면 통통.
     if (!this.busy.has(this.chief)) {

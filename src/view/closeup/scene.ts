@@ -233,6 +233,8 @@ export class BoothScene implements CloseupScene {
 
     for (const a of this.actors) {
       if (a === null) continue;
+      // 장신구·파산 어둠 (넷째 묶음)
+      a.sync(this.sim.monster(a.id), dt);
       a.update(dt, this.time);
       // 반응 이벤트가 오지 않으면 기본 반응
       if (a.expect !== null && this.time >= a.expect.at) {

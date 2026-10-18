@@ -6,6 +6,7 @@
 //       짧게 누르기(8px 안, 350ms 안) = 누르기: 손님 → 부스 → 건물 → 단체 놀이 마당(경주로·모래판·밧줄·연…) → 빈 땅.
 // 단체 놀이 화면(경주장 racetrack.ts, 씨름·오리배·연·줄다리기·보물찾기 view/group/<booth>.ts)은 view/group/registry.ts가 부스마다 만든다.
 // 손님을 그리기 전에 단체 놀이 화면을 먼저 돌린다 (손님 몸을 그 프레임에 맡길 수 있게).
+// 넷째 묶음 (DESIGN 3.7) 연출(빚 게이지·표, 전당포·은행 볼일, 일터 먼지·재료, 다 갚음, 빚 걸기 판)은 debtMap.ts: 손님을 그린 뒤 돌린다.
 // sim은 읽기만 한다 (sim.state를 매 프레임 읽고, sim.bus 이벤트로 연출). 세계 크기는 map.ts WORLD를 따른다.
 
 import { Container, Graphics, Rectangle, type Application, type FederatedPointerEvent, type FederatedWheelEvent } from 'pixi.js';
@@ -18,6 +19,7 @@ import type { ActiveRound, GroupState, MonsterId } from '../sim/types.ts';
 import { BuildingsView } from './buildings.ts';
 import type { VillageViewApi } from './contracts.ts';
 import { buildDebugOverlay } from './debug.ts';
+import { DebtMapView } from './debtMap.ts';
 import { FxLayer } from './fx.ts';
 import { GroundView } from './ground.ts';
 import { clamp, follow, makeViewRect, type ViewRect } from './mapUtil.ts';
@@ -76,6 +78,8 @@ export class VillageView implements VillageViewApi {
   private readonly objectLayer = new Container();
   private readonly effectLayer = new Container();
   private readonly emoteLayer = new Container();
+  /** 넷째 묶음 머리 위 표시·날아가는 장신구 (이모트 위, 입자 아래). */
+  private readonly debtLayer = new Container();
   private readonly skyLayer = new Container();
   private readonly debugLayer = new Container();
   private readonly ground: GroundView;
@@ -84,6 +88,7 @@ export class VillageView implements VillageViewApi {
   /** 단체 놀이 화면 (부스마다 하나, view/group/registry.ts). */
   private readonly groups: { readonly booth: GroupBoothId; readonly r: GroupMapRenderer }[];
   private readonly fx: FxLayer;
+  private readonly debt: DebtMapView;
   private debugNode: Container | null = null;
   private readonly hitRect = new Rectangle(0, 0, 1, 1);
 
@@ -148,7 +153,9 @@ export class VillageView implements VillageViewApi {
       l.eventMode = 'none';
       l.interactiveChildren = false;
     }
-    this.effectLayer.addChild(this.emoteLayer, this.fx.node);
+    this.debtLayer.eventMode = 'none';
+    this.debtLayer.interactiveChildren = false;
+    this.effectLayer.addChild(this.emoteLayer, this.debtLayer, this.fx.node);
     this.camera.addChild(this.ground.node, this.floorLayer, this.shadowLayer, this.objectLayer, this.effectLayer, this.skyLayer, this.debugLayer);
     this.camera.eventMode = 'none';
     this.camera.interactiveChildren = false;
@@ -159,6 +166,7 @@ export class VillageView implements VillageViewApi {
     this.monsters = new MonstersView(sim, { objects: this.objectLayer, shadows: this.shadowLayer, effects: this.emoteLayer }, this.fx);
     const layers = { floor: this.floorLayer, shadows: this.shadowLayer, objects: this.objectLayer, effects: this.effectLayer, sky: this.skyLayer };
     this.groups = GROUP_BOOTHS.map((booth) => ({ booth, r: GROUP_MAP[booth]({ sim, booth, layers, fx: this.fx, buildings: this.buildings, monsters: this.monsters }) }));
+    this.debt = new DebtMapView({ sim, layer: this.debtLayer, fx: this.fx, buildings: this.buildings, monsters: this.monsters });
 
     // 입력: 화면 전체를 받는 root 하나. 지도 안 물체는 직접 재서 고른다 (Pixi 히트 테스트를 물체마다 돌리지 않게).
     this.root.eventMode = 'static';
@@ -206,7 +214,11 @@ export class VillageView implements VillageViewApi {
       bus.on('potFestival', (e) => this.potFestival(e.booth, e.monster)),
       bus.on('coinsChanged', (e) => {
         if (e.at === null || e.delta === 0) return;
-        this.fx.floatText(e.at.x, e.at.y - 70, e.delta > 0 ? `+${e.delta}` : `${e.delta}`, e.delta > 0 ? 'gain' : 'loss');
+        // 전당포·은행 계산대에서 빌려주고 돌려받은 코인은 가게 위에 (손님 머리 위로 날아가는 장신구·코인을 가리지 않게).
+        const shop = this.debt.shopAbove(e.at, this.tmp);
+        const x = shop ? this.tmp.x : e.at.x;
+        const y = shop ? this.tmp.y : e.at.y - 70;
+        this.fx.floatText(x, y, e.delta > 0 ? `+${e.delta}` : `${e.delta}`, e.delta > 0 ? 'gain' : 'loss', false, shop ? 0.5 : 0);
       }),
       bus.on('buildingUpgraded', () => this.buildings.refresh()),
       bus.on('boothUnlocked', () => this.buildings.refresh()),
@@ -281,6 +293,7 @@ export class VillageView implements VillageViewApi {
     // 단체 놀이 화면 먼저 (그 프레임의 손님 몸을 맡긴다), 그다음 손님.
     for (const g of this.groups) g.r.update(dt, this.view);
     this.monsters.update(dt, this.time, this.view, this.zoom);
+    this.debt.update(dt, this.view, this.zoom);
     this.fx.update(dt, this.zoom);
   }
 
@@ -367,6 +380,7 @@ export class VillageView implements VillageViewApi {
     this.app.canvas.removeEventListener('webglcontextrestored', this.onRestored);
     this.root.removeAllListeners();
     for (const g of this.groups) g.r.destroy();
+    this.debt.destroy();
     this.monsters.destroy();
     this.buildings.destroy();
     this.ground.destroy();

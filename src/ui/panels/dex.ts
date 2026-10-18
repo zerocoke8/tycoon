@@ -4,7 +4,7 @@
 
 import { BOOTH_IDS, BOOTHS, isGroupBooth, SPECIES, SPECIES_IDS, TRAITS, type BoothId, type SpeciesId } from '../../data/defs.ts';
 import { DISTRICTS } from '../../data/map.ts';
-import { reactionLabels, type ReactTier } from '../../sim/reactions.ts';
+import { DEBT_REACT_KINDS, debtReactionLabels, reactionLabels, type ReactTier } from '../../sim/reactions.ts';
 import { btn, fmt, h, revealInSheet, setText } from '../dom.ts';
 import { boothLockText, boothTiny, DISTRICT_ORDER, itemName, speciesDistrict } from '../labels.ts';
 import { BasePanel, type DexView } from '../panel.ts';
@@ -23,6 +23,9 @@ interface PlayGroup {
 }
 
 const TIERS: readonly ReactTier[] = ['jackpot', 'win', 'nearMiss', 'lose'];
+
+/** 넷째 묶음 반응 이름 (전당포·은행 볼일, 파산, 일터, 빚 걸기 판, 다 갚음): 놀이 묶음 다음 한 줄. */
+const DEBT_LABELS: ReadonlySet<string> = new Set(DEBT_REACT_KINDS.flatMap((k) => debtReactionLabels(k)));
 
 const PLAY_GROUPS: readonly PlayGroup[] = (() => {
   // 공통 표의 이름은 공통 묶음 몫 (처음 네 부스, 항아리 축제 대박도 이 표). 자기 표가 있는 부스는 공통 표에 없는 이름만.
@@ -204,6 +207,19 @@ export class DexPanel extends BasePanel {
           'mpv-react-play',
           h('div', 'head', h('span', 'nm', g.name), g.group ? h('span', 'mpv-tag group', '여럿이 한판') : null, h('small', null, `${mine.length} / ${g.labels.size}`)),
           h('div', 'mpv-labels', ...mine.map((r) => h('span', g.group ? 'mpv-label sky' : 'mpv-label green', r))),
+        ),
+      );
+    }
+    // 전당포·은행·일터 (넷째 묶음)
+    const debt = [...left].filter((l) => DEBT_LABELS.has(l));
+    for (const l of debt) left.delete(l);
+    if (debt.length > 0) {
+      el.append(
+        h(
+          'div',
+          'mpv-react-play',
+          h('div', 'head', h('span', 'nm', '전당포·은행·일터'), h('small', null, `${debt.length} / ${DEBT_LABELS.size}`)),
+          h('div', 'mpv-labels', ...debt.map((r) => h('span', 'mpv-label debt', r))),
         ),
       );
     }

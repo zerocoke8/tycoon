@@ -7,6 +7,7 @@
 // 구경 손님 넷(자리 2~5, 홍·청에 건다): 뒤 왼쪽 둘·앞 오른쪽 둘, 자기 편이 앞서면 들썩·밀리면 부들부들, 넘어뜨리는 순간 다 같이 반응.
 // 진행자: 심판(자리 0, 가운데 조금 왼쪽 뒤: 시작 때 부채 둘을 번쩍 '시작!', 끝에 이긴 편 부채), 해설자(자리 1, 오른쪽 뒤: 마이크 말풍선).
 // 위쪽 가운데 힘 막대 (홍 ← → 청). 모이는 중 선수가 하나면 빈 발자리에 '도전자를 기다려요'.
+// 빚 걸기 판 (넷째 묶음): 선수 둘이 채무자 (발밑 표 = 편 + 건 빚, 결과 글자는 GroupScene이 '빚 반으로!'·'상대 빚만큼 +N'), 표지는 힘 막대 아래 왼쪽.
 
 import { Container, Graphics, Text } from 'pixi.js';
 import { SIDES } from '../../data/defs.ts';
@@ -116,6 +117,21 @@ export class SsireumScene extends GroupScene {
         { x: X(0.87), y: sandTop + band * 0.05, face: -1 },
       ],
     };
+  }
+
+  /** 빚 걸기 판 선수 표: 둘이 붙어 서 있어 가운데에서 바깥으로 펼친다 (홍 = 왼쪽, 청 = 오른쪽). */
+  protected override debtBadgeAt(seat: number, fs: number): { x: number; y: number; align?: -1 | 0 | 1 } {
+    const at = this.seatAt[seat];
+    if (seat > 1 || at === undefined) return super.debtBadgeAt(seat, fs);
+    return { x: this.cx + (seat === 0 ? -fs * 0.3 : fs * 0.3), y: at.y + fs * 1.3, align: seat === 0 ? -1 : 1 };
+  }
+
+  /** '빚 걸기 판' 표지: 위쪽 힘 막대·'홍' 글자 아래 왼쪽 (drawBar와 같은 높이 계산). */
+  protected override signAt(_size: { w: number; h: number }): { x: number; y: number } {
+    const L = this.L;
+    const y0 = Math.max(8, L.h * 0.05);
+    const bh = Math.max(10, L.sw * 0.032);
+    return { x: 10, y: y0 + bh + 10 };
   }
 
   /** 선수가 하나면 빈 발자리에 '도전자를 기다려요'가 있으니 위 글은 비운다. */
@@ -428,7 +444,9 @@ export class SsireumScene extends GroupScene {
     const play = this.play;
     const lying = seat < 2 && play !== null && play.kind === 'ssireum' && play.winner !== seat;
     const at = lying ? { x: a.root.x + a.rig.dx * a.root.scale.x, y: a.root.y - L.bodyH * S.player * 0.75 } : undefined;
-    settle(a, tier, payout, this.time, { ui: this.ui, fx: this.fx, anim: this.anim, L }, seat < 2 ? Math.max(16, L.sw * 0.06) : Math.max(13, L.sw * 0.045), true, at);
+    // 빚 걸기 판의 채무자 선수는 '이겼다!' 대신 빚 결과 글자 (GroupScene).
+    const debtor = this.entryAt(seat)?.debt !== undefined;
+    settle(a, tier, payout, this.time, { ui: this.ui, fx: this.fx, anim: this.anim, L }, seat < 2 ? Math.max(16, L.sw * 0.06) : Math.max(13, L.sw * 0.045), !debtor, at);
     if (payout > 0) this.shakePot();
     if (tier === 'jackpot' && this.tl.once('confetti')) confetti(this.fx, this.anim, L.w, L.h, 40);
     if (tier === 'jackpot' || tier === 'win') for (const h of this.hosts) h?.cheer(tier === 'jackpot');

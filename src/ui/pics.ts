@@ -1,8 +1,10 @@
 // UI가 쓰는 그림 (<img>): public/assets/art/<그룹>/<key>.webp. meta.json으로 있는 그림을 알고,
 // 없는 그림은 처음부터 글자 자리 표시로 (404를 덜 낸다). 못 읽은 그림은 두 번 다시 받아 보고, 그래도 안 되면 자리 표시로 바뀐다.
 
-import type { SpeciesId } from '../data/defs.ts';
+import type { AccessoryId, AccessorySlot, SpeciesId } from '../data/defs.ts';
 import type { Pose } from '../sim/types.ts';
+import { accessoryPortrait } from '../view/accessory.ts';
+import { artMeta } from '../view/art.ts';
 import { h } from './dom.ts';
 import { itemColor, itemName, SPECIES_COLOR } from './labels.ts';
 
@@ -99,6 +101,38 @@ export function monsterPic(species: SpeciesId, pose: Pose, name: string, cls = '
 /** 포즈 그림이 아직 없으면 기본 그림으로. */
 export function setMonsterPic(box: HTMLElement, species: SpeciesId, pose: Pose, name: string): void {
   setPic(box, 'monsters', [`${species}_${pose}`, `${species}_base`], () => placeholder(name.slice(0, 1), SPECIES_COLOR[species], true));
+}
+
+/**
+ * 손님 그림 위에 몸에 단 장신구 (<img>)를 겹친다 (view/accessory.ts accessoryPortrait: 지도·확대 화면과 같은 붙는 점).
+ * box = 몸 그림 상자(.mpv-pic)의 그림 칸을 덮는 겹침 층 (CSS .mpv-dress). 몸 그림 비율의 틀을 가운데에 두고 장신구를 그 안 비율로 놓는다.
+ * 몸 뒤에 그릴 장신구(behind)는 그림 상자 바탕에 가려지니 뺀다. 그림 정보가 없으면 비운다.
+ */
+export function dressPic(box: HTMLElement, species: SpeciesId, pose: Pose, list: readonly { readonly key: AccessoryId; readonly slot: AccessorySlot }[]): void {
+  const pieces = list.length === 0 ? [] : accessoryPortrait(species, pose, list).filter((p) => !p.behind);
+  const usePose: Pose = artMeta('monsters', `${species}_${pose}`) !== undefined ? pose : 'base';
+  const t = artMeta('monsters', `${species}_${usePose}`)?.trim;
+  if (pieces.length === 0 || t === undefined) {
+    box.replaceChildren();
+    return;
+  }
+  const frame = h('span', t.h > t.w ? 'frame tall' : 'frame');
+  frame.style.aspectRatio = `${t.w} / ${t.h}`;
+  for (const p of pieces) {
+    const img = document.createElement('img');
+    img.alt = '';
+    img.draggable = false;
+    img.decoding = 'async';
+    img.src = picUrl('items', p.key);
+    const s = img.style;
+    s.left = `${(p.left * 100).toFixed(2)}%`;
+    s.top = `${(p.top * 100).toFixed(2)}%`;
+    s.width = `${(p.width * 100).toFixed(2)}%`;
+    s.transformOrigin = `${(p.ax * 100).toFixed(1)}% ${(p.ay * 100).toFixed(1)}%`;
+    s.transform = `translate(${(-p.ax * 100).toFixed(1)}%, ${(-p.ay * 100).toFixed(1)}%) rotate(${p.rot.toFixed(3)}rad)`;
+    frame.append(img);
+  }
+  box.replaceChildren(frame);
 }
 
 export function staffPic(art: string, name: string, cls = ''): HTMLSpanElement {

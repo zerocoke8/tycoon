@@ -1,7 +1,7 @@
 // 놀이부스: 레벨 값, 진행자 자리, 열림 여부, 자리·줄 위치, 손님의 부스 고르기.
 
 import type { Rng } from '../core/rng.ts';
-import { BOOTHS, BOOTH_IDS, boothDef, isGroupBooth, SPECIES, type BoothId, type BoothRole, type StaffStats } from '../data/defs.ts';
+import { BOOTHS, BOOTH_IDS, boothDef, DEBT_MATCH, isGroupBooth, SPECIES, type BoothId, type BoothRole, type StaffStats } from '../data/defs.ts';
 import { BOOTH_SPOTS, type Pt } from '../data/map.ts';
 import { byLevel, goodDef, type GoodDef } from './economy.ts';
 import { groupGame } from './group/index.ts';
@@ -159,6 +159,9 @@ export function chooseBooth(state: GameState, rng: Rng, m: Monster, avoid: Booth
   for (const b of BOOTH_IDS) {
     if (!boothOpen(state, b) || !boothHasRoom(state, b)) continue;
     if (!canPlay(state, b, m)) continue;
+    // 빚 걸기 판 중인 (또는 예약된) 줄다리기 (구경하며 거는 자리가 없다): 판이 끝날 때까지 손님을 받지 않는다.
+    const dg = state.booths[b].group;
+    if ((dg?.mode === 'debt' || dg?.debtNext === true) && (DEBT_MATCH.watchOnly as readonly BoothId[]).includes(b)) continue;
     let w = fav.includes(b) ? TUNE.favoriteWeight : 1;
     w *= Math.max(0.2, 1 + (boothStat(state, b, 'welcome', TUNE.emptyWelcome) - 3) * TUNE.welcomePerPoint);
     w /= 1 + state.booths[b].queue.length * TUNE.queuePenalty;

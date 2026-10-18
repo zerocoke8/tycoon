@@ -750,6 +750,156 @@ export function groupReactionLabels(booth: GroupBoothId, key?: { kind: 'lead' | 
   };
 }
 
+// ── 넷째 묶음 (DESIGN 3.7): 전당포·은행 볼일, 파산, 빚 다 갚음 ──
+
+/**
+ * 넷째 묶음 반응 종류. 볼일: seekPawn·seekLoan = 돈이 떨어져 전당포·은행으로 걸어가기 시작할 때 (걸으며 작게), goRedeem·goRepay = 따서 되찾으러·갚으러 갈 때,
+ * pawn·redeem·loan·repay = 계산대에서, refused = 금고가 비어 못 빌림. 파산: bankrupt, 일터: laborFarm·laborMine = 재료가 나올 때 한숨·영차, waitWork = 자리를 기다리며,
+ * cheered = 반장이 다독임. 빚 걸기 판: matchCalled = 불려 갈 때, matchHalved·matchCleared·matchAdded = 정산 (이겨서 반·대박으로 0·져서 늘어남).
+ * 풀려남: relieved = 다 갚음, forgiven = 오래 일해 반장이 남은 빚을 덜어 줌.
+ */
+export type DebtReactKind =
+  | 'seekPawn'
+  | 'seekLoan'
+  | 'goRedeem'
+  | 'goRepay'
+  | 'pawn'
+  | 'redeem'
+  | 'loan'
+  | 'repay'
+  | 'refused'
+  | 'bankrupt'
+  | 'laborFarm'
+  | 'laborMine'
+  | 'waitWork'
+  | 'cheered'
+  | 'matchCalled'
+  | 'matchHalved'
+  | 'matchCleared'
+  | 'matchAdded'
+  | 'relieved'
+  | 'forgiven';
+
+/** 기쁜 쪽 반응 (성격 무게·세기를 기쁨으로 본다). */
+const DEBT_POSITIVE: ReadonlySet<DebtReactKind> = new Set(['goRedeem', 'goRepay', 'redeem', 'repay', 'matchHalved', 'matchCleared', 'relieved', 'forgiven', 'cheered']);
+
+const DEBT_REACT: Record<DebtReactKind, readonly Cand[]> = {
+  // 걸으며 작게 (연출 없이 이모트만).
+  seekPawn: [
+    c('base', 'sweat', 'none', '맡겨야겠다…', 0.8, 1.6, 'main', 'calm'),
+    c('agony', 'tear', 'none', '눈물을 머금고', 0.85, 1.8, 'tear', 'gloom'),
+    c('base', 'note', 'none', '이걸 맡기면 한판 더!', 0.85, 1.6, 'bright', 'loud'),
+  ],
+  seekLoan: [
+    c('base', 'sweat', 'none', '빌려야겠다…', 0.8, 1.6, 'main', 'calm'),
+    c('agony', 'sweat', 'none', '조금만 빌리자', 0.85, 1.6, 'gloom'),
+    c('base', 'note', 'none', '은행에 가 볼까', 0.8, 1.6, 'bright', 'loud'),
+  ],
+  goRedeem: [
+    c('joy', 'sparkle', 'none', '되찾으러 가자!', 0.85, 1.6, 'main', 'bright'),
+    c('base', 'heart', 'none', '기다려, 내 장신구!', 0.85, 1.6, 'loud'),
+  ],
+  goRepay: [
+    c('base', 'note', 'none', '빚 갚으러 가자', 0.8, 1.6, 'main', 'calm'),
+    c('joy', 'sparkle', 'none', '얼른 갚아야지!', 0.85, 1.6, 'bright', 'loud'),
+  ],
+  pawn: [
+    c('base', 'sweat', 'hop', '맡기고 한숨', 0.8, 1.6, 'main'),
+    c('agony', 'sweat', 'tremble', '아끼던 건데…', 0.9, 1.8, 'tear', 'gloom'),
+    c('base', 'note', 'hop', '이걸로 한판 더!', 0.9, 1.4, 'bright', 'loud'),
+  ],
+  redeem: [
+    c('joy', 'heart', 'bigHop', '되찾았다!', 1.2, 2.6, 'main', 'loud'),
+    c('joy', 'sparkle', 'spin', '다시 내 거!', 1.1, 2.4, 'bright'),
+    c('joy', 'tear', 'tremble', '안도의 눈물', 1.0, 2.4, 'tear'),
+  ],
+  loan: [
+    c('base', 'sweat', 'hop', '빌렸다…', 0.85, 1.6, 'main'),
+    c('base', 'note', 'squash', '꼭 갚을게요', 0.9, 1.6, 'bright'),
+    c('agony', 'sweat', 'tremble', '두근두근', 0.9, 1.8, 'calm', 'gloom'),
+  ],
+  repay: [
+    c('joy', 'note', 'hop', '빚 끝!', 1.0, 2.0, 'main'),
+    c('joy', 'heart', 'squash', '홀가분', 1.0, 2.0, 'bright'),
+    c('joy', 'sparkle', 'hop', '깔끔하게 갚았다', 1.0, 2.0, 'calm'),
+  ],
+  refused: [
+    c('sad', 'sweat', 'slump', '금고가 텅', 1.0, 2.0, 'main'),
+    c('sad', 'tear', 'none', '빌릴 데가 없어…', 1.0, 2.0, 'tear'),
+  ],
+  bankrupt: [
+    c('sad', 'storm', 'slump', '파산…', 1.6, 3.6, 'main', 'gloom'),
+    c('sad', 'tear', 'tremble', '엉엉 빚더미', 1.6, 3.8, 'tear', 'loud'),
+    c('sad', 'storm', 'none', '하늘이 무너졌다', 1.5, 3.6, 'calm'),
+  ],
+  // 일하다가 (재료가 나올 때): 작게. 어둡지만 하찮게.
+  laborFarm: [
+    c('sad', 'sweat', 'none', '흙투성이 한숨', 0.7, 1.6, 'main', 'gloom'),
+    c('base', 'sweat', 'squash', '영차영차', 0.7, 1.4, 'loud'),
+    c('base', 'sparkle', 'hop', '채소 하나!', 0.7, 1.4, 'bright'),
+    c('agony', 'sweat', 'tremble', '허리가 아파…', 0.75, 1.6, 'tear', 'calm'),
+  ],
+  laborMine: [
+    c('base', 'sparkle', 'hop', '광석이다!', 0.7, 1.4, 'bright', 'main'),
+    c('sad', 'storm', 'none', '콜록, 먼지…', 0.7, 1.6, 'gloom'),
+    c('base', 'sweat', 'squash', '곡괭이질 영차', 0.7, 1.4, 'loud'),
+    c('agony', 'sweat', 'tremble', '허리가 아파…', 0.75, 1.6, 'tear', 'calm'),
+  ],
+  waitWork: [
+    c('sad', 'sweat', 'none', '언제 내 차례…', 0.7, 1.8, 'main', 'calm'),
+    c('sad', 'storm', 'none', '쪼그려 한숨', 0.7, 1.8, 'gloom'),
+    c('sad', 'tear', 'none', '빚 생각에 멍', 0.7, 1.8, 'tear'),
+  ],
+  cheered: [
+    c('base', 'heart', 'hop', '반장님 응원에 힘!', 0.75, 1.4, 'main', 'bright'),
+    c('base', 'sweat', 'squash', '조금만 더 힘내자', 0.75, 1.4, 'calm'),
+  ],
+  matchCalled: [
+    c('agony', 'shock', 'tremble', '빚을 걸고 한판!', 0.9, 1.8, 'main', 'loud'),
+    c('base', 'sweat', 'none', '이기면 반이다…', 0.85, 1.8, 'calm'),
+    c('agony', 'sweat', 'shake', '두근두근 빚 한판', 0.9, 1.8, 'gloom'),
+  ],
+  matchHalved: [
+    c('joy', 'sparkle', 'bigHop', '빚이 반으로!', 1.2, 3.0, 'main', 'loud'),
+    c('joy', 'heart', 'hop', '살 것 같다!', 1.1, 2.8, 'bright'),
+    c('joy', 'tear', 'tremble', '조금 가벼워졌어', 1.0, 2.8, 'tear', 'calm'),
+  ],
+  matchCleared: [
+    c('joy', 'sparkle', 'spin', '빚이 사라졌다!', 1.4, 3.2, 'main', 'loud'),
+    c('joy', 'heart', 'bigHop', '대역전 해방!', 1.3, 3.2, 'bright'),
+  ],
+  matchAdded: [
+    c('sad', 'storm', 'slump', '빚이 늘었다…', 1.3, 3.2, 'main', 'gloom'),
+    c('sad', 'tear', 'tremble', '더 일해야 해…', 1.3, 3.2, 'tear'),
+    c('agony', 'storm', 'shake', '빚 눈덩이', 1.3, 3.0, 'loud', 'angry'),
+  ],
+  relieved: [
+    c('joy', 'sparkle', 'bigHop', '빚 다 갚았다!', 1.4, 3.4, 'main', 'loud'),
+    c('joy', 'heart', 'spin', '자유다!', 1.3, 3.2, 'bright'),
+    c('joy', 'note', 'bounceLoop', '홀가분해!', 1.3, 3.2, 'calm'),
+    c('joy', 'tear', 'tremble', '홀가분한 눈물', 1.2, 3.4, 'tear'),
+  ],
+  forgiven: [
+    c('joy', 'heart', 'bigHop', '반장님 고마워요', 1.3, 3.4, 'main', 'tear'),
+    c('joy', 'note', 'bounceLoop', '덕분에 홀가분', 1.2, 3.2, 'bright'),
+  ],
+};
+
+/** 넷째 묶음 반응 (sim이 monsterReact로 낸다). */
+export function debtReaction(rng: Rng, kind: DebtReactKind, m: Monster): Reaction {
+  const positive = DEBT_POSITIVE.has(kind);
+  const cand = choose(rng, DEBT_REACT[kind], m, positive);
+  return build(cand, intensityOf(cand, m.traits, m.mood, positive, 1));
+}
+
+/** 넷째 묶음 반응 이름 (도감·시험용). */
+export function debtReactionLabels(kind: DebtReactKind): string[] {
+  return DEBT_REACT[kind].map((x) => x.label);
+}
+
+/** 넷째 묶음 반응 종류 모두 (시험용). */
+export const DEBT_REACT_KINDS = Object.keys(DEBT_REACT) as DebtReactKind[];
+
 /** 간식을 받았을 때. 빈털터리였으면 웃으며 떠나는 큰 반응. */
 export function snackReaction(rng: Rng, m: Monster): Reaction {
   if (m.broke === true) return build(c('joy', 'heart', 'bigHop', '웃으며 안녕', 1.3, 3.0), 1.3);

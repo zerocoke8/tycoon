@@ -1,6 +1,6 @@
 // 짓기 탭: 건물 업그레이드와 놀이부스 열기·업그레이드 (부스는 구역마다 묶어서). 그리고 건물 하나만 보는 시트, 닫힌 부스 시트.
 
-import { BOOTH_IDS, BOOTHS, boothDef, BUILDINGS, isGroupBooth, type BoothId, type BuildingId } from '../../data/defs.ts';
+import { BOOTH_IDS, BOOTHS, boothDef, BUILD_HALL, BUILDINGS, isGroupBooth, type BoothId, type BuildingId } from '../../data/defs.ts';
 import { BUILDING_SPOTS, DISTRICTS } from '../../data/map.ts';
 import type { Cost, Result } from '../../sim/api.ts';
 import { btn, h } from '../dom.ts';
@@ -10,13 +10,20 @@ import { BasePanel, type TabId, type UiCtx } from '../panel.ts';
 import { mapPic } from '../pics.ts';
 import { costChips, secHead, type Live } from '../widgets.ts';
 
+/** 넷째 묶음 건물 (전당포·은행·일터, DESIGN 3.7): 처음엔 빈 부지, 누르면 자기 시트 (ui/panels/debt.ts). */
+export const DEBT_BUILDINGS: readonly BuildingId[] = Object.keys(BUILD_HALL) as BuildingId[];
+export const isDebtBuilding = (id: BuildingId): boolean => DEBT_BUILDINGS.includes(id);
+
+/** 건물 그림 key (map/<key>): 일터는 따로 그림이 없어 광산 입구로. */
+export const buildingArt = (id: BuildingId): string => (id === 'workyard' ? 'mine_entrance' : id);
+
 /** 효과 줄: [지금] … / [다음] … */
-function effLine(tag: string, text: string, next = false): HTMLElement {
+export function effLine(tag: string, text: string, next = false): HTMLElement {
   return h('div', 'mpv-eff', h('span', next ? 'mpv-tag next' : 'mpv-tag', tag), h('span', null, text));
 }
 
 /** 비용 칩 + 버튼 (살 수 없으면 흐리게, 그래도 누르면 이유가 토스트로). locked = 비용과 상관없이 아직 못 하는 까닭이 있다. */
-function costAction(ctx: UiCtx, live: Live, cost: Cost | null, label: string, run: () => Result, maxText = '최고 레벨이에요', locked = false): HTMLElement {
+export function costAction(ctx: UiCtx, live: Live, cost: Cost | null, label: string, run: () => Result, maxText = '최고 레벨이에요', locked = false): HTMLElement {
   if (cost === null) return h('div', 'mpv-act', h('span', 'mpv-max', maxText));
   const b = btn('small', label, () => ctx.act(run()));
   live.add(() => b.classList.toggle('dim', locked || !ctx.sim.canAfford(cost)));
@@ -48,7 +55,10 @@ export class BuildPanel extends BasePanel {
 
   protected build(): void {
     this.el.append(secHead('건물', '누르면 지도에서 보여요'));
-    for (const id of BUILDING_IDS) this.el.append(this.buildingCard(id));
+    for (const id of BUILDING_IDS) if (!isDebtBuilding(id)) this.el.append(this.buildingCard(id));
+    // 넷째 묶음: 돈이 떨어진 손님이 들르는 곳 (누르면 진열장·대출·일꾼 시트).
+    this.el.append(secHead('전당포 · 은행 · 일터', '누르면 안을 들여다봐요'));
+    for (const id of DEBT_BUILDINGS) this.el.append(this.buildingCard(id));
 
     // 놀이부스: 구역마다 (열리는 차례: 중앙 → 연못 동네 → 북쪽 언덕 → 숲 동네)
     const hall = this.sim.hallLevel();
@@ -66,30 +76,39 @@ export class BuildPanel extends BasePanel {
     const d = BUILDINGS[id];
     const lv = this.st.buildings[id].level;
     const max = buildingMaxLevel(id);
-    const thumb = h('button', 'mpv-thumb', mapPic(id, d.name));
+    const thumb = h('button', 'mpv-thumb', mapPic(buildingArt(id), d.name));
     thumb.type = 'button';
-    thumb.setAttribute('aria-label', `${d.name} 지도에서 보기`);
+    const inside = isDebtBuilding(id);
+    thumb.setAttribute('aria-label', inside ? `${d.name} 보기` : `${d.name} 지도에서 보기`);
     thumb.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (inside) {
+        this.ctx.showBuilding(id);
+        return;
+      }
       this.ctx.closeAll();
       this.ctx.hooks.world.focusOn(BUILDING_SPOTS[id]);
     });
-    const now = buildingEffect(id, lv);
+    // 넷째 묶음 건물은 처음엔 빈 부지 (레벨 0): '짓기', 마을회관 레벨이 모자라면 잠긴 까닭.
+    const unbuilt = lv < 1;
+    const lock = this.sim.buildingLockReason(id);
+    const now = unbuilt ? null : buildingEffect(id, lv);
     const next = lv < max ? buildingEffect(id, lv + 1) : null;
     const extra = id === 'hall' && lv < max ? hallUnlocks(lv + 1) : [];
     return h(
       'div',
-      'mpv-card',
+      unbuilt ? (lock !== null ? 'mpv-card dim locked' : 'mpv-card dim') : 'mpv-card',
       thumb,
       h(
         'div',
         'mpv-grow',
-        h('div', 'mpv-title', d.name, h('span', 'mpv-lv', `Lv.${lv}/${max}`)),
+        h('div', 'mpv-title', d.name, h('span', 'mpv-lv', unbuilt ? '빈 부지' : `Lv.${lv}/${max}`)),
         h('div', 'mpv-desc', d.desc),
+        lock !== null ? h('div', 'mpv-lock', lock) : null,
         now ? effLine('지금', now) : null,
-        next ? effLine('다음', next, true) : null,
+        next ? effLine(unbuilt ? '지으면' : '다음', next, true) : null,
         ...extra.map((t) => effLine('열림', t, true)),
-        costAction(this.ctx, this.live, this.sim.buildingUpgradeCost(id), '업그레이드', () => this.sim.upgradeBuilding(id)),
+        costAction(this.ctx, this.live, this.sim.buildingUpgradeCost(id), unbuilt ? '짓기' : '업그레이드', () => this.sim.upgradeBuilding(id), '최고 레벨이에요', lock !== null),
       ),
     );
   }
@@ -141,7 +160,8 @@ export class BuildingPanel extends BasePanel {
   id: BuildingId = 'hall';
 
   override head(): readonly [string, string] {
-    return [BUILDINGS[this.id].name, `Lv.${this.st.buildings[this.id].level}`];
+    const lv = this.st.buildings[this.id].level;
+    return [BUILDINGS[this.id].name, lv < 1 ? '빈 부지' : `Lv.${lv}`];
   }
 
   sig(): string {
@@ -154,19 +174,21 @@ export class BuildingPanel extends BasePanel {
     const lv = this.st.buildings[id].level;
     const max = buildingMaxLevel(id);
     const now = buildingEffect(id, lv);
-    this.el.append(h('div', 'mpv-card', h('span', 'mpv-thumb lg', mapPic(id, d.name)), h('div', 'mpv-grow', h('div', 'mpv-desc', d.desc), now ? effLine('지금', now) : null, h('div', 'mpv-note', `레벨 ${lv} / ${max}`))));
+    this.el.append(h('div', 'mpv-card', h('span', 'mpv-thumb lg', mapPic(buildingArt(id), d.name)), h('div', 'mpv-grow', h('div', 'mpv-desc', d.desc), now ? effLine('지금', now) : null, h('div', 'mpv-note', `레벨 ${lv} / ${max}`))));
 
     if (lv < max) {
       const next = buildingEffect(id, lv + 1);
       const extra = id === 'hall' ? hallUnlocks(lv + 1) : [];
+      const lock = this.sim.buildingLockReason(id);
       this.el.append(
-        secHead(`다음 레벨 (Lv.${lv + 1})`),
+        secHead(lv < 1 ? '짓기' : `다음 레벨 (Lv.${lv + 1})`),
         h(
           'div',
           'mpv-card col',
-          next ? effLine('다음', next, true) : null,
+          lock !== null ? h('div', 'mpv-lock', lock) : null,
+          next ? effLine(lv < 1 ? '지으면' : '다음', next, true) : null,
           ...extra.map((t) => effLine('열림', t, true)),
-          costAction(this.ctx, this.live, this.sim.buildingUpgradeCost(id), '업그레이드', () => this.sim.upgradeBuilding(id)),
+          costAction(this.ctx, this.live, this.sim.buildingUpgradeCost(id), lv < 1 ? '짓기' : '업그레이드', () => this.sim.upgradeBuilding(id), '최고 레벨이에요', lock !== null),
         ),
       );
     } else {

@@ -1,8 +1,9 @@
 // 손님 만들기, 걷기, 성격에 따른 건 코인.
 
 import type { Rng } from '../core/rng.ts';
-import { GUEST_MATS, MOOD, NICKNAMES, SIM, SPECIES, SPECIES_IDS, TRAITS, type SpeciesId, type TraitId } from '../data/defs.ts';
+import { GUEST_MATS, LABOR, MOOD, NICKNAMES, SIM, SPECIES, SPECIES_IDS, TRAITS, type SpeciesId, type TraitId } from '../data/defs.ts';
 import type { Pt } from '../data/map.ts';
+import { rollAccessories } from './debt.ts';
 import { josa } from './text.ts';
 import { TUNE } from './tuning.ts';
 import type { GameState, Monster, MonsterId, Regular } from './types.ts';
@@ -19,8 +20,9 @@ export function nameSubject(m: Pick<Monster, 'nickname' | 'species'>): string {
   return josa(displayName(m), '이', '가');
 }
 
+/** 걷는 빠르기 (파산한 손님은 느리게: LABOR.walkMult). */
 export function speedOf(m: Monster): number {
-  return SPECIES[m.species].floats ? SIM.floatSpeed : SIM.walkSpeed;
+  return (SPECIES[m.species].floats ? SIM.floatSpeed : SIM.walkSpeed) * (m.bankrupt === true ? LABOR.walkMult : 1);
 }
 
 export function faceToward(m: Monster, x: number): void {
@@ -115,6 +117,9 @@ export function createMonster(rng: Rng, state: GameState, id: MonsterId, at: Pt,
     cheerCooldown: 0,
     hadJackpot: false,
     mats: rng.int(GUEST_MATS[0], GUEST_MATS[1]),
+    accessories: rollAccessories(rng, species),
+    pawned: [],
+    debt: 0,
     born: state.time,
     phaseTime: 0,
     poseTime: 0,

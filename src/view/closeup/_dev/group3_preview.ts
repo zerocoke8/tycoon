@@ -2,12 +2,14 @@
 // 마을을 다 열고 그 부스만 열어 두어(손님이 다 그리로) 원하는 판이 나올 때까지 빨리 돌린 뒤, 같은 씨앗으로 다시 돌려
 // 판 시작 lead초 전에 확대 화면을 열고 프레임(1/60초)마다 at초(판 시작 뒤)까지 돌려 멈춘다.
 //   ?booth=ssireum|tug|dig &want=any|flip|close|plain(씨름·줄다리기)|chest|reveal|nochest(보물찾기)|gather(모이는 중)
-//   &n=최소 참가자 &at=초[,초…](판 시작 뒤, 음수면 시작 전: 여러 개면 시각마다 title 'shot:i'로 멈춰 찍기를 기다린다) &lead=초 &seed= &level=1~3 &live=1(멈추지 않고 계속) &w=&h=(패널)
+//   &n=최소 참가자 &at=초[,초…](판 시작 뒤, 음수면 시작 전, 'e+1.5'처럼 e로 시작하면 판 끝 뒤: 여러 개면 시각마다 title 'shot:i'로 멈춰 찍기를 기다린다)
+//   &lead=초 &seed= &level=1~3 &live=1(멈추지 않고 계속) &w=&h=(패널)
+//   넷째 묶음: &debt=1 (일터에 채무자 &debtors=N명(기본 4)을 두고 빚 걸기 판만 찾는다), &acc=1 (모든 손님에게 장신구), &mins=찾는 분 (기본 20)
 
 import { Application } from 'pixi.js';
 import { tweens } from '../../../core/tween.ts';
 import { BOOTH_IDS, type BoothId } from '../../../data/defs.ts';
-import { devOpenAll } from '../../../sim/dev.ts';
+import { devAccessories, devOpenAll, devSeedDebtors } from '../../../sim/dev.ts';
 import { Sim, newGame } from '../../../sim/sim.ts';
 import type { GameState, GroupPlay, GroupState } from '../../../sim/types.ts';
 import { loadArt } from '../../art.ts';
@@ -21,6 +23,10 @@ const lead = Number(q.get('lead') ?? '3');
 const seed = Number(q.get('seed') ?? '3');
 const level = Number(q.get('level') ?? '1');
 const live = q.get('live') !== null;
+const debt = q.get('debt') === '1';
+const dress = q.get('acc') === '1';
+const debtors = Number(q.get('debtors') ?? '4');
+const mins = Number(q.get('mins') ?? '20');
 const info = document.getElementById('info');
 
 function makeSim(): Sim {
@@ -28,11 +34,14 @@ function makeSim(): Sim {
   devOpenAll(s);
   for (let i = 1; i < level; i++) s.upgradeBooth(booth);
   for (const b of BOOTH_IDS) if (b !== booth) s.state.booths[b].unlocked = false;
+  if (debt) devSeedDebtors(s, debtors);
+  if (dress) devAccessories(s);
   return s;
 }
 
 function matches(play: GroupPlay, g: GroupState): boolean {
   if (g.participants.length < minN) return false;
+  if (debt && g.mode !== 'debt') return false;
   switch (want) {
     case 'flip':
       return (play.kind === 'ssireum' && play.flip) || (play.kind === 'tug' && play.comeback);
@@ -52,10 +61,10 @@ function matches(play: GroupPlay, g: GroupState): boolean {
 }
 
 /** 원하는 판이 시작되는 틱과 그보다 lead초 이상 앞의 상태 (1초마다 떠 둔 것). gather면 모이는 중 참가자가 n 이상이 된 틱. */
-function findStart(): { tick: number; snap: GameState; snapTick: number } | null {
+function findStart(): { tick: number; snap: GameState; snapTick: number; end: number } | null {
   const s = makeSim();
   const snaps: { tick: number; state: GameState }[] = [];
-  for (let i = 0; i < 20 * 60 * 10; i++) {
+  for (let i = 0; i < mins * 60 * 10; i++) {
     if (i % 10 === 0) {
       snaps.push({ tick: i, state: structuredClone(s.state) });
       if (snaps.length > 12) snaps.shift();
@@ -64,11 +73,14 @@ function findStart(): { tick: number; snap: GameState; snapTick: number } | null
     s.tick(0.1);
     const g = s.state.booths[booth].group;
     if (g === null) return null;
-    const hit = want === 'gather' ? g.phase === 'gathering' && g.participants.length >= minN : before !== 'running' && g.phase === 'running' && g.play !== null && matches(g.play, g);
+    const hit =
+      want === 'gather'
+        ? g.phase === 'gathering' && g.participants.length >= minN && (!debt || g.mode === 'debt')
+        : before !== 'running' && g.phase === 'running' && g.play !== null && matches(g.play, g);
     if (!hit) continue;
     const tick = i + 1;
     const snap = [...snaps].reverse().find((x) => x.tick <= tick - lead * 10) ?? snaps[0];
-    return snap === undefined ? null : { tick, snap: snap.state, snapTick: snap.tick };
+    return snap === undefined ? null : { tick, snap: snap.state, snapTick: snap.tick, end: g.play?.end ?? 0 };
   }
   return null;
 }
@@ -77,12 +89,14 @@ function describe(s: Sim): string {
   const g = s.state.booths[booth].group;
   if (g === null) return '';
   const p = g.play;
-  const ent = g.participants.map((e, i) => `${e.seat}:${s.monster(e.monster)?.species ?? '?'} pick${e.pick} ${e.role[0]} ${p?.outcomes[i]?.tier ?? ''}`).join('  ');
+  const ent = g.participants
+    .map((e, i) => `${e.seat}:${s.monster(e.monster)?.species ?? '?'} pick${e.pick} ${e.role[0]} ${p?.outcomes[i]?.tier ?? ''}${e.debt !== undefined ? ` debt${e.debt}→${s.monster(e.monster)?.debt ?? '?'}` : ''}`)
+    .join('  ');
   let extra = '';
   if (p?.kind === 'ssireum') extra = `winner ${p.winner} flip ${p.flip} close ${p.close} throwAt ${p.throwAt.toFixed(2)} end ${p.end}`;
   if (p?.kind === 'tug') extra = `winner ${p.winner} comeback ${p.comeback} close ${p.close} crossAt ${p.crossAt.toFixed(2)} sizes ${p.sizes.join('/')}`;
   if (p?.kind === 'dig') extra = `chest ${p.chest} found ${p.found} finds ${p.finds.join(',')} at ${p.findAt.map((t) => t.toFixed(1)).join(',')}`;
-  return `${booth} ${g.phase} t=${g.elapsed.toFixed(2)} | ${extra}\n${ent}`;
+  return `${booth} ${g.phase}${g.mode === 'debt' ? ' (빚 걸기 판)' : ''} t=${g.elapsed.toFixed(2)} | ${extra}\n${ent}`;
 }
 
 async function main(): Promise<void> {
@@ -100,6 +114,7 @@ async function main(): Promise<void> {
   const startTick = found.tick;
   const openTick = found.snapTick;
   const s = new Sim(found.snap);
+  if (dress) devAccessories(s);
   const closeup = new CloseupView(app, s);
   const vw = window.innerWidth;
   const vh = window.innerHeight;
@@ -121,7 +136,10 @@ async function main(): Promise<void> {
     tweens.update(dt);
   };
   // 시각마다 멈춰 'shot:i'를 알리고 찍기(window.__shotDone)를 기다린다 (_dev 찍기 도구). 마지막 시각에서 멈춘다.
-  const ats = String(q.get('at') ?? '3').split(',').map(Number).filter((v) => Number.isFinite(v));
+  const ats = String(q.get('at') ?? '3')
+    .split(',')
+    .map((v) => (v.startsWith('e') ? found.end + Number(v.slice(1) || '0') : Number(v)))
+    .filter((v) => Number.isFinite(v));
   for (let i = 0; i < ats.length; i++) {
     const stopAt = startT + (ats[i] ?? 0);
     while (simT + acc < stopAt - 1e-6) {

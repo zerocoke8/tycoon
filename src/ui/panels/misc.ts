@@ -24,17 +24,28 @@ export class BagPanel extends BasePanel {
     // 재료를 가져오는 손님의 구역마다 (그 구역이 열려야 그 손님이 온다)
     const hall = this.sim.hallLevel();
     for (const d of DISTRICT_ORDER) {
-      const mats = MAT_IDS.filter((m) => speciesDistrict(MATERIAL_SPECIES[m]) === d);
+      const mats = MAT_IDS.filter((m) => {
+        const sp = MATERIAL_SPECIES[m];
+        return sp !== undefined && speciesDistrict(sp) === d;
+      });
       if (mats.length === 0) continue;
       const D = DISTRICTS[d];
       const later = D.hall > hall;
       this.el.append(h('div', 'mpv-sub', h('span', null, `${D.name} 손님`), h('small', null, later ? `마을회관 Lv.${D.hall}부터 와요` : `${mats.length}종`)));
       const g = this.grid(mats, (k) => this.st.materials[k] ?? 0, (k) => MATERIALS[k].name, true, (k) => {
         const sp = MATERIAL_SPECIES[k];
-        return this.st.dex[sp] !== undefined ? SPECIES[sp].name : '???';
+        return sp !== undefined && this.st.dex[sp] !== undefined ? SPECIES[sp].name : '???';
       });
       g.classList.add('compact');
       if (later) g.classList.add('later');
+      this.el.append(g);
+    }
+    // 손님 종의 재료가 아닌 것 (넷째 묶음: 일터 밭의 채소).
+    const yard = MAT_IDS.filter((m) => MATERIAL_SPECIES[m] === undefined);
+    if (yard.length > 0) {
+      this.el.append(h('div', 'mpv-sub', h('span', null, '일터'), h('small', null, '파산한 손님이 밭에서 내요 · 광석 조각은 광산에서도')));
+      const g = this.grid(yard, (k) => this.st.materials[k] ?? 0, (k) => MATERIALS[k].name, true);
+      g.classList.add('compact');
       this.el.append(g);
     }
     this.el.append(secHead('귀한 물건', '놀이부스 열기·큰 업그레이드에'));

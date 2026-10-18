@@ -2,7 +2,7 @@
 // GameState는 그대로 JSON으로 저장된다 (함수·클래스 인스턴스·Map을 넣지 않는다).
 
 import type { Emitter } from '../core/events.ts';
-import type { BoothId, BuildingId, GoodId, GroupBoothId, MaterialId, OutcomeTier, PreciousId, SlotSymbol, SpeciesId, StaffStats, TraitId } from '../data/defs.ts';
+import type { AccessoryId, AccessorySlot, BoothId, BuildingId, GoodId, GroupBoothId, MaterialId, OutcomeTier, PreciousId, SlotSymbol, SpeciesId, StaffStats, TraitId, WorkFacility } from '../data/defs.ts';
 import type { DistrictId, NodeId, Pt } from '../data/map.ts';
 
 export type MonsterId = number;
@@ -19,7 +19,16 @@ export type MonsterPhase =
   | 'reacting' // 결과에 반응 중
   | 'resting' // 분수 옆에서 쉰다
   | 'spectating' // 남의 판을 구경
-  | 'leaving'; // 입구로 나간다
+  | 'leaving' // 입구로 나간다
+  // ── 넷째 묶음 (DESIGN 3.7): 볼일(Monster.errand)은 전당포·은행, 파산한 손님(Monster.bankrupt)은 일터 ──
+  | 'toPawnshop' // 전당포로 (맡기기·되찾기)
+  | 'atPawnshop' // 전당포 계산대 앞 (timer초 뒤 볼일이 끝난다)
+  | 'toBank' // 은행으로 (빌리기·갚기)
+  | 'atBank' // 은행 계산대 앞
+  | 'toWork' // 파산: 일터로 (느린 걸음). 닿으면 working 또는 waitWork
+  | 'working' // 일터에서 일한다 (빚이 줄고 재료가 나온다, Monster.labor)
+  | 'waitWork' // 일터 자리가 없어 옆에 쪼그리고 기다린다
+  | 'relieved'; // 빚을 다 갚았다: 어둠이 걷히고 기뻐한 뒤 (timer초) 떠난다
 
 /** 몸 그림 (monsters/<species>_<pose>). 애니메이션이 붙으면 같은 이름의 클립을 쓴다. */
 export type Pose = 'base' | 'joy' | 'agony' | 'sad';
@@ -77,6 +86,77 @@ export interface Monster {
   regular?: boolean;
   /** 떠날 때 귀한 물건을 꼭 남긴다 (복주머니 대박). */
   surePrecious?: boolean;
+  // ── 넷째 묶음 (DESIGN 3.7): 장신구·전당포·은행·파산·일터 ──
+  /** 몸에 단 장신구 (자리마다 하나, 맡기면 빠지고 되찾으면 다시). */
+  accessories: Accessory[];
+  /** 이번 방문에 전당포에 맡긴 장신구 (못 찾고 떠나면 전당포 컬렉션으로). */
+  pawned: PawnTicket[];
+  /** 갚을 빚 (은행 대출 × BANK.interest, 파산하면 일터에서 갚는 남은 빚). 0 = 빚 없음. */
+  debt: number;
+  /** 이번 방문에 은행에서 빌린 횟수. */
+  loans?: number;
+  /** 지금 가는·보는 볼일 (toPawnshop·atPawnshop·toBank·atBank). */
+  errand?: Errand | null;
+  /** 볼일이 끝나면 집에 간다 (떠나기 전에 되찾기·갚기). */
+  homeward?: boolean;
+  /** 볼일 자리 (SHOP_SPOTS[가게].counter index). */
+  counter?: number;
+  /** 파산해서 일터에서 빚을 갚는 중 (어두운 필터, 축 처진 슬픈 모습, 느린 걸음). 다 갚으면 false. */
+  bankrupt?: boolean;
+  /** 일터의 일 (파산한 손님만). */
+  labor?: LaborState | null;
+  /** 이번 방문에 파산한 적이 있다 (다 갚은 뒤에도 남는다: '다시 일어선 손님'). */
+  wasBankrupt?: boolean;
+  /**
+   * 돈이 떨어졌을 때 더 놀고 싶은지 물어 '싫다'고 한 단계 (low = 거의 다 잃었을 때, broke = 정말 못 놀 때: sim/debt.ts wantMore).
+   * 그 단계에서는 다시 묻지 않는다. 맡기거나 빌리면, 지갑이 다시 넉넉해지면 지운다.
+   */
+  declined?: 'low' | 'broke' | null;
+  /** 빚을 갚으려고 끈기가 다 된 뒤에 더 한 판 수 (BANK.chase.max까지, 마음을 접으면 max). */
+  chased?: number;
+}
+
+/** 몸에 단 장신구 하나 (defs.ts ACCESSORIES). value = 전당포가 쳐 주는 값 (손님이 올 때 정한다). */
+export interface Accessory {
+  key: AccessoryId;
+  slot: AccessorySlot;
+  value: number;
+}
+
+/** 이번 방문에 전당포에 맡긴 장신구. price = 빌린 코인 (되찾는 값 = price × PAWN.redeemMarkup, sim/debt.ts redeemCost). */
+export interface PawnTicket {
+  key: AccessoryId;
+  slot: AccessorySlot;
+  value: number;
+  price: number;
+}
+
+/** 전당포·은행 볼일: 맡기기, 되찾기, 빌리기, 갚기. */
+export type Errand = 'pawn' | 'redeem' | 'loan' | 'repay';
+
+/**
+ * 파산한 손님의 일 (Monster.labor). facility·spot = 일하는 자리 (map.ts WORK_YARD.facilities[facility].spots index, -1 = 자리가 없어 기다림),
+ * wait = 기다리는 자리 (wait index, 일하는 중이면 -1).
+ */
+export interface LaborState {
+  facility: WorkFacility;
+  spot: number;
+  wait: number;
+  /** 지금 갚는 중인 1코인의 진행 (0~1). */
+  progress: number;
+  /** 다음 재료까지 갚은 코인 (LABOR.coinsPerMat이 되면 재료 하나). */
+  made: number;
+  /** 게이지 분모: 파산했을 때의 빚 (빚 걸기 판에서 빚이 늘면 그 값으로). 게이지 = 1 - debt / total. */
+  total: number;
+  /** 응원·간식으로 빨라진 남은 초와 배수. */
+  boostSec: number;
+  boostMult: number;
+  /** 빚 걸기 판에 불려 가는 중·하는 중 (그 부스, 아니면 null). */
+  match: GroupBoothId | null;
+  /** 파산한 때 (state.time). LABOR.forgiveSec가 지나면 반장이 남은 빚을 덜어 준다. 옛 저장은 없다 (불러온 때부터). */
+  since?: number;
+  /** 이번 파산에 한 빚 걸기 판 수 (DEBT_MATCH.maxPerStint까지). */
+  matches?: number;
 }
 
 /** 다시 찾아올 단골 (빈털터리 때 간식을 받고 웃으며 떠난 손님). */
@@ -84,6 +164,8 @@ export interface Regular {
   species: SpeciesId;
   nickname: string;
   traits: TraitId[];
+  /** 파산했다가 빚을 다 갚고 떠난 손님 ('다시 일어선 단골'). */
+  recovered?: boolean;
 }
 
 export interface Staff {
@@ -178,6 +260,8 @@ export interface GroupEntry {
   role: GroupRole;
   bet: number;
   fee: number;
+  /** 빚 걸기 판의 채무자 선수: 판을 시작할 때 건 자기 빚 (참가비·건 코인은 0). 보통 판은 없다. */
+  debt?: number;
 }
 
 /**
@@ -310,6 +394,14 @@ export interface GroupState {
   cursor?: number;
   /** 편 맞추기(줄다리기 lineup)로 판에서 빠져 참가비를 이미 낸 손님: 다음 참가 때 참가비를 다시 받지 않는다. */
   prepaid?: MonsterId[];
+  /**
+   * 빚 걸기 판 (DESIGN 3.7, 줄다리기·밀어내기): 반장이 일터의 채무자를 불러 연 판. debtors = 불린 채무자 (자리 순서: debtors[i]는 자리 i).
+   * 채무자는 코인 대신 자기 빚을 걸고 (GroupEntry.debt), 구경 손님은 평소처럼 코인을 건다. 판이 끝나거나 접히면 지운다.
+   */
+  mode?: 'debt';
+  debtors?: MonsterId[];
+  /** 반장이 다음 판을 빚 걸기 판으로 예약했다 (지금 판이 끝나면 선수 자리를 비워 두었다가 연다, sim.ts tickDebtMatches). */
+  debtNext?: boolean;
 }
 
 /**
@@ -391,7 +483,7 @@ export interface CraftJob {
 }
 
 export interface GameState {
-  version: 3;
+  version: 4;
   /** 시뮬레이션 누적 초. */
   time: number;
   rng: number;
@@ -417,6 +509,31 @@ export interface GameState {
   savedAt: number;
   /** 다시 찾아올 단골 (덧붙은 칸, 없으면 빈 목록). */
   regulars?: Regular[];
+  /** 전당포 컬렉션: 못 찾고 떠난 장신구 종류마다 개수 (도감처럼, 처음 들어온 것은 알림). */
+  pawnCollection: Partial<Record<AccessoryId, number>>;
+  /** 넷째 묶음 누적 기록 (UI·시험용). */
+  debtTotals: DebtTotals;
+  /** 빚 걸기 판: 부스마다 마지막으로 연 때 (state.time), 다음 확인까지 초. */
+  debtMatchAt: Partial<Record<GroupBoothId, number>>;
+  debtCheck: number;
+  /** 일터 반장이 다음에 채무자를 다독일 때까지 초 (LABOR.foreman.everySec, 없으면 그 값으로 시작). */
+  foremanTimer?: number;
+}
+
+/** 넷째 묶음 누적 기록: 맡김·되찾음·못 찾음(컬렉션), 대출·갚음, 파산·다 갚음 (그 가운데 반장이 덜어 줌), 빚 걸기 판, 일터에서 나온 재료. */
+export interface DebtTotals {
+  pawned: number;
+  redeemed: number;
+  forfeited: number;
+  loans: number;
+  repaid: number;
+  bankrupt: number;
+  relieved: number;
+  forgiven: number;
+  matches: number;
+  laborMats: number;
+  /** 시설마다 일터에서 나온 재료 수 (laborMats를 나눈 것, 옛 저장은 0부터). */
+  laborBy: Record<WorkFacility, number>;
 }
 
 export interface DexEntry {
@@ -476,7 +593,52 @@ export interface SimEvents extends Record<string, unknown> {
   districtOpened: { district: DistrictId };
   staffChanged: Record<string, never>;
   craftDone: { good: GoodId };
-  toast: { text: string; kind: 'info' | 'good' | 'warn' };
+  /** topic 'debt' = 파산·다 갚음처럼 큰 마을에서 자주 오는 넷째 묶음 알림 (UI가 몰아 오면 건너뛴다). */
+  /** topic 'debt' = 빚 알림 (UI가 자주 띄우지 않는다), booth = 그 부스 이야기 (그 부스 패널이 열려 있으면 건너뛴다: 판에 다 보인다). */
+  toast: { text: string; kind: 'info' | 'good' | 'warn'; topic?: 'debt'; booth?: BoothId };
+  // ── 넷째 묶음 (DESIGN 3.7) ──
+  /** 장신구를 전당포에 맡기고 코인을 빌렸다 (장신구는 몸에서 빠져 진열장으로). at = 전당포 계산대. */
+  pawned: { id: MonsterId; key: AccessoryId; price: number; at: Pt };
+  /** 맡긴 장신구를 되찾았다 (다시 몸에, 기쁨 반응은 monsterReact로). */
+  redeemed: { id: MonsterId; key: AccessoryId; cost: number; at: Pt };
+  /** 못 찾고 떠난 장신구가 전당포 컬렉션에 들어왔다 (first = 그 종류가 처음). */
+  pawnCollected: { key: AccessoryId; count: number; first: boolean; from: MonsterId };
+  /** 더 놀고 싶은 손님이 빌리려 했지만 마을 금고가 모자랐다 (VAULT, 그 손님은 이 단계에서는 다시 오지 않는다). 토스트는 가끔만 (VAULT.emptyToastSec). */
+  vaultEmpty: { id: MonsterId; errand: 'pawn' | 'loan' };
+  /** 은행에서 빌렸다 (debt = 갚을 돈 전체). */
+  loanTaken: { id: MonsterId; amount: number; debt: number; at: Pt };
+  /** 은행 빚을 다 갚았다. */
+  loanRepaid: { id: MonsterId; amount: number; at: Pt };
+  /** 떠날 때 빚을 못 갚아 파산했다 (지갑을 다 내고 남은 빚 debt를 일터에서 갚는다). 어두운 모습으로. */
+  bankrupt: { id: MonsterId; debt: number; paid: number };
+  /** 일하는 채무자가 빚 1코인을 갚았다 (debt = 남은 빚, total = 게이지 분모, at = 일하는 자리). 연장질 한 번·'-1' 같은 작은 연출용. */
+  laborTick: { id: MonsterId; facility: WorkFacility; debt: number; total: number; at: Pt };
+  /** 일터에서 일해 재료가 나왔다 (at = 일하는 자리, coinsPerMat코인마다). 그 손님의 한숨·영차 반응은 monsterReact로 같이 난다. */
+  laborOutput: { id: MonsterId; facility: WorkFacility; material: MaterialId; at: Pt; stored: boolean };
+  /** 반장이 일하는 채무자를 다독였다 (LABOR.foreman: 잠깐 빨라짐). 반장 통통·하트 연출용. */
+  foremanCheer: { id: MonsterId; facility: WorkFacility };
+  /**
+   * 빚을 다 갚았다 (= 풀려남): reliefSec 동안 어둠이 걷히고 기뻐한다 ('빚 다 갚았다!'), 그 뒤 떠나 단골이 된다.
+   * forgiven = 오래 일해서 반장이 남은 빚을 덜어 줬다 (LABOR.forgiveSec), 빚 걸기 판 대박으로 빚이 사라진 것은 false.
+   */
+  debtCleared: { id: MonsterId; forgiven: boolean };
+  /** 반장이 빚 걸기 판을 열었다 (채무자들이 부스로 간다, 자리 순서: debtors[i] = 자리 i). */
+  debtMatchCalled: { booth: GroupBoothId; debtors: MonsterId[] };
+  /**
+   * 빚 걸기 판의 빚 정산 (groupFinished·roundFinished 다음, 채무자 반응은 그 roundFinished의 monsterReact). before·after = 판 전후의 빚,
+   * opponent = 짝 상대 (밀어내기 = 상대 선수, 줄다리기 = 짝지은 상대 편 선수), result = halved (이겨서 반) · cleared (대박으로 0) · added (져서 상대 빚만큼 더).
+   */
+  debtSettled: { booth: GroupBoothId; changes: DebtChange[] };
+}
+
+/** 빚 걸기 판에서 채무자 하나의 빚 변화 (SimEvents.debtSettled). */
+export interface DebtChange {
+  id: MonsterId;
+  before: number;
+  after: number;
+  tier: OutcomeTier;
+  opponent: MonsterId | null;
+  result: 'halved' | 'cleared' | 'added';
 }
 
 export type SimBus = Emitter<SimEvents>;

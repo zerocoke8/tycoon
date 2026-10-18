@@ -16,15 +16,19 @@
 //   ?monster=1      3초 뒤 첫 손님 카드를 연다
 //   ?debug=1        지도 디버그 층 (길 그래프·자리)
 //   ?zoom=Z         처음 카메라 확대 (지도 폭이 다 보이는 확대 ~ 1.6, 폰 기본 약 0.39)
-//   ?at=x,y|<booth> 처음 카메라 가운데 (세계 좌표 또는 부스 이름, 확대는 ?zoom 없으면 0.5)
+//   ?at=x,y|<booth> 처음 카메라 가운데 (세계 좌표 또는 부스 이름, pawnshop·bank·workyard, 확대는 ?zoom 없으면 0.5)
+//   ?broke=1        전당포·은행·일터를 레벨 1로 짓고 금고를 넉넉히, 손님 지갑을 거의 비게 (돈이 떨어지는 흐름 보기, 저장하지 않는다)
+//   ?debtors=N      일터를 짓고 채무자 N명을 바로 일터에 (일·빚 걸기 판 보기, 저장하지 않는다)
+//   ?match=<booth>  (?debtors=N·?all=1과 같이) 처음에 그 부스(ssireum·tug)에 빚 걸기 판을 연다
+//   ?acc=1          모든 손님에게 장신구를 자리마다 하나씩 (장신구 붙는 점 맞추기, 저장하지 않는다)
 // 잡히지 않은 오류는 index.html의 빨간 오류 상자에 쌓인다 (헤드리스 --dump-dom에서도 보인다).
 
 import './style.css';
 import { Application, UPDATE_PRIORITY } from 'pixi.js';
 import { tweens } from './core/tween.ts';
 import { BOOTH_IDS, SIM, type BoothId } from './data/defs.ts';
-import { BOOTH_SPOTS, PLAZAS, type Pt } from './data/map.ts';
-import { devGiveGoods, devOpenAll } from './sim/dev.ts';
+import { BOOTH_SPOTS, BUILDING_SPOTS, PLAZAS, type Pt } from './data/map.ts';
+import { devAccessories, devBroke, devGiveGoods, devOpenAll, devSeedDebtors } from './sim/dev.ts';
 import { Sim, loadGame, newGame } from './sim/sim.ts';
 import type { GameState } from './sim/types.ts';
 import { createUi } from './ui/ui.ts';
@@ -61,6 +65,9 @@ const DEV = {
   zoom: num('zoom'),
   all: params.get('all') === '1' || params.get('unlockAll') === '1',
   unlockAll: params.get('unlockAll') === '1',
+  broke: params.get('broke') === '1',
+  acc: params.get('acc') === '1',
+  debtors: Math.max(0, Math.min(30, Math.floor(num('debtors') ?? 0))),
 };
 /** ?at= 값 → 세계 좌표 ('x,y' 또는 부스 이름이면 그 부스 그림 자리 위쪽). */
 function atPoint(v: string | null): Pt | null {
@@ -69,12 +76,16 @@ function atPoint(v: string | null): Pt | null {
     const b = BOOTH_SPOTS[v as BoothId].base;
     return { x: b.x, y: b.y - 120 };
   }
+  if (v === 'pawnshop' || v === 'bank' || v === 'workyard') {
+    const b = BUILDING_SPOTS[v];
+    return { x: b.x, y: b.y - 120 };
+  }
   const [x, y] = v.split(',').map(Number);
   return x !== undefined && y !== undefined && Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
 }
 
 /** fresh 게임은 저장하지 않는다 (진짜 저장을 덮지 않게). */
-const SAVING = !DEV.fresh && !DEV.all;
+const SAVING = !DEV.fresh && !DEV.all && !DEV.broke && !DEV.acc && DEV.debtors === 0;
 
 /** 지금 배속 (개발 서버에서는 콘솔 mpv.setSpeed(n)으로 바꿀 수 있다). */
 let speed = DEV.speed;
@@ -99,7 +110,9 @@ const FONT_SAMPLE =
   // 셋째 묶음 확대 화면 해설 (장면이 불릴 때도 preloadGlyphs로 받지만, 처음 여는 순간 빈 글자가 없게)
   ' 밀어붙여요! 되밀어요, 버텨요 버텨! 아슬아슬! 뒤집기다! 뒤집기 성공! 승! 막상막하! 도전자를 기다려요 선수를 기다려요 편이 차기를' +
   ' 삐익! 당겨! 준비~ 힘내! 끝까지! 뒤집는다! 영차! 승리! 역전승! 최고! 보물이 묻혀 있단다! 파 보거라! 삽 받아요! 여기였지! 바로 옆이었는데! 땅' +
-  ' 마지막 물길! 바람 분다! 버텨 냈다! 아이고, 연싸움이다! 툭! 하늘의 주인공! 끊어졌다! 우승! 손님을 보물 안내 곧 출발!';
+  ' 마지막 물길! 바람 분다! 버텨 냈다! 아이고, 연싸움이다! 툭! 하늘의 주인공! 끊어졌다! 우승! 손님을 보물 안내 곧 출발!' +
+  // 넷째 묶음 (빚 게이지·빚 걸기 판·일터 반장·홀가분)
+  ' 빚 다 갚았다! 홀가분! 빚 걸기 판! 빚진 손님을 기다려요 오는 중 반으로! 빚이 사라졌다! 상대 빚만큼 늘었다… 삑! 삐익! 힘내! →';
 
 // ── 로딩 화면 ──
 
@@ -157,7 +170,7 @@ async function waitFonts(): Promise<void> {
 // ── 게임 상태 ──
 
 function startState(): { state: GameState; loaded: boolean } {
-  const saved = DEV.fresh || DEV.all ? null : loadGame();
+  const saved = DEV.fresh || DEV.all || DEV.broke || DEV.acc || DEV.debtors > 0 ? null : loadGame();
   const state = saved ?? newGame(DEV.seed ?? undefined);
   if (DEV.coins !== null) state.coins = Math.max(0, Math.floor(DEV.coins));
   return { state, loaded: saved !== null };
@@ -207,6 +220,11 @@ async function boot(): Promise<void> {
   });
   if (DEV.all) devOpenAll(sim);
   if (DEV.unlockAll) devGiveGoods(sim);
+  if (DEV.broke) devBroke(sim);
+  if (DEV.debtors > 0) devSeedDebtors(sim, DEV.debtors);
+  const match = params.get('match');
+  if (match === 'ssireum' || match === 'tug') sim.devDebtMatch(match);
+  if (DEV.acc) devAccessories(sim);
   // ?only=<부스>: 그 부스만 열어 둔다 (손님이 다 그리로 간다: 새 부스 연출 확인용, ?all=1과 같이).
   const only = params.get('only');
   if (DEV.all && only !== null && (BOOTH_IDS as readonly string[]).includes(only)) for (const b of BOOTH_IDS) if (b !== only) sim.state.booths[b].unlocked = false;

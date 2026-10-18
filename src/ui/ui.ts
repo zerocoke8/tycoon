@@ -13,6 +13,7 @@ import { Menu } from './menu.ts';
 import { MonsterCard } from './monsterCard.ts';
 import type { BasePanel, DexView, TabId, ToastKind, UiCtx } from './panel.ts';
 import { BuildingPanel, BuildPanel, LockedBoothPanel } from './panels/build.ts';
+import { BankPanel, DebtLog, PawnshopPanel, WorkyardPanel, type DebtBuildingId } from './panels/debt.ts';
 import { GoalChip } from './goal.ts';
 import { DexPanel } from './panels/dex.ts';
 import { BagPanel, SettingsPanel } from './panels/misc.ts';
@@ -23,6 +24,8 @@ import { Sheet } from './sheet.ts';
 
 /** 숫자 갱신 간격 (초): 4Hz. */
 const REFRESH_SEC = 0.25;
+/** 파산·다 갚음 알림(topic 'debt') 사이의 가장 짧은 간격 (초). */
+const DEBT_TOAST_GAP = 20;
 
 const TAB_TITLE: Record<Exclude<TabId, 'village'>, string> = {
   build: '짓기',
@@ -56,11 +59,15 @@ export class Ui implements UiApi, UiCtx {
   private readonly settings: SettingsPanel;
   private readonly building: BuildingPanel;
   private readonly lockedBooth: LockedBoothPanel;
+  /** 넷째 묶음 건물 시트 (전당포 진열장·은행 대출·일터 일꾼). */
+  private readonly debtSheets: Record<DebtBuildingId, BasePanel>;
   /** 지금 시트에 든 내용과 그 이름 ('tab:build', 'bag', 'building:hall' …). */
   private sheetPanel: BasePanel | null = null;
   private sheetKey = '';
   private acc = 0;
   private dirty = false;
+  /** 마지막 파산·다 갚음 알림을 띄운 때 (performance.now, ms). */
+  private debtToastAt = -Infinity;
 
   constructor(root: HTMLElement, sim: SimApi, hooks: UiHooks) {
     this.root = root;
@@ -102,14 +109,25 @@ export class Ui implements UiApi, UiCtx {
     this.settings = new SettingsPanel(this);
     this.building = new BuildingPanel(this);
     this.lockedBooth = new LockedBoothPanel(this);
+    this.debtSheets = { pawnshop: new PawnshopPanel(this), bank: new BankPanel(this), workyard: new WorkyardPanel(this, new DebtLog(sim)) };
 
     const bus = sim.bus;
-    bus.on('toast', (e) => this.toast(e.text, e.kind));
+    bus.on('toast', (e) => {
+      // 부스 이야기 (빚 걸기 판 결과): 그 부스 패널이 열려 있으면 결과판에 다 보이니 건너뛴다.
+      if (e.booth !== undefined && this.booth.booth === e.booth) return;
+      // 파산·다 갚음 알림은 큰 마을에서 1분에 한두 번씩 온다: DEBT_TOAST_GAP초 안에 또 오면 건너뛴다 (지도 연출·일터 시트에는 그대로 보인다).
+      if (e.topic === 'debt') {
+        const now = performance.now();
+        if (now - this.debtToastAt < DEBT_TOAST_GAP * 1000) return;
+        this.debtToastAt = now;
+      }
+      this.toast(e.text, e.kind);
+    });
     bus.on('coinsChanged', (e) => this.hud.bump(e.delta));
     bus.on('monsterLeft', (e) => {
       if (this.card.id === e.id) this.card.close();
     });
-    for (const k of ['itemsChanged', 'buildingUpgraded', 'boothUnlocked', 'staffChanged', 'craftDone', 'districtOpened'] as const) bus.on(k, () => this.markDirty());
+    for (const k of ['itemsChanged', 'buildingUpgraded', 'boothUnlocked', 'staffChanged', 'craftDone', 'districtOpened', 'pawned', 'redeemed', 'bankrupt', 'debtCleared', 'debtMatchCalled', 'debtSettled'] as const) bus.on(k, () => this.markDirty());
 
     window.addEventListener('resize', () => {
       this.menu.close();
@@ -177,6 +195,7 @@ export class Ui implements UiApi, UiCtx {
     if (role !== undefined) this.booth.focusRole(role);
     this.goal.mark('booth');
     if (isGroupBooth(b)) this.goal.markWatched(b);
+    if (this.sim.state.booths[b].group?.mode === 'debt') this.goal.mark('debtMatch');
   }
 
   openHire(): void {
@@ -186,6 +205,12 @@ export class Ui implements UiApi, UiCtx {
   }
 
   showBuilding(id: BuildingId): void {
+    if (id === 'pawnshop' || id === 'bank' || id === 'workyard') {
+      // 지은 뒤에는 목록이 늘고 줄어도 시트 높이가 튀지 않게 (fit은 짓기 전 설명만).
+      this.openSheet(this.debtSheets[id], `building:${id}`, null, !this.sim.buildingBuilt(id));
+      if (id === 'workyard' && this.sim.buildingBuilt(id)) this.goal.mark('yard');
+      return;
+    }
     this.building.id = id;
     this.openSheet(this.building, `building:${id}`, null, true);
   }

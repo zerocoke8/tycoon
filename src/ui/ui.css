@@ -2695,3 +2695,627 @@ button.mpv-thumb:active {
   margin-left: 6px;
   white-space: nowrap;
 }
+
+/* ── 넷째 묶음 (2026-10-18): 전당포·은행·일터 시트, 장신구, 파산한 손님, 빚 걸기 판 ── */
+
+/* 파산한 손님 그림: 채도를 빼고 어둡게 (지도 moodFilter.ts debtFilters와 같은 결: 채도 30%만 남기고 밝기 75%) */
+.mpv-pic.debt img,
+.mpv-pic.debt .mpv-ph,
+.mpv-dress.debt img {
+  filter: saturate(0.3) brightness(0.75);
+}
+/* 손님 카드 그림 위 장신구 (pics.ts dressPic): 그림 상자(테두리 2 + 안쪽 여백 4)의 그림 칸을 덮는다 */
+.mpv-dress {
+  position: absolute;
+  inset: 6px;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.mpv-dress .frame {
+  position: relative;
+  width: 100%;
+  height: auto;
+}
+.mpv-dress .frame.tall {
+  width: auto;
+  height: 100%;
+}
+.mpv-dress img {
+  position: absolute;
+  display: block;
+  height: auto;
+}
+.mpv-totals.three {
+  grid-template-columns: repeat(3, 1fr);
+  margin: 6px 0 0;
+}
+.mpv-totals.three .mpv-total b {
+  font-size: 17px;
+}
+/* 주인 카드: 세로로 긴 사람 그림 */
+.mpv-npc {
+  align-items: stretch;
+}
+.mpv-thumb.npc {
+  width: 66px;
+  height: auto;
+  min-height: 92px;
+  background: #f1e3c4;
+  padding: 4px 2px 0;
+  place-items: end center;
+}
+.mpv-npc-line {
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--dd-wood-2);
+}
+.mpv-how {
+  margin: 0 0 4px;
+  padding: 8px 12px 8px 28px;
+  border-radius: 12px;
+  background: var(--dd-paper-2);
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--dd-wood-3);
+}
+.mpv-how li + li {
+  margin-top: 3px;
+}
+/* 금고 한 줄 */
+.mpv-vault {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 5px 10px 5px 6px;
+  border-radius: 12px;
+  background: var(--dd-paper-2);
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--dd-wood-3);
+}
+.mpv-vault .mpv-pic {
+  width: 22px;
+  height: 22px;
+}
+.mpv-vault.some {
+  background: #fbe6c6;
+}
+.mpv-vault.warn {
+  background: #f8d9cf;
+  color: #b2402c;
+  font-family: var(--dd-font-round);
+  font-size: 13.5px;
+}
+.mpv-card.col > .mpv-vault {
+  margin-top: 6px;
+}
+/* 전당포: 맡긴 장신구 줄 */
+.mpv-ticket {
+  min-height: 56px;
+}
+.mpv-ticket > .mpv-pic.acc {
+  width: 42px;
+  height: 42px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--dd-paper-2);
+}
+.mpv-ticket.rare > .mpv-pic.acc {
+  background: #fdeeb4;
+  box-shadow: inset 0 0 0 2px var(--dd-gold);
+}
+.mpv-ticket.coming {
+  background: #e7f3dc;
+}
+.mpv-ticket .who b small.lent {
+  font-family: var(--dd-font-body);
+  font-size: 11.5px;
+  color: var(--dd-ink-soft);
+}
+.mpv-ticket .owner {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.mpv-ticket .owner .mpv-pic {
+  width: 20px;
+  height: 20px;
+}
+.mpv-ticket .owner .nm {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-redeem {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 2px 8px 3px;
+  border-radius: 11px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-butter);
+  line-height: 1.15;
+}
+.mpv-redeem small {
+  font-size: 10.5px;
+  color: var(--dd-wood-3);
+}
+.mpv-redeem b {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 16px;
+}
+.mpv-redeem .mpv-pic {
+  width: 17px;
+  height: 17px;
+}
+/* 전당포 진열장 (도감 인형 칸과 같은 결) */
+.mpv-acc {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(74px, 1fr));
+  gap: 6px;
+}
+.mpv-acc-cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  min-height: 44px;
+  padding: 7px 2px 5px;
+  border-radius: 13px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  text-align: center;
+  pointer-events: auto;
+}
+.mpv-acc-cell:active {
+  transform: scale(0.96);
+}
+.mpv-acc-cell .mpv-pic {
+  width: 46px;
+  height: 46px;
+  font-size: 18px;
+}
+.mpv-acc-cell .name {
+  font-family: var(--dd-font-round);
+  font-size: 12.5px;
+  line-height: 1.2;
+  margin-top: 2px;
+}
+.mpv-acc-cell .slot {
+  font-size: 11px;
+  color: var(--dd-ink-soft);
+}
+.mpv-acc-cell .n {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-butter);
+  font-family: var(--dd-font-round);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.mpv-acc-cell .rare-tag {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: var(--dd-gold);
+  font-family: var(--dd-font-round);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+.mpv-acc-cell.rare {
+  background: #fff4cf;
+}
+.mpv-acc-cell.none {
+  background: var(--dd-paper-2);
+}
+.mpv-acc-cell.none .mpv-pic img {
+  filter: brightness(0);
+  opacity: 0.22;
+}
+.mpv-acc-cell.none .mpv-ph {
+  background: var(--dd-ink-soft);
+  opacity: 0.4;
+}
+.mpv-acc-cell.none .name {
+  color: var(--dd-ink-soft);
+}
+.mpv-acc-cell.none .rare-tag {
+  opacity: 0.7;
+}
+/* 빚 칩 (갚을 만큼 있으면 초록) */
+.mpv-chip.debt {
+  flex: none;
+  height: 28px;
+  padding: 0 9px;
+  background: #f8d9cf;
+  color: #9c3523;
+  font-size: 14px;
+}
+.mpv-chip.debt.ok {
+  background: #dcefd2;
+  color: #3f6b2e;
+}
+.mpv-rule.warn {
+  background: #f8d9cf;
+  color: #b2402c;
+}
+.mpv-rule.debt.on {
+  background: #ead9f2;
+  color: #4d2f63;
+  font-family: var(--dd-font-round);
+  font-size: 14px;
+}
+/* 일터: 일꾼 줄 [그림·이름·모습][시설][응원][간식] / [빚 게이지] */
+.mpv-workers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mpv-worker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    'who fac acts'
+    'gauge gauge gauge';
+  align-items: center;
+  gap: 2px 6px;
+  padding: 4px 6px 6px 4px;
+  border-radius: 13px;
+  border: 2px solid var(--dd-ink);
+  background: #e6e1d6;
+}
+.mpv-worker.wait {
+  border-style: dashed;
+  background: #ddd8cd;
+}
+.mpv-worker.match {
+  background: #e4dcea;
+}
+.mpv-worker.done {
+  background: #e7f3dc;
+}
+.mpv-worker .who {
+  grid-area: who;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+}
+.mpv-worker .who > .mpv-pic {
+  width: 40px;
+  height: 40px;
+  font-size: 15px;
+}
+.mpv-worker.done .who > .mpv-pic img {
+  filter: none;
+  transition: filter 1.5s;
+}
+.mpv-worker .nm {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.2;
+}
+.mpv-worker .nm b {
+  font-family: var(--dd-font-round);
+  font-weight: normal;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-worker .nm small {
+  font-size: 11.5px;
+  color: var(--dd-ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-fac {
+  grid-area: fac;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 26px;
+  padding: 0 8px 0 3px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper);
+  font-family: var(--dd-font-round);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.mpv-fac .mpv-pic {
+  width: 28px;
+  height: 20px;
+}
+.mpv-worker .acts {
+  grid-area: acts;
+  display: flex;
+  gap: 5px;
+}
+.mpv-btn.icon {
+  position: relative;
+  width: 44px;
+  padding: 0;
+}
+.mpv-btn.icon .mpv-svg {
+  width: 24px;
+  height: 24px;
+}
+.mpv-btn.icon.cheer {
+  background: #f7c9bd;
+}
+.mpv-btn.icon .cd {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  min-width: 20px;
+  padding: 0 4px;
+  border-radius: 999px;
+  border: 2px solid var(--dd-ink);
+  background: var(--dd-paper-3);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.mpv-worker .gauge {
+  grid-area: gauge;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-left: 2px;
+}
+.mpv-worker .gauge .mpv-bar {
+  flex: 0 0 34%;
+  height: 12px;
+}
+.mpv-worker .gauge .left {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--dd-wood-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-worker .gauge .boost {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--dd-butter);
+  font-family: var(--dd-font-round);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+/* 손님 카드: 장신구·맡긴 장신구·빚, 파산한 손님 (어둡게 가라앉은 카드, 먹구름, 빚 게이지) */
+.mpv-mcard-face {
+  position: relative;
+  flex: none;
+  display: grid;
+}
+.mpv-mcard-face .storm {
+  position: absolute;
+  top: -10px;
+  right: -12px;
+  width: 40px;
+  height: 40px;
+  animation: mpv-storm 2.4s ease-in-out infinite;
+}
+@keyframes mpv-storm {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(-2px, -3px);
+  }
+}
+.mpv-mcard-pic img {
+  transition: filter 1.5s ease-out;
+}
+.mpv-mcard-belong {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+.mpv-chip.acc {
+  height: 28px;
+  padding: 0 9px 0 2px;
+  font-size: 13.5px;
+}
+.mpv-chip.acc .mpv-pic {
+  width: 26px;
+  height: 22px;
+}
+.mpv-chip.acc.rare {
+  background: #fff1c2;
+  border-color: #a8791a;
+}
+.mpv-chip.acc.pawned {
+  border-style: dashed;
+  background: var(--dd-paper-2);
+  color: var(--dd-wood-3);
+}
+.mpv-chip.acc.pawned .mpv-pic {
+  opacity: 0.55;
+}
+.mpv-chip.acc small {
+  margin-left: 3px;
+  font-family: var(--dd-font-body);
+  font-size: 11.5px;
+  color: var(--dd-ink-soft);
+}
+.mpv-chip.again {
+  height: 28px;
+  padding: 0 10px;
+  background: #dcefd2;
+  color: #3f6b2e;
+  font-size: 13.5px;
+}
+.mpv-mcard .mpv-chip.debt {
+  height: 28px;
+  font-size: 13.5px;
+}
+.mpv-mcard-labor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-family: var(--dd-font-round);
+  font-size: 14px;
+}
+.mpv-mcard-labor .v {
+  flex: none;
+  max-width: 58%;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mpv-mcard.bankrupt {
+  background: #dcd6cb;
+  border-color: #4a4048;
+}
+.mpv-mcard.bankrupt .mpv-mcard-pic {
+  background: #cfc9bf;
+}
+.mpv-mcard.bankrupt .mpv-mcard-status {
+  color: #4d4458;
+  font-family: var(--dd-font-round);
+}
+.mpv-mcard.bankrupt .mpv-record {
+  display: none;
+}
+.mpv-mcard.bankrupt .mpv-trait b {
+  background: #c8cfe0;
+}
+@media (max-height: 720px) {
+  .mpv-mcard-belong {
+    margin-top: 6px;
+  }
+  .mpv-chip.acc small .cost {
+    display: none;
+  }
+}
+/* 빚 걸기 판 (줄다리기·밀어내기): 상태 줄 보라, 채무자 선수의 건 빚과 빚 변화 */
+.mpv-race-st.debt {
+  background: #ece2f2;
+}
+.mpv-race-st.debt .flag {
+  background: #6f4f88;
+  color: var(--dd-paper-3);
+}
+.mpv-side.debt small {
+  font-family: var(--dd-font-round);
+  font-size: 12.5px;
+  color: #6f4f88;
+}
+.mpv-team .face.debt {
+  grid-template-rows: 36px auto;
+  height: auto;
+  min-height: 56px;
+  padding: 2px 0 3px;
+}
+.mpv-team .face.debt .mon {
+  width: 34px;
+  height: 34px;
+}
+/* 빚 걸기 판: 아직 자리로 오는 중인 선수 (흐리게, 점선) */
+.mpv-team .face.debt.coming {
+  border-style: dashed;
+  opacity: 0.62;
+}
+.mpv-team .face .stake {
+  font-family: var(--dd-font-round);
+  font-size: 11px;
+  line-height: 1.1;
+  color: #6f4f88;
+  white-space: nowrap;
+}
+.mpv-res-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex: none;
+}
+.mpv-res-wrap .mpv-chip.debt {
+  height: 22px;
+  font-size: 12px;
+  padding: 0 7px;
+}
+.mpv-last.debt .head .mpv-tag {
+  background: #ead9f2;
+  color: #4d2f63;
+}
+.mpv-lastrow .mpv-chip.debt {
+  height: 22px;
+  font-size: 12px;
+  padding: 0 7px;
+}
+.mpv-label.debt {
+  background: #e4dcea;
+}
+.mpv-rule.debt {
+  background: #ece2f2;
+  color: #4d2f63;
+}
+.mpv-btn.icon.cheer.cool {
+  background: var(--dd-paper-2);
+}
+/* 키가 작은 폰: 주인 카드를 줄여 목록이 첫 화면에 보이게 */
+@media (max-height: 720px) {
+  .mpv-npc {
+    padding: 8px;
+  }
+  .mpv-thumb.npc {
+    width: 52px;
+    min-height: 72px;
+  }
+  .mpv-npc-line {
+    display: none;
+  }
+  .mpv-totals.three {
+    margin-top: 4px;
+    gap: 4px;
+  }
+  .mpv-totals.three .mpv-total {
+    padding: 3px 2px;
+  }
+  .mpv-totals.three .mpv-total b {
+    font-size: 15px;
+  }
+}
+.mpv-mcard-sad {
+  margin-top: 8px;
+  padding: 5px 10px;
+  border-radius: 10px;
+  background: #cdc6d6;
+  color: #3f3550;
+  font-size: 13.5px;
+  line-height: 1.35;
+}

@@ -171,8 +171,34 @@ export interface PhaseText {
   readonly sub: string;
 }
 
-/** 지금 판의 상태 줄. open = 부스가 손님을 받는 중 (꼭 있어야 하는 진행자 자리가 다 참), missing = 빈 꼭 필요한 자리 이름. */
+/**
+ * 지금 판의 상태 줄. open = 부스가 손님을 받는 중 (꼭 있어야 하는 진행자 자리가 다 참), missing = 빈 꼭 필요한 자리 이름.
+ * 빚 걸기 판(넷째 묶음, GroupState.mode 'debt')은 깃발이 '빚 걸기'이고 모이는 동안 불린 채무자를 기다린다. 다음 판이 예약됐으면 작은 글에 알린다.
+ */
 export function phaseText(b: GroupBoothId, g: GroupState | null, open: boolean, missing: readonly string[]): PhaseText {
+  const t = basePhaseText(b, g, open, missing);
+  if (g === null || !open) return t;
+  if (g.mode === 'debt') {
+    const ph = g.phase;
+    if (ph === 'idle' || ph === 'gathering') {
+      const ds = g.debtors ?? [];
+      const came = ds.filter((id) => g.participants.some((e) => e.monster === id)).length;
+      const all = ds.length > 0 && came >= ds.length;
+      const cd = Math.max(0, Math.ceil(g.countdown));
+      const S = startWord(b);
+      return {
+        flag: '빚 걸기',
+        title: all ? (cd > 0 ? `${S}까지 ${cd}초` : `곧 ${S}!`) : '빚진 선수를 기다려요',
+        sub: `일터 반장이 연 판 · ${came === 0 ? `빚진 손님 ${ds.length}명이 오는 중` : `${ds.length}명 가운데 ${came}명 도착`} · 이기면 빚 반, 지면 상대 빚만큼 더`,
+      };
+    }
+    return { ...t, flag: '빚 걸기' };
+  }
+  if (g.debtNext === true) return { ...t, sub: `${t.sub} · 다음 판은 빚 걸기 판` };
+  return t;
+}
+
+function basePhaseText(b: GroupBoothId, g: GroupState | null, open: boolean, missing: readonly string[]): PhaseText {
   const ph = g?.phase ?? 'idle';
   const es = g?.participants ?? [];
   const n = es.length;

@@ -47,7 +47,7 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
 ## 시뮬레이션 (src/sim)
 
 - `Sim implements SimApi` (`api.ts`). 생성자 `new Sim(state: GameState)`; `newGame(seed?)`, `loadGame(): GameState | null`(localStorage 키 `mpv-save-v1`, 버전 확인).
-  저장 버전 3 (단체 놀이 엔진). 버전 2 저장은 `save.ts migrate2`가 경주장 `BoothState.race`를 `group`으로 옮겨 그대로 잇는다 (새 부스 칸·새 진행자 후보는 채운다).
+  저장 버전 4 (넷째 묶음). 버전 2·3 저장은 `save.ts migrate2`(경주장 `BoothState.race` → `group`) → `migrate3`(손님 장신구·맡긴 장신구·빚 칸)으로 그대로 잇는다 (새 부스·건물·재료 칸, 새 진행자 후보는 채운다).
 - 손님 상태 기계 (`MonsterPhase`): arriving → wandering → toBooth → queued → toSeat → playing → reacting → (다시 한판 | wandering | resting | leaving).
   - 걷기: `path.ts`가 `data/map.ts`의 NODES/EDGES로 최단 경로 → `Monster.path`(세계 좌표 점들). 속도 SIM.walkSpeed (떠다니는 종은 floatSpeed).
     길의 첫 직선(지금 자리 → 첫 노드)·마지막 직선(노드 → 목적지)·곧장 걷기는 부스 그림이 서 있는 땅(BOOTH_SPOTS.base 위 사각형, `crossesBooth`)을 가로지르지 않게 고른다 (그림 뒤로 숨지 않게).
@@ -102,7 +102,31 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
     공용 고르기 `crowdPick` (같은 종 선수 → 구경꾼은 많은 쪽·대담이는 적은 쪽), 나설 확률 `eagerness`, 고른 수 `backers`.
   - 판이 시작되면 근처를 걷던 손님이 멈춰 구경한다 (`TUNE.groupDraw*`, 진행자 손님맞이만큼 더). 반응 표: `reactions.ts groupCheerReaction`·`groupBuzzReaction`·`groupReactionLabels(booth)` (응원·구경·들썩 이름표).
     진행자 능력치: 진행 = 모이는 시간·판 길이 (`TUNE.groupPacePerPoint`), 입담 = 사건마다 기분·구경 반응 확률, 손님맞이 = 끌어오기·멈춰 구경.
-- 개발용: `sim/dev.ts devOpenAll(sim)` = 모든 구역·부스를 열고 그림 있는 진행자를 다 고용, 재료는 창고 반 (주소 `?all=1`, sim-check). `devGiveGoods(sim)` = 간식·응원 도구 몇 개씩.
+- 넷째 묶음 (DESIGN 3.7: 장신구·전당포·은행·파산·일터·빚 걸기 판). 숫자는 `defs.ts` (ACCESSORIES·ACCESSORY_SPAWN·VAULT·PAWN·BANK·LABOR·DEBT_MATCH, 건물 pawnshop·bank·workyard + `BUILD_HALL`),
+  배치는 `map.ts` (`BUILDING_SPOTS`·`BUILDING_K`·`SHOP_SPOTS`·`WORK_YARD`, 노드 pawn_front·bank_front·yard_turn·yard_front), 순수 도구는 `sim/debt.ts` (값·자리·게이지, UI도 쓴다), 흐름은 `sim.ts` '넷째 묶음' 묶음.
+  - 손님: `Monster.accessories: Accessory[]` (key·slot·value, 올 때 `debt.ts rollAccessories`), `pawned: PawnTicket[]` (이번 방문에 맡김, price = 빌린 코인), `debt` (갚을 빚),
+    `loans?`, `errand?` ('pawn'|'redeem'|'loan'|'repay'), `homeward?`, `counter?`, `bankrupt?`, `wasBankrupt?`, `declined?` ('low'|'broke': 더 놀기 싫다고 한 단계), `chased?` (빚 쫓기 판 수),
+    `labor?: LaborState` (facility·spot·wait·progress·made·total·boostSec·boostMult·match·since·matches). 단골 `Regular.recovered` = 파산했다가 다 갚은 손님.
+  - phase: toPawnshop → atPawnshop, toBank → atBank (계산대 PAWN·BANK.counterSec 뒤 볼일, 그다음 reacting), toWork → working | waitWork, relieved (다 갚음 → 떠남).
+  - 흐름: decide = 파산 → 일터 / `goSettle`(빚 갚기 → 되찾기, 낸 뒤에도 돈이 넉넉할 때) / 돈이 떨어짐(`shortOfMoney`) → `seekMoney` / `chaseDebt` / 떠나기. 반응 뒤(afterReact)에도 같은 자리에서 다시 하기 전에 seekMoney.
+    `seekMoney`: 단계(`moneyStage`: low = 처음 지갑의 PAWN.lowFrac 아래, broke = 한판도 못 함)마다 한 번 `debt.ts wantMore` 확률로 묻고 (은행은 일터 채무자 수 × BANK.wary만큼 덜),
+    전당포 (값이 가장 큰 장신구), 없으면 은행 (`bankOpenFor`: 은행·일터, 빚 없음, 한 방문 BANK.maxLoans번). 걸어가며 작은 반응 (`sideReact`: seekPawn·seekLoan·goRedeem·goRepay).
+    `chaseDebt` = 빚이 있는데 갚을 만큼 없으면 끈기가 다 돼도 한판만 더 (BANK.chase). 맡기거나 빌린 뒤(`afterBorrow`)는 정말 못 놀 때만 다시 묻는다.
+    `leave` = 떠나기 전 볼일(낼 수 있으면) → 빚이 남으면 `goBankrupt` (지갑을 금고로, 맡긴 장신구는 컬렉션) → 아니면 `goHome`. `depart`에서 못 찾은 장신구는 `GameState.pawnCollection`.
+    금고: `debt.ts canLend` (빌려준 뒤 VAULT.reserve가 남는다, maxShare), 모자라면 `vaultEmpty`. 빌려주기는 수입이 아니다 (`totals.coinsEarned`에는 이자만).
+  - 일터: `pickWorkSpot` (시설마다 일터 레벨의 workers 자리, 없으면 기다림, 자리가 나면 가장 오래 기다린 손님부터), `tickLabor` (빚 −`laborRate`/초, 1코인마다 `laborTick`,
+    LABOR.coinsPerMat마다 재료 → `laborOutput` + 한숨·영차 반응), 응원 톡·간식·반장(`tickForeman`, LABOR.foreman, `foremanCheer`) = `boostLabor`.
+    파산하고 LABOR.forgiveSec가 지나면 `forgiveLong` (반장이 남은 빚을 덜어 줌, `debtCleared.forgiven`). 채무자는 손님 수 한도·구경 반응에서 빠진다. 다 갚으면 `relieve` (홀가분 반응) → 떠나는 순간 `depart`에서 단골 (`wasBankrupt`면 팁만, 종 재료·귀한 물건 없음).
+  - 빚 걸기 판: 단체 놀이 `GroupState.mode = 'debt'`, `debtors` (자리 i = debtors[i]), `debtNext` (예약). `GroupEntry.debt` = 건 빚 (bet·fee 0). 출발 조건 = 불린 채무자가 다 참가 (`groupReady`).
+    부를 수 있는 채무자 `debtPool` (일터로 가는·일하는·기다리는, 빚 DEBT_MATCH.minStake 이상, 이번 파산에 maxPerStint번 안), 짝 = `debt.ts pairDebtors` (빚이 비슷한 이웃끼리), 줄다리기는 tugMin명부터.
+    줄다리기(DEBT_MATCH.watchOnly)는 그동안 다른 손님을 앉히지 않는다. 끝나면 `settleDebts` (이기면 × winKeep·대박 0, 지면 + 짝 상대의 건 빚, maxDebt까지)가 채무자 반응(matchHalved·matchCleared·matchAdded)보다 먼저, 그다음 `debtSettled`.
+  - 이벤트: pawned·redeemed·pawnCollected(from)·vaultEmpty·loanTaken·loanRepaid·bankrupt·laborTick·laborOutput·foremanCheer·debtCleared(forgiven)·debtMatchCalled·debtSettled(changes: `DebtChange` opponent·result) (`types.ts SimEvents`).
+    반응은 `reactions.ts debtReaction(kind)` (`DebtReactKind` 20가지, `DEBT_REACT_KINDS`). 누적 `GameState.debtTotals` (forgiven 포함), 반장 시계 `GameState.foremanTimer`.
+  - API: `buildingBuilt(id)`, `buildingLockReason(id)` (회관 레벨), `upgradeBuilding`은 레벨 0이면 짓기. 개발용 `Sim.devBankrupt(id, debt)`.
+  - sim-check: `--auto --seeds N --debt` (일터를 지은 뒤 30분마다 맡김·컬렉션·대출·파산·빚 걸기 판, 일한 시간, 채무자 수, 금고, 장부, 돈이 떨어진 손님 깔때기),
+    `--debt-build` (지을 수 있으면 바로), `--no-debt` (짓지 않음), `--open-all` (다 열린 마을). selftest 6g: 장신구·마음·짝·전당포·싫다·금고·은행·빚 쫓기·파산·일터·반장·빚 걸기 판(1:1·2:2)·저장·반응 표·45분 장부.
+- 개발용: `sim/dev.ts devOpenAll(sim)` = 모든 구역·부스를 열고 그림 있는 진행자를 다 고용, 전당포·은행·일터도 끝까지, 재료는 창고 반 (주소 `?all=1`, sim-check). `devGiveGoods(sim)` = 간식·응원 도구 몇 개씩.
+  `devBroke` (주소 `?broke=1`: 넷째 묶음 건물 레벨 1·금고 2000·손님 지갑을 거의 비게), `devSeedDebtors(sim, n)` (`?debtors=N`: 일터에 채무자 n), `devAccessories` (`?acc=1`: 모든 손님에게 장신구 셋).
   주소 `?unlockAll=1` = `?all=1` + `devGiveGoods` (저장하지 않는다). 개발 서버 콘솔 `mpv.setSpeed(n)`으로 배속을 바꾼다 (스크린숏: 빠르게 손님을 모았다가 천천히 찍기).
 - 촌장의 행동은 `SimApi`의 메서드 (응원 톡, 간식, 응원 도구, 짓기·업그레이드, 고용·배치, 가공).
 - 처음 상태: 코인 SIM.startCoins, 슬롯·홀짝 부스 열림, 진행자 둘(HOST_PRESETS의 slot·oddeven)이 각 부스에, 후보에 cups·darts·wheel 진행자 (그림 있는 진행자는 그 부스를 열 수 있는 회관 레벨이 되면 후보로 온다), 건물 레벨 1, 중앙 구역만 열림.
@@ -152,6 +176,20 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
 - WebGL 문맥을 잃었다 되찾으면 코드로 구운 텍스처(바닥 타일·효과·구름)를 다시 굽는다 (`webglcontextrestored`).
   구름(`map/cloud_puff`)이 닫힌 구역을 덮고, 열리면 흩어지며 사라진다.
 - 효과(`fx.ts`): 코인 튀기기(`items/coin`), 색종이(`fx/fx_confetti` 여러 색으로 tint), 반짝이(`fx/emote_sparkle` 작게), 먼지(`fx/fx_puff`), 떠오르는 숫자(+12, 둥근 굵은 글꼴, 흰 테두리). 대박이면 크게.
+- 넷째 묶음 화면: 장신구 `view/accessory.ts` — `AccessoryLayer` (몸 그릇의 자식, (0,0) = 발 기준점, `setAccessories(list)`·`setPose(species, pose)`·`setScaleK(k)`, 뒤에 그릴 것은 `back` 그릇),
+  `accessoryAnchors(species, pose)` = 자리마다 캔버스 점과 자리 기준 폭 (`data/accessoryAnchors.ts`: `MEASURED` = `tools/accessory-anchors.ts`가 원본 그림 알파에서 잰 27종 × 4포즈 (`@generated` 사이만 다시 쓴다),
+  `FIXES` = 손으로 고친 종, 합친 것 `ACCESSORY_ANCHORS`). 장신구마다 붙이는 법 `ACCESSORY_FIT` (그림 안 붙는 점 ax·ay, 폭 비율, 옮기기·기울기), 둘을 합친 자리는 `accessoryPlacement(종, 포즈, key, slot)`
+  (몸 그림·날아가는 장신구·UI가 같은 값을 쓴다), UI 카드용 `accessoryPortrait(종, 포즈, list)` (몸 그림 상자 비율 → `ui/pics.ts dressPic`). `ACCESSORY_SIZE`는 장신구를 모를 때의 대강. 그림이 없으면 코드 모양.
+  어둠 `view/moodFilter.ts debtFilters(t)` (단계마다 공유 ColorMatrixFilter: 휘도 쪽으로 70% 섞어 채도를 빼고·밝기 75%·살짝 푸르스름, t 0~1. Pixi `saturate`는 −1 아래에서 색이 뒤집혀 행렬을 직접 만든다. UI는 CSS `saturate(0.3) brightness(0.75)`). 지도 손님(`monsterView.ts`)은 파산하면 어둡게 (몸 그림·장신구 그릇 `skin`에만: 손에 든 연장은 밝게,
+  다 갚으면 LABOR.reliefSec 동안 걷힘)·터덜터덜 걸음·먹구름 (7초, 일터에서는 14초마다: 처음 박자는 손님 id로, 띄운 뒤에는 0~5초 무작위로 늦춰 여럿이 한꺼번에 뜨지 않게), working이면 연장(items/hoe·pickaxe, 손잡이 끝을 손에 쥐고 들어 올렸다 톡 내려찍기: 그 프레임 `struck`·`strikeX/Y`)질,
+  waitWork면 쪼그리고 흔들흔들. 되찾는 장신구가 날아오는 동안은 `holdAccessory(key, sec)`로 몸에 그리지 않는다. 머리 위 표시는 `drawX·drawY`(맡긴 몸까지 더한 발)와 `emoteLift`(이모트를 더 올림), 장신구 자리 점은 `accessoryAt(key, slot, out)` (`accessoryPlacement`: 몸에 그린 장신구와 같은 점·폭·붙는 점 ax·ay).
+  건물(`buildings.ts`): 전당포·은행·일터(시설 둘·소품)는 짓기 전 흐리게 + 빈 부지 표식, 지으면 주인 (`npcNode(id)`·`npcHop(id)`·`buildingParts(id)`).
+  전당포 진열창·은행 문 `shopPort(id, out)`, 일터 소품 `yardPropTop(key, out)`·`yardPropHop(key)`. 일터 반장은 일하는 채무자가 있으면 밭 고랑 사이·광산 앞을 오가며 (`FOREMAN_ROUTE`) 가끔 `foremanWhistle(big)`,
+  sim `foremanCheer`면 `foremanCheer(x, y, run)`으로 그 손님 곁에 걸어가 '힘내!'.
+  연출 `view/debtMap.ts DebtMapView` (world.ts가 손님을 그린 뒤 돌린다, 효과층의 이모트 위): 일터 채무자 머리 위 빚 게이지 (바탕 = 남은 빚, 채움 = 갚은 만큼 `laborGauge`, 넓게 보면 막대만·조금 크게),
+  빚 걸기 판 채무자는 '빚 42' 표 (정산하면 출렁·'빚 42→21'), 맡기기 = 장신구가 몸 그 자리에서 떠올라 진열창으로 → 코인이 손님에게, 되찾기 = 코인이 가게로 → 장신구가 날아와 다시 몸에,
+  은행 = 문 ↔ 손님 코인, 파산 = '빚 N', 일터 = 내려찍을 때 흙덩이·흙먼지(밭)·돌 조각(광산)·땀방울·한숨, 재료가 바구니·수레로 (`fx.itemArc`), 다 갚음 = 게이지가 꽉 차며 톡·색종이·'빚 다 갚았다!'.
+  전당포·은행 계산대의 금고 코인 글자(coinsChanged)는 가게 위에 (`DebtMapView.shopAbove`).
 
 ## 확대 화면 (src/view/closeup)
 
@@ -179,6 +217,11 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   - pouch: 손님의 특산 재료가 진행자 손으로 날아가고, 손님이 망설이다 '빨강!/파랑!/노랑!', 고른 주머니가 탁자에 떨어져 열린다 (대박 = 금빛·코인 분수, coins = 코인 비, one = 한 닢, empty = 먼지 퐁).
   - race (`RaceScene`): 상태(`booths.race.group`, 판의 `play.race`)를 매 프레임 읽는다 (중간에 열어도 그 순간). 모이는 중 = '출발까지 N초'·3·2·1, 달리는 중 = 순위표·해설 말풍선·자기 선수가 앞서면 들썩·꼴찌면 땀, 사진 판정은 화면 시계를 멈췄다 따라잡는다, 결과 = 1등 메달·코인·관중 반응.
 - 반응: 결과에 맞는 포즈·이모트·연출을 지도보다 크게. 코인이 항아리에서 손님에게 튄다.
+- 넷째 묶음: `MonsterActor.sync(m, dt)` (모든 장면이 매 프레임 부른다)가 몸 그릇 안 `AccessoryLayer`(뒤집기·기울기·포즈를 따라감)와 파산 어둠(`debtFilters`, 몸·장신구만, 처음 보일 때는 바로·다 갚으면 LABOR.reliefSec 동안 걷힘)·
+  슬픈 숨쉬기·먹구름(장면이 `quiet`면 쉼)을 맡는다. 단체 놀이 `GroupScene`은 빚 걸기 판에 채무자 표 (`debt_kit.ts DebtBadge` '홍 빚 42' → 결과 때 '빚 49 → 25' 세며 초록·금·빨강),
+  모이는 동안 위쪽 글 '빚 걸기 판! 채무자를 기다려요', 구석 표지 `debtSign`, 편마다 한 줄 `debtCaption` ('빚 반으로!'·'빚이 사라졌다!'·'상대 빚만큼 +N'), 0이 된 채무자의 홀가분 (2.6초 남겨 어둠이 걷힘).
+  전·후 빚은 상태에서 읽는다 (`GroupEntry.debt` → 판이 done이면 `Monster.debt`: 중간에 열어도 맞다). 장면 훅 `debtBadgeAt(자리, 글자 크기)`·`signAt(크기)`·`debtStake(자리)` (씨름·줄다리기가 자리를 정한다).
+  개발용 미리보기: `_dev/group3_preview.html?debt=1&debtors=N&acc=1`, `_dev/preview.html?acc=key,…&bankrupt=1`, 장신구 대조표 `_dev/accessory_preview.html` (27종 × 4포즈, `&dark=1&flip=1&lean=…`).
 
 ## UI (src/ui)
 
@@ -197,3 +240,8 @@ main.ts: Pixi Application (resizeTo window, resolution = min(devicePixelRatio, 2
   진행자 고르기 판 끝에는 늘 '새 진행자 고용하기'. 닫힌 부스 패널은 경고 바로 아래에 진행자 자리 줄을 먼저 보인다.
 - 한글 줄바꿈은 낱말 단위 (`.mpv-ui { word-break: keep-all }`).
 - 아이템 그림은 `assets/art/items/<key>.webp`를 <img>로 (없으면 글자).
+- 넷째 묶음 UI: 전당포·은행·일터를 누르면 `ui/panels/debt.ts` 시트 (`PawnshopPanel`: 맡긴 장신구 줄·진열장 컬렉션 칸 (못 모은 것은 실루엣 '???')·레벨, `BankPanel`: 대출·빚 있는 손님·금고,
+  `WorkyardPanel`: 일하는·기다리는 채무자 줄 (빚 게이지·남은 시간·응원/간식 버튼)·나온 재료 (`DebtLog`: 화면을 연 뒤 laborOutput)·빚 걸기 판 상태). 짓기 전에는 설명·비용·짓기 버튼 먼저.
+  손님 카드: 장신구·맡긴 장신구(되찾는 값)·빚 칩, 그림 위에 장신구 (`pics.ts dressPic`: `accessoryPortrait` 비율로 <img> 겹치기, 몸 뒤 장신구는 뺀다), 파산하면 카드가 어둡게 가라앉고 먹구름·혼잣말·빚 게이지.
+  줄다리기·씨름 판(`groupBoard.ts`·`groupText.ts`): 빚 걸기 판 띠·채무자마다 건 빚 → 결과 '52→26'. 짓기 탭에 '전당포 · 은행 · 일터' 묶음, 목표 칩은 전당포 → 일터 → 은행, 첫 빚 걸기 판·첫 채무자 안내.
+  토스트: sim `toast.topic = 'debt'`(파산·다 갚음)는 20초(`ui.ts DEBT_TOAST_GAP`) 안에 또 오면 건너뛴다 (큰 마을에서 1분에 한두 번 오니, 지도 연출·일터 시트에는 그대로).

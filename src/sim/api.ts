@@ -29,8 +29,12 @@ export interface SimApi {
   /** 한판에 내는 손님 특산 재료 수 (복주머니 1, 그 밖 0). 이런 부스는 코인 참가비(boothFee)가 0. */
   boothMatFee(booth: BoothId): number;
   canAfford(cost: Cost): boolean;
-  /** 다음 레벨 비용 (최고 레벨이면 null). */
+  /** 다음 레벨 비용 (최고 레벨이면 null). 처음에 없는 건물(전당포·은행·일터, defs.ts BUILD_HALL)은 레벨 0이고 이것이 짓는 비용. */
   buildingUpgradeCost(id: BuildingId): Cost | null;
+  /** 지었나 (레벨 1 이상). */
+  buildingBuilt(id: BuildingId): boolean;
+  /** 비용 말고 아직 지을 수 없는 이유 (마을회관 레벨이 모자람). 지을 수 있거나 이미 지었으면 null. */
+  buildingLockReason(id: BuildingId): string | null;
   boothUnlockCost(booth: BoothId): Cost | null;
   /** 비용 말고 아직 열 수 없는 이유 (그 구역이 닫힘 = 마을회관 레벨이 모자람). 열 수 있거나 이미 열렸으면 null. */
   boothLockReason(booth: BoothId): string | null;
@@ -51,6 +55,7 @@ export interface SimApi {
   giveSnack(id: MonsterId, good: GoodId): Result;
   /** 부스에 응원 도구 걸기. */
   placeCheer(booth: BoothId, good: GoodId): Result;
+  /** 건물 업그레이드 (레벨 0이면 짓기). */
   upgradeBuilding(id: BuildingId): Result;
   unlockBooth(booth: BoothId): Result;
   upgradeBooth(booth: BoothId): Result;

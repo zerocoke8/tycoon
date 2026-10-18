@@ -13,8 +13,10 @@
 // 연못은 자기 구역 사각형 안쪽으로 60px 넘게 들어와 있어야 한다 (구름 가장자리 밖으로 비치지 않게).
 // 셋째 묶음 단체 놀이 (DESIGN 3.6): 씨름장 = 중앙 광장 아래 왼쪽 (큰길 옆), 오리배 = 연못 동네 큰 연못 (물길 BOAT_COURSE, 선착장은 남쪽 물가),
 // 연날리기 = 북쪽 언덕 경주장 오른쪽 (KITE_FIELD), 줄다리기·보물찾기 = 축제 들판 (TUG_FIELD, DIG_FIELD). 아래 가로길이 연못 동네를 지나 축제 들판까지 이어진다.
+// 넷째 묶음 (DESIGN 3.7): 전당포·은행 = 큰길 오른쪽 '은행 골목' (광장 바로 아래, 다트 부스 위), 일터(밭·광산) = 중앙 오른쪽 아래 구석
+// (돌림판 갈래길에서 이어진다, WORK_YARD). 그림 크기는 아직 대략 (그림이 오면 배율·자리를 다시 맞춘다).
 
-import type { BoothId, BuildingId } from './defs.ts';
+import type { BoothId, BuildingId, WorkFacility } from './defs.ts';
 
 export const WORLD = { w: 8000, h: 7800 } as const;
 
@@ -92,6 +94,9 @@ export const ROADS: readonly Road[] = [
   { pts: [{ x: 3200, y: 5404 }, { x: 2950, y: 5402 }], w: 100, district: 'core' },
   { pts: [{ x: 5080, y: 4500 }, { x: 5330, y: 4480 }, { x: 5650, y: 4462 }], w: 100, district: 'east' },
   { pts: [{ x: 4100, y: 1250 }, { x: 4440, y: 1432 }, { x: 4820, y: 1452 }], w: 100, district: 'north' },
+  // 넷째 묶음: 은행 골목 (큰길에서 오른쪽: 전당포 → 은행), 일터 길 (돌림판 갈래길 끝에서 아래로)
+  { pts: [{ x: 3200, y: 5455 }, { x: 3600, y: 5462 }, { x: 4080, y: 5470 }, { x: 4260, y: 5472 }], w: 100, district: 'core' },
+  { pts: [{ x: 3990, y: 6765 }, { x: 4060, y: 6900 }, { x: 4150, y: 7080 }], w: 100, district: 'core' },
   // 축제 들판으로: 고리 던지기 갈래길에서 오른쪽으로 이어 가고, 들판 안 세로길 (줄다리기 ↑, 보물찾기 ↓)
   { pts: [{ x: 5600, y: 6102 }, { x: 6060, y: 6130 }, { x: 6400, y: 6150 }], w: 110, district: 'east' },
   { pts: [{ x: 6400, y: 6150 }, { x: 6750, y: 6160 }], w: 110, district: 'festival' },
@@ -127,6 +132,102 @@ export const BUILDING_SPOTS: Record<BuildingId, Pt> = {
   office: { x: 4200, y: 4860 },
   warehouse: { x: 2380, y: 6900 },
   gate: { x: 3200, y: 7150 },
+  // 넷째 묶음: 전당포·은행 = 그림 아래 가운데, 일터 = 일터 가운데 (빈 부지 표식·누르기·지도에서 보기 자리, 그림은 WORK_YARD의 시설들).
+  pawnshop: { x: 3600, y: 5330 },
+  bank: { x: 4080, y: 5390 },
+  workyard: { x: 4200, y: 7230 },
+};
+
+/** 건물 그림 배율 (세계 px / 캔버스 px, 없으면 ART_SCALE.building). 전당포·은행은 놀이부스 크기로. */
+export const BUILDING_K: Partial<Record<BuildingId, number>> = { pawnshop: 0.44, bank: 0.44 };
+
+/**
+ * 손님이 볼일을 보는 가게 (전당포·은행): counter = 계산대 앞에 서는 자리 (먼저 온 손님부터, 다 차면 마지막 자리 둘레),
+ * npc = 주인이 서는 점 (characters/<art>, 계산대를 본다), front = 길 노드.
+ */
+export interface ShopSpot {
+  readonly counter: readonly Pt[];
+  readonly npc: Pt;
+  readonly art: string;
+  readonly front: NodeId;
+}
+export const SHOP_SPOTS: Record<'pawnshop' | 'bank', ShopSpot> = {
+  pawnshop: { counter: [{ x: 3585, y: 5392 }, { x: 3505, y: 5404 }, { x: 3665, y: 5408 }], npc: { x: 3735, y: 5372 }, art: 'pawnbroker', front: 'pawn_front' },
+  bank: { counter: [{ x: 4065, y: 5446 }, { x: 3985, y: 5452 }, { x: 4140, y: 5456 }], npc: { x: 4225, y: 5428 }, art: 'banker', front: 'bank_front' },
+};
+
+/**
+ * 일터 (중앙 오른쪽 아래 구석, 일터 레벨 1부터): 시설 둘 (밭 = 바닥에 깔리는 그림, 광산 = 굴 입구 그림).
+ * spots = 일하는 자리 (일터 레벨의 workers만큼 앞에서부터 쓴다), wait = 자리가 없을 때 쪼그리고 기다리는 자리 (다 차면 마지막 자리 둘레),
+ * face = 일하는 손님이 바라보는 점 (밭 가운데·굴 입구). props = 소품 (map/<key>), foreman = 반장이 서는 점, front = 길 노드, center = 구경 반응 가운데.
+ */
+export interface WorkFacilitySpot {
+  readonly art: string;
+  readonly at: Pt;
+  readonly k: number;
+  readonly flat: boolean;
+  readonly spots: readonly Pt[];
+  readonly wait: readonly Pt[];
+  readonly face: Pt;
+}
+export const WORK_YARD: {
+  readonly facilities: Record<WorkFacility, WorkFacilitySpot>;
+  readonly props: readonly { readonly key: string; readonly at: Pt; readonly k: number; readonly flip?: boolean }[];
+  readonly foreman: Pt;
+  readonly front: NodeId;
+  readonly center: Pt;
+} = {
+  facilities: {
+    farm: {
+      art: 'farm_plot',
+      at: { x: 3900, y: 7410 },
+      k: 0.56,
+      flat: true,
+      // 밭 흙 위 두 줄을 엇갈려 (앞뒤 110, 옆 75: 광산처럼 앞줄 게이지·괭이가 뒷줄 손님 몸에 얹히지 않게).
+      // 앞 둘(일터 레벨 1)은 뒷줄 왼쪽·앞줄 오른쪽으로 멀리, 레벨이 오르면 사이를 채운다.
+      spots: [
+        { x: 3800, y: 7215 },
+        { x: 4025, y: 7325 },
+        { x: 3950, y: 7215 },
+        { x: 3875, y: 7325 },
+      ],
+      // 밭 오른쪽 풀밭에 두 줄로 엇갈려 (쪼그린 손님의 게이지가 뒷줄 손님에 얹히지 않게).
+      wait: [
+        { x: 4125, y: 7345 },
+        { x: 4250, y: 7360 },
+        { x: 4185, y: 7470 },
+        { x: 4310, y: 7480 },
+      ],
+      face: { x: 3910, y: 7270 },
+    },
+    mine: {
+      art: 'mine_entrance',
+      at: { x: 4470, y: 7020 },
+      k: 0.4,
+      flat: false,
+      // 입구 앞에 앞뒤로 엇갈려 (곡괭이·빚 게이지가 옆 손님과 겹치지 않게).
+      spots: [
+        { x: 4335, y: 7068 },
+        { x: 4440, y: 7112 },
+        { x: 4545, y: 7068 },
+        { x: 4650, y: 7112 },
+      ],
+      wait: [
+        { x: 4610, y: 7196 },
+        { x: 4510, y: 7222 },
+        { x: 4410, y: 7206 },
+        { x: 4560, y: 7290 },
+      ],
+      face: { x: 4470, y: 6990 },
+    },
+  },
+  props: [
+    { key: 'ore_cart', at: { x: 4262, y: 7012 }, k: 0.21 },
+    { key: 'crop_basket', at: { x: 3762, y: 7402 }, k: 0.11 },
+  ],
+  foreman: { x: 4235, y: 7175 },
+  front: 'yard_front',
+  center: { x: 4200, y: 7200 },
 };
 
 /** 촌장이 서 있는 곳 (마을회관 앞마당 오른쪽 끝). */
@@ -574,6 +675,11 @@ export const NODES = {
   f_n: { x: 6772, y: 4700 },
   dig_front: { x: 6775, y: 6720 },
   f_s: { x: 6780, y: 7100 },
+  // 넷째 묶음: 은행 골목, 일터
+  pawn_front: { x: 3600, y: 5462 },
+  bank_front: { x: 4080, y: 5470 },
+  yard_turn: { x: 3990, y: 6765 },
+  yard_front: { x: 4150, y: 7080 },
 } as const satisfies Record<string, Pt>;
 export type NodeId = keyof typeof NODES;
 
@@ -641,6 +747,11 @@ export const EDGES: readonly (readonly [NodeId, NodeId])[] = [
   ['tug_front', 'f_n'],
   ['f_gate', 'dig_front'],
   ['dig_front', 'f_s'],
+  // 넷째 묶음: 은행 골목 (큰길 가운데에서), 일터 (돌림판 갈래길에서)
+  ['main_mid', 'pawn_front'],
+  ['pawn_front', 'bank_front'],
+  ['wheel_front', 'yard_turn'],
+  ['yard_turn', 'yard_front'],
 ];
 
 // ── 장식 소품 (그림 map/<key>, 아래 가운데가 놓이는 점) ─────────────────────
@@ -674,10 +785,10 @@ export const DECOR: readonly { readonly key: string; readonly at: Pt; readonly f
   // 광장과 가로길 사이
   { key: 'signpost', at: { x: 3400, y: 5650 } },
 
-  { key: 'bush', at: { x: 3480, y: 5250 } },
+  { key: 'bush', at: { x: 4360, y: 5640 } },
   { key: 'flowers', at: { x: 2200, y: 5200 } },
   { key: 'tree_round', at: { x: 2230, y: 5560 } },
-  { key: 'tree_round', at: { x: 4180, y: 5560 } },
+  { key: 'tree_round', at: { x: 4470, y: 5420 } },
   { key: 'tree_pine', at: { x: 1960, y: 5820 } },
   { key: 'rocks', at: { x: 4450, y: 5800 } },
   { key: 'flowers', at: { x: 2900, y: 5900 } },
@@ -687,7 +798,7 @@ export const DECOR: readonly { readonly key: string; readonly at: Pt; readonly f
   { key: 'crates', at: { x: 2780, y: 6990 } },
   { key: 'balloons', at: { x: 3470, y: 7010 } },
   { key: 'flowers', at: { x: 2950, y: 7100 } },
-  { key: 'bush', at: { x: 3950, y: 7180 } },
+  { key: 'bush', at: { x: 3640, y: 7480 } },
   { key: 'tree_pine', at: { x: 1980, y: 6700 } },
   { key: 'tree_round', at: { x: 4560, y: 6700 } },
   { key: 'tree_round', at: { x: 2650, y: 7600 } },

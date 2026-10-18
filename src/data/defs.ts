@@ -32,6 +32,8 @@ export const MATERIALS = {
   mat_dew: { name: '이슬 방울' },
   mat_seaweed: { name: '물풀' },
   mat_cactusflower: { name: '선인장 꽃' },
+  // 넷째 묶음: 일터 밭에서 나오는 재료 (손님 종의 특산 재료가 아니다: LABOR.facilities). 광산은 광석 조각(mat_ore).
+  mat_veggie: { name: '채소' },
 } as const;
 export type MaterialId = keyof typeof MATERIALS;
 
@@ -70,6 +72,9 @@ export const RECIPES: readonly { readonly out: GoodId; readonly coins: number; r
   { out: 'snack_ricecake', coins: 12, mats: { mat_mugwort: 2, mat_dew: 1 }, sec: 45, hall: 4 },
   { out: 'cheer_flag', coins: 15, mats: { mat_cactusflower: 2, mat_pebble: 1 }, sec: 60, hall: 4 },
   { out: 'lucky_charm', coins: 25, mats: { mat_foxbead: 1, mat_bell: 1 }, sec: 90, hall: 4 },
+  // 넷째 묶음: 일터(밭·광산)에서 나온 재료로 (채소 간식은 일하는 채무자를 달래는 데도 쓴다).
+  { out: 'snack_cookie', coins: 5, mats: { mat_veggie: 2 }, sec: 30, hall: 2 },
+  { out: 'snack_ricecake', coins: 12, mats: { mat_veggie: 2, mat_ore: 1 }, sec: 45, hall: 2 },
 ];
 
 // ── 몬스터 손님 ─────────────────────────────────────────────────────────
@@ -193,7 +198,7 @@ export const BOOTHS = {
     roles: HOST_ROLE,
   },
   cups: {
-    name: '컵 야바위 부스', desc: '컵 셋 중 구슬 찾기', building: 'booth_cups',
+    name: '구슬 찾기 부스', desc: '컵 셋 가운데 구슬이 든 컵 찾기', building: 'booth_cups',
     fee: [2, 3, 4], seats: [1, 1, 2], roundSec: [5, 4.5, 4], potSeed: 50, potCap: [250, 500, 1000],
     unlock: { coins: 120, precious: { golden_acorn: 1 }, hall: 1 }, upgrade: [{ coins: 200 }, { coins: 500, precious: { star_piece: 1 } }],
     roles: HOST_ROLE,
@@ -518,7 +523,13 @@ export const DIG_FINDS = ['none', 'chest', 'coins', 'gem', 'boot', 'pebble'] as 
 
 // ── 건물 ────────────────────────────────────────────────────────────────
 
-export type BuildingId = 'hall' | 'gate' | 'workshop' | 'office' | 'warehouse' | 'fountain';
+export type BuildingId = 'hall' | 'gate' | 'workshop' | 'office' | 'warehouse' | 'fountain' | 'pawnshop' | 'bank' | 'workyard';
+
+/**
+ * 처음에는 없는 건물 (레벨 0 = 빈 부지, levels[0]이 짓는 비용)과 지을 수 있는 마을회관 레벨 (넷째 묶음, DESIGN 3.7).
+ * 여기에 없는 건물은 처음부터 레벨 1.
+ */
+export const BUILD_HALL: Partial<Record<BuildingId, number>> = { pawnshop: 1, bank: 2, workyard: 2 };
 
 /** 레벨마다 비용과 효과. 레벨 1은 처음부터 있다(비용 없음). */
 /**
@@ -560,7 +571,187 @@ export const BUILDINGS = {
     name: '광장 분수', desc: '광장의 분위기. 손님 기분이 천천히 오른다.',
     levels: [{ coins: 0, moodPerMin: 1 }, { coins: 250, precious: { golden_acorn: 1 }, moodPerMin: 3 }],
   },
+  // ── 넷째 묶음 (DESIGN 3.7): 처음엔 빈 부지 (BUILD_HALL), levels[0] = 짓는 비용. ──
+  // 전당포: 레벨이 오르면 같은 장신구에 조금 더 빌려준다 (pawnRatio, PAWN.loanRatio에 곱한다).
+  pawnshop: {
+    name: '전당포', desc: '돈이 떨어진 손님이 장신구를 맡기고 코인을 빌린다. 못 찾아간 장신구는 진열장에 모인다.',
+    levels: [{ coins: 120, pawnRatio: 1 }, { coins: 260, pawnRatio: 1.1 }, { coins: 520, mats: { mat_shell: 3 }, pawnRatio: 1.2 }],
+  },
+  // 은행: 빌려주는 코인 = BANK.base + 레벨 × BANK.perLevel (레벨 표에는 비용만).
+  bank: {
+    name: '은행', desc: '맡길 장신구도 없는 손님에게 코인을 빌려준다. 떠날 때 못 갚으면 일터에서 일해 갚는다.',
+    levels: [{ coins: 200 }, { coins: 420, mats: { mat_pearl: 1 } }, { coins: 800, precious: { gem: 1 } }],
+  },
+  // 일터 (밭·광산): workers = 시설마다 일하는 자리 수 (지도 자리 4까지), pace = 빚 갚는 빠르기 배수 (반장).
+  workyard: {
+    name: '일터', desc: '파산한 손님이 밭과 광산에서 일해 빚을 갚는다. 일한 만큼 채소·광석이 나온다.',
+    levels: [{ coins: 140, workers: 2, pace: 1 }, { coins: 320, mats: { mat_veggie: 4 }, workers: 3, pace: 1.25 }, { coins: 650, mats: { mat_ore: 4 }, workers: 4, pace: 1.5 }],
+  },
 } as const;
+
+// ── 장신구·전당포·은행·파산·일터 (넷째 묶음, DESIGN 3.7) ───────────────────────
+
+/** 장신구가 붙는 몸 자리: 머리 위, 목, 옆구리. 붙는 점은 data/accessoryAnchors.ts (종·포즈마다). */
+export type AccessorySlot = 'head' | 'neck' | 'side';
+export const ACCESSORY_SLOTS: readonly AccessorySlot[] = ['head', 'neck', 'side'];
+
+/**
+ * 장신구 (그림 items/<key>, 몸 그림 위에 코드로 붙인다). value = 전당포가 빌려주는 코인 범위 (손님이 올 때 정한다),
+ * weight = 나오는 무게 (귀한 것은 드물게), exclude = 이 종에게는 달지 않는다 (고블린+돈주머니는 비하 고정관념: DESIGN 2.1.1).
+ */
+export interface AccessoryDef {
+  readonly name: string;
+  readonly slot: AccessorySlot;
+  readonly rare: boolean;
+  readonly value: readonly [number, number];
+  readonly weight: number;
+  readonly exclude?: readonly SpeciesId[];
+}
+export const ACCESSORIES = {
+  acc_flower_crown: { name: '꽃관', slot: 'head', rare: false, value: [20, 35], weight: 10 },
+  acc_ribbon: { name: '리본', slot: 'head', rare: false, value: [20, 30], weight: 10 },
+  acc_straw_hat: { name: '밀짚모자', slot: 'head', rare: false, value: [25, 40], weight: 8 },
+  acc_star_pin: { name: '별 머리핀', slot: 'head', rare: false, value: [20, 30], weight: 9 },
+  acc_tophat: { name: '작은 실크햇', slot: 'head', rare: true, value: [50, 70], weight: 3.5 },
+  acc_mini_crown: { name: '작은 왕관', slot: 'head', rare: true, value: [90, 130], weight: 1.2 },
+  acc_scarf: { name: '목도리', slot: 'neck', rare: false, value: [25, 40], weight: 9 },
+  acc_bell_collar: { name: '방울 목걸이', slot: 'neck', rare: false, value: [20, 35], weight: 9 },
+  acc_pearl_necklace: { name: '진주 목걸이', slot: 'neck', rare: true, value: [80, 110], weight: 1.6 },
+  acc_coin_pouch: { name: '돈주머니', slot: 'side', rare: false, value: [30, 40], weight: 8, exclude: ['goblin'] },
+} as const satisfies Record<string, AccessoryDef>;
+export type AccessoryId = keyof typeof ACCESSORIES;
+export const ACCESSORY_IDS = Object.keys(ACCESSORIES) as AccessoryId[];
+export function accessoryDef(k: AccessoryId): AccessoryDef {
+  return ACCESSORIES[k];
+}
+
+/** 들어오는 손님의 장신구: one = 하나 단 손님 비율, two = 둘 단 손님 비율 (자리가 다른 것끼리). 나머지는 없다. */
+export const ACCESSORY_SPAWN = { one: 0.35, two: 0.08 } as const;
+
+/**
+ * 마을 금고 (전당포·은행이 빌려주는 코인은 마을 코인에서 나간다). 빌려준 뒤에도 reserve는 남아야 하고, 한 번에 마을 코인의 maxShare까지만 빌려준다
+ * (마을이 가난할 때 금고가 바닥나지 않게: 아니면 '금고가 비었어요'). emptyToastSec = 그 토스트 간격 (촌장이 코인을 다 쓴 뒤라 자주 날 수 있다).
+ */
+export const VAULT = { reserve: 25, maxShare: 1, emptyToastSec: 150 } as const;
+
+/**
+ * 더 놀고 싶은 마음 (돈이 떨어졌을 때 전당포·은행에 갈 확률, sim/debt.ts wantMore):
+ * base + (기분 - 50) × perMood + 남은 끈기 × perPatience + 성격마다 (대담이·흥부자는 더, 겁쟁이는 덜), lo~hi 사이로.
+ * 돈이 떨어질 때마다 두 번 묻는다 (거의 다 잃었을 때 한 번, 정말 못 놀 때 한 번: 싫다고 하면 그 단계에서는 다시 묻지 않는다).
+ */
+export interface WantTable {
+  readonly base: number;
+  readonly perMood: number;
+  readonly perPatience: number;
+  readonly traits: Partial<Record<TraitId, number>>;
+  readonly lo: number;
+  readonly hi: number;
+}
+
+/**
+ * 전당포: 돈이 떨어진 손님이 더 놀고 싶으면(기분 wantMood 이상, 끈기가 남음, want 확률) 몸에 단 장신구 하나(값이 가장 큰 것)를 맡긴다.
+ * 돈이 떨어짐 = 지갑이 가장 싼 한판보다 적거나, 처음 지갑(지갑 + 쓴 코인 - 받은 코인)의 lowFrac보다 적다 (거의 다 잃었다).
+ * 빌리는 코인 = 값 × loanRatio × 전당포 레벨 pawnRatio. 되찾는 값 = 빌린 코인 × redeemMarkup.
+ * 그 방문 안에 지갑이 되찾는 값 + 다음 판 redeemRounds번 분량(가장 싼 한판 비용 × 이 수)을 넘으면 전당포에 가서 되찾는다. 떠나기 전에 낼 수 있으면 되찾고 떠난다.
+ * 못 찾고 떠나면 전당포 컬렉션(GameState.pawnCollection)에 영구히. counterSec = 계산대에서 머무는 초.
+ * 아끼는 장신구라 겁쟁이도 맡기기는 한다 (대출보다 마음이 편하다).
+ */
+export const PAWN = {
+  loanRatio: 1,
+  redeemMarkup: 1.25,
+  redeemRounds: 2,
+  wantMood: 15,
+  counterSec: 2.6,
+  lowFrac: 0.35,
+  want: { base: 0.45, perMood: 0.003, perPatience: 0.02, traits: { bold: 0.15, cheerful: 0.05, coward: -0.05, crybaby: 0.05 }, lo: 0.2, hi: 0.95 },
+} as const satisfies { want: WantTable; [k: string]: unknown };
+
+/**
+ * 은행: 맡길 장신구도 없는 손님이 더 놀고 싶으면 대출 (빚이 없을 때만, 한 방문에 maxLoans번). 빌리는 코인 = base + 은행 레벨 × perLevel, 갚을 돈 = 빌린 코인 × interest.
+ * 지갑이 빚 + 다음 판 repayRounds번 분량을 넘으면 은행에 들러 갚는다. 떠날 때 지갑으로 갚을 수 있으면 갚고 떠난다. 못 갚으면 파산 (지갑을 다 내고 남은 빚은 일터에서).
+ * 일터가 없으면 빌려주지 않는다 (못 갚은 빚을 갚을 곳이 없다). 빚을 지는 일이라 겁쟁이는 잘 안 빌린다.
+ */
+export const BANK = {
+  base: 30,
+  perLevel: 10,
+  interest: 1.3,
+  maxLoans: 1,
+  wantMood: 15,
+  repayRounds: 2,
+  counterSec: 2.6,
+  want: { base: 0.35, perMood: 0.003, perPatience: 0.02, traits: { bold: 0.25, cheerful: 0.05, lucky: 0.1, coward: -0.3 }, lo: 0.05, hi: 0.85 },
+  /** 빚이 있는데 갚을 만큼 없으면 끈기가 다 돼도 '갚으려고 한판만 더' (chance, 한 방문에 max판까지). */
+  chase: { chance: 0.7, max: 4 },
+  /** 일터에서 일하는 채무자 한 명마다 빌리고 싶은 마음이 이만큼 준다 (want에서 뺀다: 큰 마을에서 파산이 몰리지 않게). */
+  wary: 0.08,
+} as const satisfies { want: WantTable; [k: string]: unknown };
+
+/** 일터의 시설: 밭 (괭이, 채소)과 광산 (곡괭이, 광석 조각). 지도 배치는 map.ts WORK_YARD. */
+export type WorkFacility = 'farm' | 'mine';
+export const WORK_FACILITIES: readonly WorkFacility[] = ['farm', 'mine'];
+
+/**
+ * 파산과 일터. 일하는 동안 secPerCoin초에 빚 1코인을 갚는다 (일터 레벨 pace 배수, 응원·간식으로 잠깐 더 빨리).
+ * coinsPerMat코인을 갚을 때마다 그 시설의 재료 하나가 마을 창고로 (그때 한숨·영차 반응). 자리가 없으면 옆에 쪼그리고 기다린다 (오래 기다린 손님부터 자리로).
+ * 파산한 손님은 느리게 걷는다 (walkMult). 응원 톡 = cheerMult배 cheerSec초, 간식 = snackMult배 snackSec초.
+ * 반장(foreman)은 foreman.everySec마다 일하는 채무자 하나를 다독인다 (mult배 sec초, 게이지가 가장 덜 찬 손님 먼저).
+ * 다 갚으면 reliefSec 동안 어둠이 걷히고 기뻐한 뒤 떠나 단골이 된다. mood = 파산했을 때의 기분 (축 처짐).
+ * forgiveSec = 파산하고 이만큼 지나도 (빚 걸기 판에서 빚이 늘었거나 자리를 오래 기다렸다) 일터에 있으면 반장이 남은 빚을 덜어 준다 (일이 끝없이 길어지지 않게).
+ * waitMutter = 기다리는 채무자가 1초마다 한숨 반응을 낼 확률. prefer = 이 종은 이 시설을 고른다 (자리가 있으면).
+ */
+export const LABOR = {
+  secPerCoin: 4,
+  coinsPerMat: 8,
+  walkMult: 0.9,
+  cheerMult: 1.5,
+  cheerSec: 8,
+  snackMult: 1.5,
+  snackSec: 60,
+  foreman: { everySec: 25, mult: 1.3, sec: 6 },
+  reliefSec: 1.5,
+  mood: 8,
+  forgiveSec: 480,
+  waitMutter: 0.05,
+  facilities: {
+    farm: { name: '밭', tool: 'hoe', material: 'mat_veggie' },
+    mine: { name: '광산', tool: 'pickaxe', material: 'mat_ore' },
+  },
+  prefer: { mole: 'mine', golem: 'mine', dragon: 'mine', radish: 'farm', sprout: 'farm', kabocha: 'farm', sheep: 'farm' },
+} as const satisfies {
+  facilities: Record<WorkFacility, { name: string; tool: string; material: MaterialId }>;
+  prefer: Partial<Record<SpeciesId, WorkFacility>>;
+  [k: string]: unknown;
+};
+
+/**
+ * 빚 걸린 힘겨루기 (줄다리기·밀어내기 대결장의 '빚 걸기 판'): 부를 수 있는 채무자가 minDebtors 이상이면 checkSec마다 chance로 반장이 부스 하나를 고른다
+ * (부스마다 cooldownSec에 한 번). 부스가 쉬는 중이면 바로 열고, 아니면 예약해서 지금 판이 끝나면 선수 자리를 비워 두었다가 연다 (holdSec 안에 못 열면 그만).
+ * 부를 수 있는 채무자 = 일터로 가는·일하는·기다리는 채무자 가운데 빚이 minStake 이상이고 이번 파산에 빚 걸기 판을 maxPerStint번보다 적게 한 손님.
+ * 짝은 빚이 비슷한 채무자끼리 (빚 순서로 늘어놓고 이웃끼리: 지면 상대 빚만큼 늘어나니 공평하게).
+ * 선수는 채무자만, 코인 대신 자기 빚을 건다 (참가비·건 코인 0).
+ * 구경 손님은 평소처럼 편에 코인을 건다 (밀어내기 구경 자리. 줄다리기는 자리가 모두 선수라 구경만).
+ * 이기면 빚 × winKeep (뒤집기·역전 대박이면 0), 지면 상대 빚만큼 더 (밀어내기 = 상대 선수, 줄다리기 = 짝지은 상대 편 선수: 자리 2k ↔ 2k+1).
+ * 빚은 maxDebt보다 커지지 않는다 (반장이 봐준다: 일이 끝없이 길어지지 않게).
+ * 줄다리기는 편마다 tugSide명까지 (채무자 수를 반으로), 부를 수 있는 채무자가 tugMin명 이상일 때만 (축제 들판은 일터에서 멀다). 채무자가 다 오지 않은 채 maxWaitSec이 지나면 판을 접고 일터로 돌아간다.
+ * 부스가 쉬는 중 = 판이 쉬고(idle) 채무자가 설 선수 자리가 비었다 (밀어내기 = 모래판 자리 0·1, 줄다리기 = 모든 자리).
+ * watchOnly = 구경하며 거는 자리가 없는 부스 (빚 걸기 판 동안 다른 손님을 앉히지 않는다).
+ */
+export const DEBT_MATCH = {
+  booths: ['ssireum', 'tug'],
+  watchOnly: ['tug'],
+  minDebtors: 2,
+  checkSec: 10,
+  chance: 0.6,
+  cooldownSec: 90,
+  holdSec: 75,
+  maxDebt: 120,
+  minStake: 8,
+  maxPerStint: 1,
+  winKeep: 0.5,
+  tugSide: 2,
+  tugMin: 4,
+  maxWaitSec: 150,
+} as const satisfies { booths: readonly GroupBoothId[]; watchOnly: readonly GroupBoothId[]; [k: string]: unknown };
 
 // ── 주민 (진행자) ───────────────────────────────────────────────────────
 

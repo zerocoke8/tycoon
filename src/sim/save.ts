@@ -1,7 +1,7 @@
 // 새 게임과 저장 (localStorage 'mpv-save-v1'). Node(scripts/sim-check.ts)에서는 localStorage가 없으니 조용히 넘어간다.
 
 import { Rng } from '../core/rng.ts';
-import { BOOTHS, BOOTH_IDS, BUILDINGS, GOODS, HOST_PRESETS, isGroupBooth, MATERIALS, PRECIOUS, SIM, type BoothId, type BuildingId, type GoodId, type MaterialId, type PreciousId } from '../data/defs.ts';
+import { BOOTHS, BOOTH_IDS, BUILD_HALL, BUILDINGS, DEBT_MATCH, GOODS, HOST_PRESETS, isGroupBooth, MATERIALS, PRECIOUS, SIM, type BoothId, type BuildingId, type GoodId, type MaterialId, type PreciousId } from '../data/defs.ts';
 import { BUILDING_SPOTS, DISTRICTS, NODES, type DistrictId, type NodeId } from '../data/map.ts';
 import { byLevel } from './economy.ts';
 import { createMonster } from './monsters.ts';
@@ -13,8 +13,11 @@ import { TUNE } from './tuning.ts';
 import type { BoothState, GameState, RaceResult, RacerIndex, Staff, StaffId } from './types.ts';
 
 export const SAVE_KEY = 'mpv-save-v1';
-/** 2: 진행자 자리(BoothState.staff, Staff.post), 손님 재료(Monster.mats), 경주장. 3: 단체 놀이 엔진 (BoothState.race → group). 옛 저장은 새로 시작. */
-export const SAVE_VERSION = 3;
+/**
+ * 2: 진행자 자리(BoothState.staff, Staff.post), 손님 재료(Monster.mats), 경주장. 3: 단체 놀이 엔진 (BoothState.race → group).
+ * 4: 넷째 묶음 (손님 장신구·맡긴 장신구·빚, 전당포 컬렉션, 전당포·은행·일터 건물). 2·3은 이어서 읽는다 (migrate2 → migrate3), 그보다 옛 저장은 새로 시작.
+ */
+export const SAVE_VERSION = 4;
 
 /** 처음부터 열린 부스와 그 진행자. */
 const START_BOOTHS: readonly BoothId[] = ['slot', 'oddeven'];
@@ -60,7 +63,8 @@ export function newGame(seed?: number): GameState {
   const booths = {} as Record<BoothId, BoothState>;
   for (const b of BOOTH_IDS) booths[b] = newBooth(b, START_BOOTHS.includes(b), hostOf.get(b) ?? null);
   const buildings = {} as Record<BuildingId, { level: number }>;
-  for (const id of Object.keys(BUILDINGS) as BuildingId[]) buildings[id] = { level: 1 };
+  // 처음에 없는 건물 (전당포·은행·일터)은 레벨 0 = 빈 부지.
+  for (const id of Object.keys(BUILDINGS) as BuildingId[]) buildings[id] = { level: BUILD_HALL[id] !== undefined ? 0 : 1 };
   const districts = (Object.keys(DISTRICTS) as DistrictId[]).filter((d) => DISTRICTS[d].hall <= 1);
   const state: GameState = {
     version: SAVE_VERSION,
@@ -84,6 +88,10 @@ export function newGame(seed?: number): GameState {
     districts,
     savedAt: 0,
     regulars: [],
+    pawnCollection: {},
+    debtTotals: { pawned: 0, redeemed: 0, forfeited: 0, loans: 0, repaid: 0, bankrupt: 0, relieved: 0, forgiven: 0, matches: 0, laborMats: 0, laborBy: { farm: 0, mine: 0 } },
+    debtMatchAt: {},
+    debtCheck: DEBT_MATCH.checkSec,
   };
   addOpeningGuests(state, rng);
   state.rng = rng.state;
@@ -134,13 +142,14 @@ const RENAMED_PRESETS: Readonly<Record<string, string>> = {
  */
 export function normalizeState(raw: unknown): GameState | null {
   if (isObj(raw) && raw.version === 2) migrate2(raw);
+  if (isObj(raw) && raw.version === 3) migrate3(raw);
   if (!isObj(raw) || raw.version !== SAVE_VERSION) return null;
   if (typeof raw.coins !== 'number' || !Number.isFinite(raw.coins)) return null;
   if (!Array.isArray(raw.monsters) || !Array.isArray(raw.staff) || !isObj(raw.booths) || !isObj(raw.buildings)) return null;
   const base = newGame(typeof raw.rng === 'number' ? raw.rng : 1) as unknown as Record<string, unknown>;
   const st = raw as Record<string, unknown>;
   for (const [k, v] of Object.entries(base)) if (!(k in st)) st[k] = v;
-  for (const key of ['materials', 'precious', 'goods', 'buildings', 'booths'] as const) {
+  for (const key of ['materials', 'precious', 'goods', 'buildings', 'booths', 'debtTotals'] as const) {
     const have = st[key];
     const def = base[key];
     if (!isObj(have) || !isObj(def)) return null;
@@ -190,7 +199,22 @@ function migrate2(raw: Record<string, unknown>): void {
       bs.group = g;
     }
   }
-  raw.version = SAVE_VERSION;
+  raw.version = 3;
+}
+
+/**
+ * 저장 3 → 4 (넷째 묶음): 손님마다 장신구(없음)·맡긴 장신구·빚 칸. 새 건물(빈 부지)·전당포 컬렉션·누적 기록은 normalizeState가 newGame 값으로 채운다.
+ */
+function migrate3(raw: Record<string, unknown>): void {
+  if (Array.isArray(raw.monsters)) {
+    for (const m of raw.monsters) {
+      if (!isObj(m)) continue;
+      if (!Array.isArray(m.accessories)) m.accessories = [];
+      if (!Array.isArray(m.pawned)) m.pawned = [];
+      if (typeof m.debt !== 'number') m.debt = 0;
+    }
+  }
+  raw.version = 4;
 }
 
 /** 저장된 게임 (없거나 버전이 다르면 null). */

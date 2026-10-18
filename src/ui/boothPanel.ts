@@ -1,7 +1,7 @@
 // 부스 패널: 위쪽은 확대 화면(CloseupView, 캔버스), 아래는 HTML 부스 정보 시트.
 // 열려 있는 동안 지도 입력을 막고, 확대 화면 둘레(그늘)를 누르면 닫힌다. 확대 화면 자리는 캔버스가 그대로 누르기를 받는다.
 
-import { BOOTHS, boothDef, GOODS, isGroupBooth, STAFF_STAT_NAMES, type BoothId, type GoodId } from '../data/defs.ts';
+import { BOOTHS, boothDef, DEBT_MATCH, GOODS, isGroupBooth, STAFF_STAT_NAMES, type BoothId, type GoodId } from '../data/defs.ts';
 import { josa } from '../sim/text.ts';
 import { closeupRadius, type Rect } from '../view/contracts.ts';
 import { btn, fmt, fmtSec, h, revealInSheet, setText } from './dom.ts';
@@ -193,7 +193,7 @@ class BoothInfo extends BasePanel {
     const s = this.st;
     const bs = s.booths[this.booth];
     // 단체 놀이: 단계·참가자(고른 것)·자리가 바뀌면 다시 짓는다 (순위·막대·연·보물은 live로).
-    const race = bs.group !== null ? `${bs.group.phase}:${bs.group.participants.map((e) => `${e.monster}.${e.pick}`).join(',')}:${bs.seats.join('/')}` : '-';
+    const race = bs.group !== null ? `${bs.group.phase}:${bs.group.mode ?? ''}${bs.group.debtNext === true ? '+' : ''}:${bs.group.participants.map((e) => `${e.monster}.${e.pick}`).join(',')}:${bs.seats.join('/')}` : '-';
     return [this.booth, bs.unlocked, bs.level, bs.staff.join('/'), bs.cheer?.good ?? '-', race, s.staff.map((st) => `${st.id}:${st.level}:${st.post === null ? '-' : `${st.post.booth}.${st.post.role}`}`).join(',')].join('|');
   }
 
@@ -241,6 +241,14 @@ class BoothInfo extends BasePanel {
     if (rule !== null && b !== 'race' && b !== 'boat') {
       const go = b === 'claw' ? btn('sub small', '인형 보기', () => this.ctx.openDex('plush')) : null;
       this.el.append(h('div', 'mpv-rule', h('span', 'mpv-grow', rule), go));
+    }
+
+    // 빚 걸기 판 (넷째 묶음, 줄다리기·밀어내기): 이번 판 또는 예약된 다음 판의 규칙.
+    const g = bs.group;
+    if (g !== null && (g.mode === 'debt' || g.debtNext === true)) {
+      const watch = (DEBT_MATCH.watchOnly as readonly BoothId[]).includes(b) ? '다른 손님은 구경만' : '구경 손님은 평소처럼 한 편에 코인을 걸어요';
+      const head = g.mode === 'debt' ? '빚 걸기 판' : '다음 판은 빚 걸기 판';
+      this.el.append(h('div', 'mpv-rule debt', h('span', 'mpv-grow', `${head}: 빚진 손님이 코인 대신 자기 빚을 걸어요 · 이기면 빚 반 (${b === 'tug' ? '역전승' : '뒤집기'} 대박이면 빚이 사라져요) · 지면 상대 빚만큼 더 · ${watch}`)));
     }
 
     // 단체 놀이: 지난 판과 참가자 (고른 것·하는 일·건 코인, 끝나면 결과와 받은 코인).

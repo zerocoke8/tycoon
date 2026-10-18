@@ -1,4 +1,5 @@
 // 지도 위 효과: 코인 튀기기, 떠오르는 숫자, 색종이, 반짝이, 눈물, 먼지, 하트.
+// 넷째 묶음 (DESIGN 3.7): 물건 날리기(itemArc: 재료가 바구니로), 일터의 흙덩이(clods)·돌 조각(chips)·땀(sweat)·한숨(sigh), 반장 호루라기 선(toot).
 // 입자는 미리 만든 Sprite를 돌려 쓴다 (풀). 프레임마다 새 객체를 만들지 않는다.
 // 그림(fx/*, items/coin)이 아직 없으면 코드로 그린 작은 텍스처를 한 번 만들어 쓴다.
 // 화면 연출용 무작위라 Math.random을 쓴다 (ARCHITECTURE: 연출 무작위는 허용).
@@ -14,7 +15,7 @@ const CONFETTI_COLORS = [0xf3d36a, 0xe8875a, 0x8ec8ee, 0xa8c47e, 0xb8a5d8, 0xf2b
 
 // ── 텍스처 (그림 또는 코드로 그린 대신 그림) ───────────────────────────────
 
-type FallbackKey = 'coin' | 'confetti' | 'sparkle' | 'puff' | 'tear' | 'heart' | `emote_${EmoteKind}`;
+type FallbackKey = 'coin' | 'confetti' | 'sparkle' | 'puff' | 'tear' | 'heart' | 'chip' | 'clod' | 'line' | `emote_${EmoteKind}`;
 
 /** 효과용 텍스처 상자. 그림이 있으면 그림, 없으면 코드로 그린 것 (한 번만 만든다). */
 export class FxTextures {
@@ -135,6 +136,19 @@ function drawFallback(key: FallbackKey): Graphics {
       g.circle(-11, -8, 3).fill({ color: 0xffffff, alpha: 0.85 });
       break;
     }
+    case 'chip':
+      // 작은 돌 조각 (tint로 회색 여러 가지).
+      g.poly([-7, -3, -1, -8, 7, -4, 6, 4, -2, 7, -8, 3]).fill(0xffffff).stroke({ color: OUTLINE, width: 2.5, join: 'round' });
+      break;
+    case 'clod':
+      // 흙덩이 (tint로 흙색).
+      g.circle(0, 0, 7).circle(5, 3, 5).stroke({ color: OUTLINE, width: 5 });
+      g.circle(0, 0, 7).circle(5, 3, 5).fill(0xffffff);
+      break;
+    case 'line':
+      // 짧은 선 (호루라기 소리, 가로로 길다).
+      g.roundRect(-9, -2.6, 18, 5.2, 2.6).fill(OUTLINE);
+      break;
     case 'emote_storm': {
       const cloud = (gg: Graphics): Graphics => gg.circle(-11, 0, 11).circle(4, -6, 13).circle(15, 2, 9).roundRect(-20, 0, 42, 10, 5);
       cloud(g).stroke({ color: OUTLINE, width: 5 });
@@ -218,8 +232,14 @@ interface FloatText {
   dy: number;
 }
 
-export type FloatKind = 'gain' | 'loss' | 'win';
-const FLOAT_COLORS: Record<FloatKind, number> = { gain: 0x5f7f2a, loss: 0xa0522d, win: 0xd99a1e };
+/** gain·loss = 마을 코인, win = 받은 코인·대박, debt = 빚 (넷째 묶음), whistle = 반장 호루라기 (작게). */
+export type FloatKind = 'gain' | 'loss' | 'win' | 'debt' | 'whistle';
+const FLOAT_COLORS: Record<FloatKind, number> = { gain: 0x5f7f2a, loss: 0xa0522d, win: 0xd99a1e, debt: 0x6e5a86, whistle: 0x3f6f7a };
+/** 글자 크기 (big이면 1.5배). */
+const FLOAT_SIZE: Record<FloatKind, number> = { gain: 34, loss: 34, win: 34, debt: 30, whistle: 26 };
+/** 흙덩이·돌 조각 색 (tint). */
+const CLOD_COLORS = [0x9a6a45, 0xb07e52, 0x8a5c3b] as const;
+const CHIP_COLORS = [0xb3aea8, 0x9a948d, 0xc9c3bb, 0x8a847d] as const;
 
 const MAX_PARTICLES = 700;
 const rand = (a: number, b: number): number => a + Math.random() * (b - a);
@@ -244,20 +264,29 @@ export class FxLayer {
 
   /** 항아리(fx,fy)에서 손님(tx,ty)에게 코인이 포물선으로 튄다. */
   coinArc(fx: number, fy: number, tx: number, ty: number, count: number): void {
-    const tex = this.tex.get('items', 'coin', 'coin');
+    this.itemArc(this.tex.get('items', 'coin', 'coin'), fx, fy, tx, ty, count, 25, true);
+  }
+
+  /**
+   * 그림 tex가 (fx,fy)에서 (tx,ty)로 포물선으로 날아간다 (코인·재료). size = 긴 변 (세계 px), spin = 동전처럼 빙글 (좌우로 납작해짐).
+   * 여럿이면 조금씩 늦게, 셋에 하나는 닿을 때 작은 반짝이.
+   */
+  itemArc(tex: Texture, fx: number, fy: number, tx: number, ty: number, count: number, size: number, spin: boolean, delay = 0): void {
     for (let i = 0; i < count; i++) {
       const p = this.spawn(tex);
       if (p === null) return;
       p.mode = ARC;
-      p.sx = fx + rand(-14, 14);
-      p.sy = fy - rand(20, 40);
-      p.tx = tx + rand(-16, 16);
-      p.ty = ty + rand(-10, 10);
+      // 코인·여럿은 흩뿌린다, 재료 하나는 그 점에서 그 점으로.
+      const j = count > 1 || spin ? 1 : 0;
+      p.sx = fx + rand(-14, 14) * j;
+      p.sy = fy - rand(20, 40) * j;
+      p.tx = tx + rand(-16, 16) * j;
+      p.ty = ty + rand(-10, 10) * j;
       p.h = rand(70, 130) + Math.abs(tx - fx) * 0.25;
       p.max = rand(0.55, 0.75);
-      p.delay = i * 0.045;
-      p.s0 = p.s1 = rand(22, 28);
-      p.flip = true;
+      p.delay = delay + i * 0.045;
+      p.s0 = p.s1 = size * (j === 1 ? rand(0.88, 1.12) : 1);
+      p.flip = spin;
       p.phase = Math.random() * 6;
       p.sparkleAtEnd = i % 3 === 0;
       p.fadeFrom = 0.92;
@@ -352,12 +381,13 @@ export class FxLayer {
     }
   }
 
-  /** 먼지 뭉치 (짓기·업그레이드·도착). spread = 퍼지는 반지름. */
-  puff(x: number, y: number, count: number, spread: number): void {
+  /** 먼지 뭉치 (짓기·업그레이드·도착). spread = 퍼지는 반지름, tint = 흙먼지 색 (일터). */
+  puff(x: number, y: number, count: number, spread: number, tint = 0xffffff): void {
     const tex = this.tex.get('fx', 'fx_puff', 'puff');
     for (let i = 0; i < count; i++) {
       const p = this.spawn(tex);
       if (p === null) return;
+      p.sp.tint = tint;
       const a = (i / count) * Math.PI * 2 + rand(-0.3, 0.3);
       p.x = x + Math.cos(a) * spread * 0.4;
       p.y = y + Math.sin(a) * spread * 0.15;
@@ -370,6 +400,97 @@ export class FxLayer {
       p.s1 = spread * 0.75;
       p.vr = rand(-1, 1);
       p.fadeFrom = 0.35;
+    }
+  }
+
+  /** 흙덩이가 앞쪽(dir: -1 왼쪽, 1 오른쪽)으로 톡톡 튄다 (밭 괭이질). */
+  clods(x: number, y: number, count: number, dir: number): void {
+    this.bits(this.tex.get('fx', 'fx_clod', 'clod'), CLOD_COLORS, x, y, count, dir, 9, 13);
+  }
+
+  /** 작은 돌 조각이 튄다 (광산 곡괭이질). */
+  chips(x: number, y: number, count: number, dir: number): void {
+    this.bits(this.tex.get('fx', 'fx_chip', 'chip'), CHIP_COLORS, x, y, count, dir, 8, 12);
+  }
+
+  private bits(tex: Texture, colors: readonly number[], x: number, y: number, count: number, dir: number, s0: number, s1: number): void {
+    for (let i = 0; i < count; i++) {
+      const p = this.spawn(tex);
+      if (p === null) return;
+      p.x = x + rand(-8, 8);
+      p.y = y - rand(0, 6);
+      // 대부분 앞쪽 위로, 가끔 뒤로.
+      const side = Math.random() < 0.75 ? dir : -dir;
+      p.vx = side * rand(40, 150);
+      p.vy = -rand(170, 300);
+      p.g = 1100;
+      p.drag = 0.6;
+      p.vr = rand(-10, 10);
+      p.rot = Math.random() * 6;
+      p.max = rand(0.4, 0.6);
+      p.delay = i * 0.02;
+      p.s0 = p.s1 = rand(s0, s1);
+      p.sp.tint = colors[(Math.random() * colors.length) | 0] ?? 0xffffff;
+      p.fadeFrom = 0.7;
+    }
+  }
+
+  /** 땀방울 하나가 머리에서 옆으로 톡 (일하는 손님). dir = 튀는 쪽. */
+  sweat(x: number, y: number, dir: number): void {
+    const p = this.spawn(this.tex.emote('sweat'));
+    if (p === null) return;
+    p.x = x;
+    p.y = y;
+    p.vx = dir * rand(50, 90);
+    p.vy = -rand(90, 140);
+    p.g = 520;
+    p.drag = 0.8;
+    p.rot = dir * 0.5;
+    p.max = rand(0.6, 0.8);
+    p.s0 = 15;
+    p.s1 = 11;
+    p.fadeFrom = 0.55;
+  }
+
+  /** 한숨: 작은 회색 김이 천천히 떠올라 사라진다 (기다리는 채무자). dir = 바라보는 쪽. */
+  sigh(x: number, y: number, dir: number): void {
+    const p = this.spawn(this.tex.get('fx', 'fx_puff', 'puff'));
+    if (p === null) return;
+    p.x = x;
+    p.y = y;
+    p.vx = dir * rand(18, 30);
+    p.vy = -rand(26, 40);
+    p.drag = 0.6;
+    p.max = rand(1.1, 1.4);
+    p.s0 = 12;
+    p.s1 = 26;
+    p.vr = rand(-0.6, 0.6);
+    p.sp.tint = 0xc9c6cf;
+    p.fadeFrom = 0.2;
+  }
+
+  /** 호루라기 소리: 짧은 선 셋이 입 앞(dir 쪽)에서 부채꼴로 퍼진다. big = 크게. */
+  toot(x: number, y: number, dir: number, big = false): void {
+    const tex = this.tex.get('fx', 'fx_line', 'line');
+    for (let i = 0; i < 3; i++) {
+      const p = this.spawn(tex);
+      if (p === null) return;
+      // 앞쪽 수평 둘레 -35°·0°·35°.
+      const a = (i - 1) * 0.6;
+      const ca = Math.cos(a) * dir;
+      const sa = Math.sin(a);
+      p.x = x + ca * 10;
+      p.y = y + sa * 10;
+      const v = big ? 200 : 140;
+      p.vx = ca * v;
+      p.vy = sa * v;
+      p.drag = 5;
+      p.rot = Math.atan2(sa, ca);
+      p.max = big ? 0.55 : 0.4;
+      p.delay = big ? i * 0.03 : 0;
+      p.s0 = big ? 22 : 16;
+      p.s1 = big ? 30 : 20;
+      p.fadeFrom = 0.5;
     }
   }
 
@@ -420,7 +541,7 @@ export class FxLayer {
     f.t.visible = true;
     f.t.text = text;
     f.t.style.fill = FLOAT_COLORS[kind];
-    f.t.style.fontSize = big ? 52 : 34;
+    f.t.style.fontSize = FLOAT_SIZE[kind] * (big ? 1.5 : 1);
     f.x = x;
     f.y = y;
     f.life = 0;

@@ -1,7 +1,11 @@
 // UI 글자 만들기 (DOM 없음): 이름, 효과 설명, 손님 상태 글, 기분, 구역·자리 묶기.
 
 import {
+  ACCESSORIES,
+  BANK,
   BOAT,
+  LABOR,
+  PAWN,
   BOOTH_IDS,
   BOOTHS,
   boothDef,
@@ -17,26 +21,31 @@ import {
   RECIPES,
   SPECIES,
   SPECIES_IDS,
+  type AccessoryId,
+  type AccessorySlot,
   type BoothId,
   type BuildingId,
   type GroupBoothId,
   type MaterialId,
   type SpeciesId,
   type StaffStats,
+  type WorkFacility,
 } from '../data/defs.ts';
 import { BOOTH_SPOTS, DISTRICTS, type DistrictId } from '../data/map.ts';
 import { presetPost } from '../sim/staff.ts';
 import { josa } from '../sim/text.ts';
-import type { Candidate, GroupRole, Monster, MonsterPhase, Staff } from '../sim/types.ts';
+import type { Candidate, Errand, GroupRole, Monster, MonsterPhase, Staff } from '../sim/types.ts';
 import { fmt } from './dom.ts';
 
 export const BUILDING_IDS = Object.keys(BUILDINGS) as BuildingId[];
 export const MAT_IDS = Object.keys(MATERIALS) as MaterialId[];
 
 type Named = Readonly<Record<string, { readonly name: string } | undefined>>;
-const NAMED: readonly Named[] = [MATERIALS as Named, PRECIOUS as Named, GOODS as Named];
+/** 일터 연장 (items/hoe·pickaxe, LABOR.facilities[f].tool). */
+const TOOLS: Named = { hoe: { name: '괭이' }, pickaxe: { name: '곡괭이' } };
+const NAMED: readonly Named[] = [MATERIALS as Named, PRECIOUS as Named, GOODS as Named, ACCESSORIES as Named, TOOLS];
 
-/** 아이템 key → 이름 ('coin', mat_*, 귀한 물건, 가공품). */
+/** 아이템 key → 이름 ('coin', mat_*, 귀한 물건, 가공품, 장신구 acc_*, 일터 연장). */
 export function itemName(key: string): string {
   if (key === 'coin') return '코인';
   for (const table of NAMED) {
@@ -51,6 +60,7 @@ export function itemColor(key: string): string {
   if (key === 'coin') return 'var(--dd-gold)';
   if (key in MATERIALS) return 'var(--dd-butter)';
   if (key in PRECIOUS) return 'var(--dd-sky)';
+  if (key in ACCESSORIES) return '#f2c6d6';
   return 'var(--dd-orange)';
 }
 
@@ -107,8 +117,8 @@ export function speciesDistrict(s: SpeciesId): DistrictId {
   return districtAtHall(SPECIES[s].hall) ?? 'core';
 }
 
-/** 특산 재료 → 가져오는 종. */
-export const MATERIAL_SPECIES = {} as Record<MaterialId, SpeciesId>;
+/** 특산 재료 → 가져오는 종 (일터 채소처럼 종의 재료가 아니면 없다). */
+export const MATERIAL_SPECIES = {} as Partial<Record<MaterialId, SpeciesId>>;
 for (const s of SPECIES_IDS) MATERIAL_SPECIES[SPECIES[s].material] = s;
 
 // ── 놀이부스 ──
@@ -277,6 +287,19 @@ export function buildingEffect(id: BuildingId, level: number): string | null {
       const L = BUILDINGS.fountain.levels[i];
       return L ? `손님 기분 1분에 +${L.moodPerMin}` : null;
     }
+    // 넷째 묶음 (DESIGN 3.7)
+    case 'pawnshop': {
+      const L = BUILDINGS.pawnshop.levels[i];
+      return L ? `장신구 값의 ${Math.round(L.pawnRatio * PAWN.loanRatio * 100)}%를 빌려준다 · 되찾는 값 ×${PAWN.redeemMarkup}` : null;
+    }
+    case 'bank': {
+      const L = BUILDINGS.bank.levels[i];
+      return L ? `한 번에 ${BANK.base + level * BANK.perLevel}코인 빌려준다 · 갚을 돈 ×${BANK.interest} (일터가 있어야)` : null;
+    }
+    case 'workyard': {
+      const L = BUILDINGS.workyard.levels[i];
+      return L ? `밭·광산 자리 ${L.workers}개씩 · ${Math.round((LABOR.secPerCoin / L.pace) * 10) / 10}초에 빚 1코인` : null;
+    }
   }
 }
 
@@ -309,15 +332,74 @@ const PHASE: Record<MonsterPhase, string> = {
   resting: '분수 옆에서 쉬는 중',
   spectating: '남의 판 구경 중',
   leaving: '집에 가는 중',
+  toPawnshop: '전당포에 가는 중',
+  atPawnshop: '전당포에서 볼일 보는 중',
+  toBank: '은행에 가는 중',
+  atBank: '은행에서 볼일 보는 중',
+  toWork: '일터로 가는 중',
+  working: '일터에서 빚 갚는 중',
+  waitWork: '일터에서 자리를 기다리는 중',
+  relieved: '빚을 다 갚고 홀가분',
+};
+
+/** 전당포·은행 볼일마다 가는 중·보는 중 글. */
+const ERRAND: Record<Errand, readonly [string, string]> = {
+  pawn: ['장신구를 맡기러 전당포에 가는 중', '전당포에 장신구를 맡기는 중'],
+  redeem: ['장신구를 되찾으러 전당포에 가는 중', '전당포에서 장신구를 되찾는 중'],
+  loan: ['코인을 빌리러 은행에 가는 중', '은행에서 코인을 빌리는 중'],
+  repay: ['빚을 갚으러 은행에 가는 중', '은행에 빚을 갚는 중'],
 };
 
 /** 손님의 지금 할 일 한 줄. */
 export function monsterStatus(m: Monster): string {
   const p = PHASE[m.phase];
+  // 빚 걸기 판에 불린 채무자 (줄다리기·밀어내기)
+  const match = m.bankrupt === true ? (m.labor?.match ?? null) : null;
+  if (match !== null && m.booth === match && (m.phase === 'toSeat' || m.phase === 'playing')) {
+    return m.phase === 'toSeat' ? `${josaRo(BOOTHS[match].name)} 빚 걸고 겨루러 가는 중` : `${BOOTHS[match].name}에서 빚 걸고 겨루는 중`;
+  }
   if (m.booth !== null && (m.phase === 'toBooth' || m.phase === 'queued' || m.phase === 'toSeat' || m.phase === 'playing' || m.phase === 'reacting')) {
     return m.phase === 'toBooth' ? `${josaRo(BOOTHS[m.booth].name)} ${p}` : `${BOOTHS[m.booth].name}에서 ${p}`;
   }
+  const e = m.errand ?? null;
+  if (e !== null && (m.phase === 'toPawnshop' || m.phase === 'toBank')) return ERRAND[e][0];
+  if (e !== null && (m.phase === 'atPawnshop' || m.phase === 'atBank')) return ERRAND[e][1];
+  if (m.bankrupt === true) {
+    switch (m.phase) {
+      case 'reacting':
+        return '빚을 못 갚아 털썩 주저앉았어요…';
+      case 'toWork':
+        return '고개를 푹 숙이고 일터로 가는 중…';
+      case 'working': {
+        const f = m.labor?.facility ?? 'farm';
+        return f === 'mine' ? '광산에서 곡괭이질하며 빚 갚는 중…' : '밭에서 괭이질하며 빚 갚는 중…';
+      }
+      case 'waitWork':
+        return '일터 옆에 쪼그리고 자리를 기다리는 중…';
+      default:
+        break;
+    }
+  }
   return p;
+}
+
+// ── 넷째 묶음: 장신구·전당포·은행·일터 (DESIGN 3.7) ──
+
+/** 장신구가 붙는 자리 이름. */
+export const SLOT_NAME: Record<AccessorySlot, string> = { head: '머리', neck: '목', side: '옆구리' };
+
+/** 장신구 한 줄: '머리 장신구 · 값 20~35' (귀하면 '귀한 머리 장신구'). */
+export function accessoryInfo(k: AccessoryId): string {
+  const d = ACCESSORIES[k];
+  return `${d.rare ? '귀한 ' : ''}${SLOT_NAME[d.slot]} 장신구 · 값 ${d.value[0]}~${d.value[1]}`;
+}
+
+/** 일터 시설 이름 (밭·광산)과 연장 그림 key. */
+export function facilityName(f: WorkFacility): string {
+  return LABOR.facilities[f].name;
+}
+export function facilityTool(f: WorkFacility): string {
+  return LABOR.facilities[f].tool;
 }
 
 /** 기분 0~100 → 이름과 막대 색. */

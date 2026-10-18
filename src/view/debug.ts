@@ -4,7 +4,7 @@
 
 import { Container, Graphics, Text } from 'pixi.js';
 import { BOOTH_IDS } from '../data/defs.ts';
-import { BOAT_COURSE, BOOTH_SPOTS, BUILDING_SPOTS, DIG_FIELD, DISTRICTS, EDGES, KITE_FIELD, NODES, RACE_TRACK, REST_SPOTS, SPARE_LOTS, SSIREUM_RING, TUG_FIELD, boatPoint, trackPoint, type NodeId, type Pt } from '../data/map.ts';
+import { BOAT_COURSE, BOOTH_SPOTS, BUILDING_SPOTS, DIG_FIELD, DISTRICTS, EDGES, KITE_FIELD, NODES, RACE_TRACK, REST_SPOTS, SHOP_SPOTS, SPARE_LOTS, SSIREUM_RING, TUG_FIELD, WORK_YARD, boatPoint, trackPoint, type NodeId, type Pt } from '../data/map.ts';
 import { DISTRICT_IDS, RACE_START_P } from './mapUtil.ts';
 
 const COLORS = {
@@ -136,5 +136,27 @@ export function buildDebugOverlay(): Container {
     g.rect(l.at.x - 12, l.at.y - 12, 24, 24).stroke({ width: 3, color: COLORS.lot });
     root.addChild(label(`빈 부지 (${l.district})`, l.at, COLORS.lot, 15));
   }
+  // 넷째 묶음: 가게 계산대·주인, 일터 자리·기다리는 자리·반장.
+  for (const [shop, sp] of Object.entries(SHOP_SPOTS)) {
+    sp.counter.forEach((p, i) => {
+      g.circle(p.x, p.y, 10).stroke({ width: 3, color: COLORS.seat });
+      root.addChild(label(`${shop === 'pawnshop' ? '전당' : '은행'}${i}`, p, COLORS.seat, 14));
+    });
+    cross(g, sp.npc, 10, COLORS.host);
+    root.addChild(label(sp.art, sp.npc, COLORS.host, 14));
+  }
+  for (const [f, fs] of Object.entries(WORK_YARD.facilities)) {
+    fs.spots.forEach((p, i) => {
+      g.circle(p.x, p.y, 10).stroke({ width: 3, color: COLORS.seat });
+      root.addChild(label(`${f}${i}`, p, COLORS.seat, 14));
+    });
+    fs.wait.forEach((p, i) => {
+      g.rect(p.x - 8, p.y - 8, 16, 16).stroke({ width: 3, color: COLORS.queue });
+      root.addChild(label(`${f}대기${i}`, p, COLORS.queue, 13));
+    });
+    cross(g, fs.face, 8, COLORS.pot);
+  }
+  cross(g, WORK_YARD.foreman, 10, COLORS.host);
+  root.addChild(label('반장', WORK_YARD.foreman, COLORS.host, 14));
   return root;
 }

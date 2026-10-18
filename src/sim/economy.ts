@@ -1,6 +1,6 @@
 // 재화: 비용 확인·지불, 건물 레벨 효과, 재료 창고 한도, 가공품 표.
 
-import { BUILDINGS, GOODS, MATERIALS, PRECIOUS, SPECIES, SPECIES_IDS, type BuildingId, type GoodId, type MaterialId, type PreciousId } from '../data/defs.ts';
+import { BUILDINGS, GOODS, LABOR, MATERIALS, PRECIOUS, SPECIES, SPECIES_IDS, type BuildingId, type GoodId, type MaterialId, type PreciousId } from '../data/defs.ts';
 import type { Cost } from './api.ts';
 import { josa } from './text.ts';
 import type { GameState } from './types.ts';
@@ -17,6 +17,10 @@ export interface BuildingLevel {
   readonly candidates?: number;
   readonly cap?: number;
   readonly moodPerMin?: number;
+  /** 넷째 묶음: 전당포 빌려주는 비율 배수, 일터 시설마다 일하는 자리 수와 빠르기. */
+  readonly pawnRatio?: number;
+  readonly workers?: number;
+  readonly pace?: number;
 }
 
 export function buildingLevels(id: BuildingId): readonly BuildingLevel[] {
@@ -42,6 +46,15 @@ export const officeCandidates = (s: GameState): number => levelDef(s, 'office').
 export const warehouseCap = (s: GameState): number => levelDef(s, 'warehouse').cap ?? 20;
 export const fountainMoodPerMin = (s: GameState): number => levelDef(s, 'fountain').moodPerMin ?? 0;
 
+/** 지었나 (레벨 1 이상). 처음에 없는 건물(defs.ts BUILD_HALL)은 레벨 0 = 빈 부지. */
+export const isBuilt = (s: GameState, id: BuildingId): boolean => (s.buildings[id]?.level ?? 0) >= 1;
+/** 전당포 레벨의 빌려주는 비율 배수 (짓지 않았으면 0). */
+export const pawnRatio = (s: GameState): number => (isBuilt(s, 'pawnshop') ? (levelDef(s, 'pawnshop').pawnRatio ?? 1) : 0);
+/** 일터 시설마다 일하는 자리 수 (짓지 않았으면 0). */
+export const yardWorkers = (s: GameState): number => (isBuilt(s, 'workyard') ? (levelDef(s, 'workyard').workers ?? 2) : 0);
+/** 일터 빠르기 배수 (반장, 일터 레벨). */
+export const yardPace = (s: GameState): number => (isBuilt(s, 'workyard') ? (levelDef(s, 'workyard').pace ?? 1) : 1);
+
 export function costOf(lv: { coins: number; mats?: Partial<Record<MaterialId, number>>; precious?: Partial<Record<PreciousId, number>> }): Cost {
   const c: { coins: number; mats?: Partial<Record<MaterialId, number>>; precious?: Partial<Record<PreciousId, number>> } = { coins: lv.coins };
   if (lv.mats !== undefined && Object.keys(lv.mats).length > 0) c.mats = { ...lv.mats };
@@ -62,7 +75,10 @@ export function missingReason(state: GameState, cost: Cost): string | null {
     const have = state.materials[k] ?? 0;
     if (have < n) {
       const from = SPECIES_IDS.filter((s) => SPECIES[s].material === k).map((s) => SPECIES[s].name);
-      return `${josa(MATERIALS[k].name, '이', '가')} ${n - have}개 모자라요.${from.length > 0 ? ` ${from.join('·')} 손님이 기분 좋게 떠날 때 남겨요.` : ''}`;
+      // 일터에서 나오는 재료 (채소·광석).
+      const yard = Object.values(LABOR.facilities).filter((f) => f.material === k).map((f) => f.name);
+      const hint = [from.length > 0 ? `${from.join('·')} 손님이 기분 좋게 떠날 때 남겨요.` : '', yard.length > 0 ? `일터 ${yard.join('·')}에서도 나와요.` : ''].filter((x) => x !== '').join(' ');
+      return `${josa(MATERIALS[k].name, '이', '가')} ${n - have}개 모자라요.${hint !== '' ? ` ${hint}` : ''}`;
     }
   }
   for (const [k, n] of Object.entries(cost.precious ?? {}) as [PreciousId, number][]) {

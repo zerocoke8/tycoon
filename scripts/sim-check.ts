@@ -8,20 +8,22 @@
 // 모든 모드에서 매 틱 불변식을 검사한다 (NaN, 음수 코인, 멈춘 손님, 자리·줄 어긋남). 어긋나면 바로 멈춘다.
 
 import { Rng } from '../src/core/rng.ts';
-import { BOOTHS, BOOTH_IDS, boothDef, BUILDINGS, DIG, GOODS, GROUP_BOOTHS, GROUP_RULES, HOST_PRESETS, isGroupBooth, KITE, MOOD, ODDS, RACE, RECIPES, SIM, SPECIES_IDS, SSIREUM, TUG, WHEEL, type BoothId, type BuildingId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type SpeciesId, type TraitId } from '../src/data/defs.ts';
+import { ACCESSORIES, ACCESSORY_SPAWN, BANK, LABOR, PAWN, VAULT, type AccessoryId, BOOTHS, BOOTH_IDS, boothDef, BUILDINGS, DEBT_MATCH, DIG, GOODS, GROUP_BOOTHS, GROUP_RULES, HOST_PRESETS, isGroupBooth, KITE, MOOD, ODDS, RACE, RECIPES, SIM, SPECIES_IDS, SSIREUM, TUG, WHEEL, type BoothId, type BuildingId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type SpeciesId, type TraitId } from '../src/data/defs.ts';
 import { devOpenAll } from '../src/sim/dev.ts';
 import { decideOutcome } from '../src/sim/games.ts';
 import { boothStat, minPlayCost } from '../src/sim/booths.ts';
 import { digNear, groupGame, raceOf, sideSign, trackAt, tugLineup } from '../src/sim/group/index.ts';
 import { COMEBACK_KEY_INDEX, generateRace, raceGatherSec, raceOutcome, racePlace, raceProgress, RACERS, raceStandings, raceTier } from '../src/sim/race.ts';
-import { cheerKey, detailKeys, groupReactionLabels, moodDelta, pickReaction, reactionKeys, reactionLabels } from '../src/sim/reactions.ts';
+import { cheerKey, DEBT_REACT_KINDS, debtReactionLabels, detailKeys, groupReactionLabels, moodDelta, pickReaction, reactionKeys, reactionLabels } from '../src/sim/reactions.ts';
 import { normalizeState } from '../src/sim/save.ts';
+import { bankLoan, bankOpenFor, canLend, laborRate, loanDebt, pairDebtors, pawnPrice, redeemCost, rollAccessories, wantMore, workSlots } from '../src/sim/debt.ts';
+import { createMonster } from '../src/sim/monsters.ts';
 import { presetPost } from '../src/sim/staff.ts';
 import { BOOTH_SPOTS, DISTRICTS, NODES, type DistrictId, type NodeId } from '../src/data/map.ts';
 import { crossesBooth, distancesFrom } from '../src/sim/path.ts';
 import { clearSave, loadGame, newGame, saveGame, Sim } from '../src/sim/sim.ts';
 import { TUNE } from '../src/sim/tuning.ts';
-import type { GameState, GroupEntry, GroupEvent, GroupKey, GroupPlay, GroupState, Monster, MonsterPhase, RacerIndex, RoundOutcome, SimEvents } from '../src/sim/types.ts';
+import type { GameState, GroupEntry, GroupEvent, GroupKey, GroupPlay, GroupState, Monster, MonsterId, MonsterPhase, RacerIndex, RoundOutcome, SimEvents } from '../src/sim/types.ts';
 
 declare const process: { argv: string[]; exitCode?: number };
 
@@ -44,10 +46,20 @@ const WALK_MAX_SEC = (() => {
   return far / Math.min(SIM.walkSpeed, SIM.floatSpeed);
 })();
 /** 이 phase 말고는 한 phase에 STUCK_SEC 넘게 머물면 멈춘 것 (가장 먼 길을 걷는 시간보다 넉넉히). */
-const LONG_OK: ReadonlySet<MonsterPhase> = new Set(['queued', 'resting']);
+const LONG_OK: ReadonlySet<MonsterPhase> = new Set(['queued', 'resting', 'working', 'waitWork']);
 const STUCK_SEC = Math.max(120, WALK_MAX_SEC * 1.25 + 20);
 /** 온 때부터 머무는 최대 시간 + 줄에서 기다리는 시간 + 입구까지 걷는 시간. 이보다 오래 있으면 떠나지 못한 것. */
-const MAX_AGE = TUNE.maxStaySec + TUNE.queueGiveUpSec + WALK_MAX_SEC + 60;
+// 넷째 묶음: 떠나기 전 볼일(갚기·되찾기)로 가게 둘을 들를 수 있다 (걷기 둘 + 계산대 + 반응). 파산했던 손님은 빚을 다 갚을 때까지 머문다 (따로 잰다).
+const MAX_AGE = TUNE.maxStaySec + TUNE.queueGiveUpSec + WALK_MAX_SEC * 3 + 90;
+/** 파산·일터에서 머물 수 있는 phase. */
+const DEBT_PHASES: ReadonlySet<MonsterPhase> = new Set(['reacting', 'toWork', 'working', 'waitWork', 'toSeat', 'playing']);
+/**
+ * 파산한 손님이 일터에 머물 수 있는 가장 긴 초: 반장이 남은 빚을 덜어 주는 때 (LABOR.forgiveSec, 일터에서 일하거나 기다릴 때 본다)
+ * + 그때 빚 걸기 판에 불려 가 있었다면 판 (모이기 maxWaitSec + 판 + 반응) + 오가는 걸음 (느린 걸음).
+ */
+const BANKRUPT_MAX = LABOR.forgiveSec + DEBT_MATCH.maxWaitSec + 60 + (WALK_MAX_SEC * 2) / LABOR.walkMult + 30;
+/** 빚이 이보다 커지지 않는다: 은행 대출 하나 (가장 높은 은행 레벨) 또는 빚 걸기 판의 maxDebt. */
+const DEBT_CAP = Math.max(DEBT_MATCH.maxDebt, loanDebt(BANK.base + (BUILDINGS.bank.levels.length) * BANK.perLevel));
 
 function fail(msg: string, st: GameState): never {
   console.error(`\n불변식 어긋남 (t=${st.time.toFixed(1)}s): ${msg}`);
@@ -87,12 +99,29 @@ function checkInvariants(sim: Sim): void {
       fail(`손님 ${m.id}가 ${m.phase}에 ${pt.toFixed(0)}초 멈춤 (path ${m.path.length}, booth ${m.booth}, seat ${m.seat}${gs})`, st);
     }
     const age = st.time - (m.born ?? st.time);
-    if (age > MAX_AGE) fail(`손님 ${m.id}가 ${age.toFixed(0)}초째 떠나지 않음 (phase ${m.phase})`, st);
+    if (age > MAX_AGE && m.wasBankrupt !== true) fail(`손님 ${m.id}가 ${age.toFixed(0)}초째 떠나지 않음 (phase ${m.phase})`, st);
+    // 넷째 묶음: 빚·장신구·일
+    finite(m.debt, `손님 ${m.id} 빚`, st);
+    if (m.debt < 0) fail(`손님 ${m.id} 빚이 음수 (${m.debt})`, st);
+    if (m.debt > DEBT_CAP) fail(`손님 ${m.id} 빚 ${m.debt} > ${DEBT_CAP}`, st);
+    // 몸에 단 것과 맡긴 것을 합쳐도 자리마다 하나 (맡기면 빠지고 되찾으면 다시).
+    if (new Set([...m.accessories, ...m.pawned].map((a) => a.slot)).size !== m.accessories.length + m.pawned.length) fail(`손님 ${m.id} 장신구 자리가 겹침`, st);
+    if (m.declined !== undefined && m.declined !== null && m.declined !== 'low' && m.declined !== 'broke') fail(`손님 ${m.id} declined ${String(m.declined)}`, st);
+    if (m.loans !== undefined && m.loans > BANK.maxLoans) fail(`손님 ${m.id} 대출 ${m.loans}번`, st);
+    for (const t of m.pawned) if (!(t.price > 0)) fail(`손님 ${m.id} 맡긴 장신구 값 ${t.price}`, st);
+    if (m.bankrupt === true) {
+      if (!m.labor) fail(`파산한 손님 ${m.id}의 일이 없음`, st);
+      if (!DEBT_PHASES.has(m.phase)) fail(`파산한 손님 ${m.id}가 ${m.phase}`, st);
+      if (m.pawned.length > 0) fail(`파산한 손님 ${m.id}에게 맡긴 장신구가 남음`, st);
+      const since = m.labor?.since;
+      if (since !== undefined && st.time - since > BANKRUPT_MAX) fail(`파산한 손님 ${m.id}가 ${(st.time - since).toFixed(0)}초째 풀려나지 않음 (${m.phase}, 빚 ${m.debt})`, st);
+    } else if (m.labor) fail(`파산하지 않은 손님 ${m.id}에게 일이 남음`, st);
+    if ((m.phase === 'toPawnshop' || m.phase === 'atPawnshop' || m.phase === 'toBank' || m.phase === 'atBank') && !m.errand) fail(`손님 ${m.id}가 볼일 없이 ${m.phase}`, st);
     const group = m.booth !== null ? st.booths[m.booth].group : null;
     if (m.phase === 'playing' && group !== null) {
       // 단체 놀이: 모이는 중이면 참가자, 진행 중이면 참가자(한판 있음)나 다음 판을 기다리는 손님, 결과 중이면 기다리는 손님.
       const entry = group.participants.find((e) => e.monster === m.id);
-      if (group.phase === 'idle') fail(`손님 ${m.id}가 쉬는 ${m.booth}에서 playing`, st);
+      if (group.phase === 'idle' && group.debtNext !== true) fail(`손님 ${m.id}가 쉬는 ${m.booth}에서 playing`, st);
       if (group.phase === 'gathering' && entry === undefined) fail(`손님 ${m.id}가 모이는 ${m.booth}에 참가하지 않고 앉아 있음`, st);
       if (group.phase === 'running' && entry !== undefined) {
         const r = st.booths[m.booth!].rounds[entry.seat];
@@ -137,8 +166,10 @@ function checkInvariants(sim: Sim): void {
       finite(group.countdown, `${b} 단체 놀이 countdown`, st);
       finite(group.elapsed, `${b} 단체 놀이 elapsed`, st);
       if (group.phase === 'idle' && (group.participants.length > 0 || group.play !== null)) fail(`${b} 쉬는 판에 참가자·결과가 남음`, st);
-      if (group.phase === 'gathering' && (group.participants.length === 0 || group.play !== null || group.countdown > rules.gatherSec * (1 + 2 * rules.gatherPacePerPoint) + 1e-6)) fail(`${b} 모이는 판이 어긋남`, st);
-      if (group.phase === 'gathering' && group.elapsed > rules.maxWaitSec + rules.gatherSec + 1) fail(`${b} 모이는 판이 너무 오래 (${group.elapsed.toFixed(0)}초)`, st);
+      const debtMode = group.mode === 'debt';
+      if (group.phase === 'gathering' && ((group.participants.length === 0 && !debtMode) || group.play !== null || group.countdown > rules.gatherSec * (1 + 2 * rules.gatherPacePerPoint) + 1e-6)) fail(`${b} 모이는 판이 어긋남`, st);
+      if (group.phase === 'gathering' && group.elapsed > (debtMode ? DEBT_MATCH.maxWaitSec : rules.maxWaitSec) + rules.gatherSec + 1) fail(`${b} 모이는 판이 너무 오래 (${group.elapsed.toFixed(0)}초)`, st);
+      if (debtMode && (group.phase === 'idle' || !(group.debtors?.length ?? 0))) fail(`${b} 빚 걸기 판이 어긋남 (${group.phase})`, st);
       if ((group.phase === 'running' || group.phase === 'done') && (group.play === null || group.play.outcomes.length !== group.participants.length || group.play.kind !== b)) fail(`${b} 진행 중인 판에 결과가 없거나 참가자와 어긋남`, st);
       if (group.phase === 'running' && group.elapsed > group.duration + 1e-6) fail(`${b} 판이 끝나지 않음`, st);
       if (new Set(group.participants.map((e) => e.seat)).size !== group.participants.length) fail(`${b} 참가자 자리가 겹침`, st);
@@ -148,7 +179,7 @@ function checkInvariants(sim: Sim): void {
         for (const e of group.participants) {
           const m = sim.monster(e.monster);
           if (group.phase === 'gathering' && (!m || m.booth !== b || m.seat !== e.seat || m.phase !== 'playing')) fail(`${b} 모이는 판 참가자 ${e.monster}가 자리에 없음`, st);
-          if (!Number.isInteger(e.pick) || e.pick < 0 || e.pick >= groupGame(b).picks || !(e.bet >= 1)) fail(`${b} 참가 ${e.monster} 고른 것·건 코인 (${e.pick}, ${e.bet})`, st);
+          if (!Number.isInteger(e.pick) || e.pick < 0 || e.pick >= groupGame(b).picks || !(e.bet >= 1 || (e.debt !== undefined && e.bet === 0))) fail(`${b} 참가 ${e.monster} 고른 것·건 코인 (${e.pick}, ${e.bet})`, st);
         }
       }
     }
@@ -158,6 +189,16 @@ function checkInvariants(sim: Sim): void {
     if (st.booths[s.post.booth].staff[s.post.role] !== s.id) fail(`진행자 ${s.id}의 자리(${s.post.booth}.${s.post.role})가 어긋남`, st);
   }
   for (const m of st.monsters) if (!(m.mats >= 0)) fail(`손님 ${m.id} 재료 ${m.mats}`, st);
+  // 일터: 일하는 자리는 한 사람씩.
+  const spots = new Set<string>();
+  for (const m of st.monsters) {
+    const lab = m.labor;
+    if (!lab || lab.spot < 0 || lab.match !== null) continue;
+    const k = `${lab.facility}${lab.spot}`;
+    if (spots.has(k)) fail(`일터 자리 ${k}에 둘`, st);
+    spots.add(k);
+  }
+  for (const [k, v] of Object.entries(st.pawnCollection)) if (!(v !== undefined && v >= 1 && Number.isInteger(v))) fail(`전당포 컬렉션 ${k} = ${v}`, st);
 }
 
 // ── 공통: 이벤트 모으기 ─────────────────────────────────────────────────
@@ -234,6 +275,7 @@ function runReport(seed: number, minutes: number, chief: ((sim: Sim, log: (s: st
   console.log(`재료 ${JSON.stringify(st.materials)}`);
   console.log(`귀한 물건 ${JSON.stringify(st.precious)}, 가공품 ${JSON.stringify(st.goods)}`);
   console.log(`항아리 ${BOOTH_IDS.map((b) => `${b}:${st.booths[b].pot}`).join(' ')}`);
+  console.log(`넷째 묶음 ${debtLine(st)}`);
   console.log(`본 반응 ${labels.size}가지: ${[...labels].join(', ')}`);
   if (events.length > 0) {
     console.log('\n촌장의 기록:');
@@ -284,14 +326,21 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
     // 간식: 슬픈 손님, 빈털터리로 떠나는 손님.
     const snack = (['snack_ricecake', 'snack_cookie'] as GoodId[]).find((g) => st.goods[g] > 0);
     if (snack !== undefined) {
-      const sad = st.monsters.find((m) => !m.snacked && (m.mood < 35 || (m.phase === 'leaving' && m.broke)));
-      if (sad !== undefined && sim.giveSnack(sad.id, snack).ok) log(`간식(${GOODS[snack].name}) → 손님 ${sad.id} (기분 ${sad.mood.toFixed(0)}, ${sad.phase})`);
+      // 일터의 채무자는 늘 축 처져 있다 (기분이 낮다): 간식은 가끔만 (일이 1.5배 빨라진다).
+      const sad = st.monsters.find((m) => !m.snacked && m.bankrupt !== true && (m.mood < 35 || (m.phase === 'leaving' && m.broke)));
+      const worker = rng.chance(0.02) ? st.monsters.find((m) => !m.snacked && m.phase === 'working') : undefined;
+      const to = sad ?? worker;
+      if (to !== undefined && sim.giveSnack(to.id, snack).ok) log(`간식(${GOODS[snack].name}) → 손님 ${to.id} (기분 ${to.mood.toFixed(0)}, ${to.phase})`);
     }
 
-    // 응원 톡: 3초에 한 번쯤, 기분이 낮은 손님부터.
+    // 응원 톡: 3초에 한 번쯤, 기분이 낮은 손님부터 (채무자는 따로 30초에 한 번쯤: 늘 기분이 낮아 응원을 다 가져가지 않게).
     if (rng.chance(0.33) && st.monsters.length > 0) {
-      const pick = [...st.monsters].filter((m) => m.cheerCooldown <= 0 && m.phase !== 'leaving').sort((a, b) => a.mood - b.mood)[0];
+      const pick = [...st.monsters].filter((m) => m.cheerCooldown <= 0 && m.phase !== 'leaving' && m.bankrupt !== true).sort((a, b) => a.mood - b.mood)[0];
       if (pick !== undefined) sim.cheer(pick.id);
+    }
+    if (rng.chance(0.03)) {
+      const w = st.monsters.find((m) => m.phase === 'working' && m.cheerCooldown <= 0);
+      if (w !== undefined) sim.cheer(w.id);
     }
 
     // 응원 도구: 가장 바쁜 열린 부스에.
@@ -309,6 +358,12 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
       return true;
     };
     if (buy(`hall${st.buildings.hall.level + 1}`, `회관 → ${st.buildings.hall.level + 1}`, () => sim.upgradeBuilding('hall'))) return;
+    // --debt-build: 전당포·일터·은행을 지을 수 있게 되면 바로 짓는다 (넷째 묶음 흐름이 돈에 미치는 영향 보기).
+    if (flag('debt-build')) {
+      for (const id of ['pawnshop', 'workyard', 'bank'] as BuildingId[]) {
+        if (st.buildings[id].level < 1 && sim.buildingLockReason(id) === null && buy(`build-${id}`, `짓기 ${id}`, () => sim.upgradeBuilding(id))) return;
+      }
+    }
     // 이미 열 수 있는 단체 놀이(회관 1 밀어내기, 회관 2 오리배 …)와, 회관 2부터 막 열린 구역의 부스(회관 2 오리 낚시·고리 던지기,
     // 회관 3 경주장·연날리기, 회관 4 인형 뽑기·복주머니, 회관 5 줄다리기·보물찾기)는 다음 회관보다 먼저 연다 (귀한 물건이 있으면 코인을 모은다).
     let saving = false;
@@ -369,6 +424,15 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
     if (saving) return;
     const lines: [string, string, () => { ok: boolean }][] = [
       ['gate', '입구 업그레이드', () => sim.upgradeBuilding('gate')],
+      // 넷째 묶음: 전당포 → 일터 → 은행 (은행은 일터가 있어야 빌려준다).
+      // --no-debt: 넷째 묶음 건물을 짓지 않는다 (넷째 묶음이 회관 시각에 주는 영향 비교).
+      ...(flag('no-debt')
+        ? []
+        : ([
+            ['pawnshop', '전당포', () => sim.upgradeBuilding('pawnshop')],
+            ['workyard', '일터', () => sim.upgradeBuilding('workyard')],
+            ['bank', '은행', () => sim.upgradeBuilding('bank')],
+          ] as [string, string, () => { ok: boolean }][])),
       ...BOOTH_IDS.map((b) => [`up-${b}`, `부스 업그레이드 ${b}`, () => sim.upgradeBooth(b)] as [string, string, () => { ok: boolean }]),
       ['workshop', '공방 업그레이드', () => sim.upgradeBuilding('workshop')],
       ['office', '사무소 업그레이드', () => sim.upgradeBuilding('office')],
@@ -388,6 +452,151 @@ function makeGreedyChief(seed: number, milestones: Map<string, number> = new Map
 }
 
 // ── --auto --seeds N: 여러 시드의 이정표 (분) ───────────────────────────
+
+/** 넷째 묶음 누적 기록 한 줄. */
+function debtLine(st: GameState): string {
+  const d = st.debtTotals;
+  const lv = `전당포${st.buildings.pawnshop.level}/은행${st.buildings.bank.level}/일터${st.buildings.workyard.level}`;
+  const working = st.monsters.filter((m) => m.bankrupt === true).length;
+  return `${lv} 맡김 ${d.pawned} 되찾음 ${d.redeemed} 컬렉션 ${d.forfeited} 대출 ${d.loans} 갚음 ${d.repaid} 파산 ${d.bankrupt} 다 갚음 ${d.relieved} (반장이 덜어 줌 ${d.forgiven}) 일하는 중 ${working} 빚 걸기 판 ${d.matches} 일터 재료 ${d.laborMats}`;
+}
+
+/**
+ * 넷째 묶음 흐름 재기 (이벤트로): 파산마다 빚과 일한 시간 (파산 → 다 갚음), 일하는 채무자 수 (평균·가장 많이), 금고가 가장 적었을 때,
+ * 맡긴 장신구 장부 (맡김 = 되찾음 + 컬렉션 + 아직 맡긴 것, 하나가 두 번 끝나지 않는다), 빚 걸기 판 정산.
+ * from = 셈을 시작한 때 (일터를 지은 때, 없으면 처음).
+ */
+interface DebtTally {
+  bankruptAt: Map<number, number>;
+  stints: number[];
+  debts: number[];
+  workerSec: number;
+  maxWorkers: number;
+  /** 일터를 지은 뒤 지난 초 (평균 일하는 채무자 수의 분모). */
+  yardSec: number;
+  minCoins: number;
+  /** 손님마다 맡긴 장신구 (key 목록): 되찾거나 컬렉션에 들어가면 하나씩 지운다. */
+  tickets: Map<number, string[]>;
+  ledgerErrors: string[];
+  matchChanges: { before: number; after: number; tier: OutcomeTier }[];
+  refusals: number;
+  /** 금고: 빌려준 코인 (맡김·대출), 돌아온 코인 (되찾음·갚음·파산 때 낸 지갑). */
+  lent: number;
+  back: number;
+  /** 일터를 지은 뒤 은행 대출 하나를 빌려줄 수 있던 초 (금고 = 마을 코인). */
+  vaultOkSec: number;
+  /** 파산한 손님이 phase마다 보낸 초 (일터로 걷기·일하기·기다리기·빚 걸기 판 …). */
+  phaseSec: Map<string, number>;
+  /** 일터를 지은 뒤 떠난 손님: 모두, 돈이 떨어진 적이 있음 (끈기가 남았을 때), 더 놀기 싫다고 함, 전당포·은행에 감. */
+  funnel: { left: number; short: number; declined: number; sought: number };
+  shortIds: Set<number>;
+  declinedIds: Set<number>;
+  soughtIds: Set<number>;
+}
+
+function tallyDebt(sim: Sim): DebtTally {
+  const t: DebtTally = { bankruptAt: new Map(), stints: [], debts: [], workerSec: 0, maxWorkers: 0, yardSec: 0, minCoins: Infinity, tickets: new Map(), ledgerErrors: [], matchChanges: [], refusals: 0, lent: 0, back: 0, vaultOkSec: 0, phaseSec: new Map(), funnel: { left: 0, short: 0, declined: 0, sought: 0 }, shortIds: new Set(), declinedIds: new Set(), soughtIds: new Set() };
+  // 빌려준 뒤에도 금고에 VAULT.reserve가 남는다 (빌려주기가 금고를 바닥내지 않는다).
+  const vault = (what: string) => {
+    if (sim.state.coins < VAULT.reserve) t.ledgerErrors.push(`${what} 뒤 금고 ${sim.state.coins} < ${VAULT.reserve}`);
+  };
+  sim.bus.on('pawned', (e) => {
+    t.lent += e.price;
+    vault('맡김');
+  });
+  sim.bus.on('loanTaken', (e) => {
+    t.lent += e.amount;
+    vault('대출');
+  });
+  sim.bus.on('redeemed', (e) => (t.back += e.cost));
+  sim.bus.on('loanRepaid', (e) => (t.back += e.amount));
+  sim.bus.on('bankrupt', (e) => {
+    t.back += e.paid;
+    t.bankruptAt.set(e.id, sim.state.time);
+    t.debts.push(e.debt);
+    // 파산하면 맡긴 장신구는 컬렉션으로 (pawnCollected가 그 앞뒤에 난다): 장부는 pawnCollected가 지운다.
+  });
+  sim.bus.on('debtCleared', (e) => {
+    const at = t.bankruptAt.get(e.id);
+    if (at !== undefined) t.stints.push(sim.state.time - at);
+    t.bankruptAt.delete(e.id);
+  });
+  sim.bus.on('pawned', (e) => {
+    const list = t.tickets.get(e.id) ?? [];
+    list.push(e.key);
+    t.tickets.set(e.id, list);
+  });
+  sim.bus.on('redeemed', (e) => {
+    const list = t.tickets.get(e.id) ?? [];
+    const i = list.indexOf(e.key);
+    if (i < 0) t.ledgerErrors.push(`손님 ${e.id}가 맡기지 않은 ${e.key}를 되찾음`);
+    else list.splice(i, 1);
+  });
+  sim.bus.on('pawnCollected', (e) => {
+    if (e.from === undefined) return;
+    const list = t.tickets.get(e.from) ?? [];
+    const i = list.indexOf(e.key);
+    if (i < 0) t.ledgerErrors.push(`손님 ${e.from}가 맡기지 않은 ${e.key}가 컬렉션에`);
+    else list.splice(i, 1);
+  });
+  sim.bus.on('monsterLeft', (e) => {
+    const m = sim.monster(e.id);
+    const left = t.tickets.get(e.id) ?? [];
+    if (left.length > 0 || (m !== undefined && m.pawned.length > 0)) t.ledgerErrors.push(`손님 ${e.id}가 맡긴 장신구 ${left.join(',')}를 남기고 떠남`);
+    if (m !== undefined && (m.debt > 0 || m.bankrupt === true)) t.ledgerErrors.push(`손님 ${e.id}가 빚 ${m.debt}을 남기고 떠남`);
+    t.tickets.delete(e.id);
+    if (sim.state.buildings.workyard.level >= 1) {
+      t.funnel.left++;
+      if (t.shortIds.has(e.id)) t.funnel.short++;
+      if (t.declinedIds.has(e.id)) t.funnel.declined++;
+      if (t.soughtIds.has(e.id)) t.funnel.sought++;
+    }
+    t.shortIds.delete(e.id);
+    t.declinedIds.delete(e.id);
+    t.soughtIds.delete(e.id);
+  });
+  sim.bus.on('debtSettled', (e) => {
+    for (const c of e.changes) t.matchChanges.push({ before: c.before, after: c.after, tier: c.tier });
+  });
+  sim.bus.on('vaultEmpty', () => t.refusals++);
+  return t;
+}
+
+/** 매 틱 (dt초): 일하는 채무자 수와 금고. */
+function sampleDebt(t: DebtTally, st: GameState, dt: number): void {
+  if (st.buildings.workyard.level < 1) return;
+  const n = st.monsters.filter((m) => m.bankrupt === true).length;
+  t.workerSec += n * dt;
+  t.yardSec += dt;
+  t.maxWorkers = Math.max(t.maxWorkers, n);
+  if (canLend(st, Math.max(1, bankLoan(st)))) t.vaultOkSec += dt;
+  const min = minPlayCost(st);
+  for (const m of st.monsters) {
+    if (m.bankrupt === true) {
+      const k = m.labor?.match ? `판:${m.phase}` : m.phase;
+      t.phaseSec.set(k, (t.phaseSec.get(k) ?? 0) + dt);
+    }
+    if (m.bankrupt === true || m.phase === 'leaving') continue;
+    const start = m.wallet + m.stats.spent - m.stats.won;
+    if (m.patience > 0 && m.wallet < Math.max(min, start * PAWN.lowFrac)) t.shortIds.add(m.id);
+    if (m.declined) t.declinedIds.add(m.id);
+    if (m.errand === 'pawn' || m.errand === 'loan') t.soughtIds.add(m.id);
+  }
+  if (st.buildings.pawnshop.level >= 1 || st.buildings.bank.level >= 1) t.minCoins = Math.min(t.minCoins, st.coins);
+}
+
+/** 맡긴 장신구 장부가 맞나 (끝에): 남은 표 = 마을에 있는 손님의 m.pawned. */
+function checkLedger(sim: Sim, t: DebtTally): string[] {
+  const errs = [...t.ledgerErrors];
+  for (const [id, list] of t.tickets) {
+    const m = sim.monster(id);
+    const have = (m?.pawned ?? []).map((x) => x.key as string).sort().join(',');
+    if (have !== [...list].sort().join(',')) errs.push(`손님 ${id} 장부 ${list.join(',')} ≠ 맡긴 것 ${have}`);
+  }
+  const d = sim.state.debtTotals;
+  if (d.pawned !== d.redeemed + d.forfeited + sim.state.monsters.reduce((s, m) => s + m.pawned.length, 0)) errs.push(`맡김 ${d.pawned} ≠ 되찾음 ${d.redeemed} + 컬렉션 ${d.forfeited} + 아직 맡긴 것`);
+  return errs;
+}
 
 /** 정렬된 목록의 q 분위 (없으면 NaN). */
 function quantile(xs: readonly number[], q: number): number {
@@ -447,19 +656,24 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
   /** 단체 놀이마다 시드의 판 평균 참가자·접힌 판 비율 (판이 5번 넘은 시드만). */
   const groupAvg = new Map<GroupBoothId, { avg: number[]; fold: number[] }>();
   const needAll = new Map<string, number[]>();
+  const debtRows: DebtRow[] = [];
   for (let seed = first; seed < first + count; seed++) {
     const sim = new Sim(newGame(seed));
+    // --open-all: 처음부터 다 열린 마을 (회관 5, 전당포·은행·일터 끝까지, devOpenAll). 넷째 묶음 수치를 큰 마을에서 본다.
+    if (flag('open-all')) devOpenAll(sim);
     const ms = new Map<string, number>();
     const chief = makeGreedyChief(seed, ms);
     const all = zeroTally();
     listen(sim, zeroTally(), all, new Set());
     const tb = tallyBooths(sim);
+    const dt = tallyDebt(sim);
     const openedAt = new Map<BoothId, number>();
     const need = new Map<string, number>();
     const n = Math.round((minutes * 60) / SIM.dt);
     for (let i = 0; i < n; i++) {
       sim.tick(SIM.dt);
       checkInvariants(sim);
+      sampleDebt(dt, sim.state, SIM.dt);
       if (i % Math.round(1 / SIM.dt) === 0) {
         chief(sim, () => {});
         for (const b of BOOTH_IDS) if (!openedAt.has(b) && sim.boothOpen(b)) openedAt.set(b, sim.state.time);
@@ -509,6 +723,12 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
     const p = st.precious;
     const race = tb.races > 0 ? `${tb.races}판 ${(tb.runners / tb.races).toFixed(1)}/${tb.maxRunners}` : '-';
     console.log(`${pad(seed, 4)} ${cells.join('')} ${pad(st.coins, 6)}  ${pad(`${p.gem}/${p.golden_acorn}/${p.star_piece}`, 10)}  ${pad((all.moodSum / Math.max(1, all.left)).toFixed(0), 4)}  ${pad(all.broke, 4)}  ${race}`);
+    if (flag('debt')) {
+      console.log(`     ${debtLine(st)}`);
+      const row = debtRow(sim, dt);
+      console.log(`     ${row.text}`);
+      debtRows.push(row);
+    }
   }
   const fmt = (v: number) => (Number.isFinite(v) ? v.toFixed(1) : '-');
   console.log(`p25  ${keys.map((k) => fmt(quantile(sums.get(k) ?? [], 0.25)).padStart(7)).join('')}`);
@@ -523,6 +743,56 @@ function runSeeds(count: number, minutes: number, detail = false, first = 1): vo
   }
   if (runnerAvg.length > 0) console.log(`경주 한 번 평균 참가자 (시드 중간): ${fmt(quantile(runnerAvg, 0.5))}`);
   console.log(`단체 놀이 한 판 평균 참가자 / 접힌 판 비율 (시드 중간, 판이 5번 넘은 시드 수): ${GROUP_BOOTHS.map((b) => { const r = groupAvg.get(b); return r === undefined ? `${b} -` : `${b} ${fmt(quantile(r.avg, 0.5))}/${(quantile(r.fold, 0.5) * 100).toFixed(0)}% (${r.avg.length})`; }).join('  ')}`);
+  if (debtRows.length > 0) debtSummary(debtRows);
+}
+
+/** 시드 하나의 넷째 묶음 수치 (일터를 지은 뒤 30분마다로 맞춘다). */
+interface DebtRow {
+  text: string;
+  per30: { pawned: number; forfeited: number; loans: number; bankrupt: number; matches: number };
+  stints: number[];
+  debts: number[];
+  avgWorkers: number;
+  maxWorkers: number;
+  minCoins: number;
+  ledger: number;
+  funnel: DebtTally['funnel'];
+  phaseSec: Map<string, number>;
+  refusals: number;
+}
+
+function debtRow(sim: Sim, t: DebtTally): DebtRow {
+  const st = sim.state;
+  const d = st.debtTotals;
+  const k = t.yardSec > 60 ? 1800 / t.yardSec : NaN;
+  const per30 = { pawned: d.pawned * k, forfeited: d.forfeited * k, loans: d.loans * k, bankrupt: d.bankrupt * k, matches: d.matches * k };
+  const avgWorkers = t.yardSec > 0 ? t.workerSec / t.yardSec : 0;
+  const ledger = checkLedger(sim, t).length;
+  const f = (v: number) => (Number.isFinite(v) ? v.toFixed(1) : '-');
+  const stint = t.stints.length > 0 ? `${f(quantile(t.stints, 0.5) / 60)}/${f(quantile(t.stints, 0.9) / 60)}분` : '-';
+  const text = `일터 ${f(t.yardSec / 60)}분 · 30분마다 맡김 ${f(per30.pawned)} 컬렉션 ${f(per30.forfeited)} 대출 ${f(per30.loans)} 파산 ${f(per30.bankrupt)} 빚 걸기 ${f(per30.matches)} · 일한 시간 중간/p90 ${stint} · 빚 중간 ${f(quantile(t.debts, 0.5))} · 채무자 평균 ${avgWorkers.toFixed(2)} 최대 ${t.maxWorkers} · 금고 최저 ${Number.isFinite(t.minCoins) ? t.minCoins : '-'} · 금고가 모자람 ${t.refusals} · 빌려줌 ${t.lent} 돌아옴 ${t.back} · 빌려줄 수 있던 때 ${((t.vaultOkSec / Math.max(1, t.yardSec)) * 100).toFixed(0)}%${ledger > 0 ? ` · 장부 어긋남 ${ledger}` : ''}`;
+  const fn = t.funnel;
+  return { text: `${text} · 떠난 손님 ${fn.left} (돈이 떨어짐 ${fn.short}, 싫다 ${fn.declined}, 빌리러 감 ${fn.sought})`, per30, stints: t.stints, debts: t.debts, avgWorkers, maxWorkers: t.maxWorkers, minCoins: t.minCoins, ledger, funnel: fn, phaseSec: t.phaseSec, refusals: t.refusals };
+}
+
+function debtSummary(rows: readonly DebtRow[]): void {
+  const fmt = (v: number) => (Number.isFinite(v) ? v.toFixed(1) : '-');
+  const q = (xs: number[]) => {
+    const ok = xs.filter(Number.isFinite);
+    return `${fmt(quantile(ok, 0.25))}/${fmt(quantile(ok, 0.5))}/${fmt(quantile(ok, 0.75))}`;
+  };
+  const per = (k: keyof DebtRow['per30']) => q(rows.map((r) => r.per30[k]));
+  const stints = rows.flatMap((r) => r.stints).map((s) => s / 60);
+  console.log('\n넷째 묶음 (일터를 지은 뒤 30분마다, 시드 p25/중간/p75):');
+  console.log(`  맡김 ${per('pawned')}  컬렉션 ${per('forfeited')}  대출 ${per('loans')}  파산 ${per('bankrupt')}  빚 걸기 판 ${per('matches')}`);
+  console.log(`  일한 시간 (분, 모든 파산) p10/중간/p90 ${fmt(quantile(stints, 0.1))}/${fmt(quantile(stints, 0.5))}/${fmt(quantile(stints, 0.9))} (${stints.length}번), 빚 중간 ${fmt(quantile(rows.flatMap((r) => r.debts), 0.5))}`);
+  const ps = new Map<string, number>();
+  for (const r of rows) for (const [k, v] of r.phaseSec) ps.set(k, (ps.get(k) ?? 0) + v);
+  const psTotal = [...ps.values()].reduce((a, b) => a + b, 0);
+  console.log(`  채무자가 보낸 시간: ${[...ps.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${((v / Math.max(1, psTotal)) * 100).toFixed(0)}%`).join(', ')}`);
+  const fsum = (k: keyof DebtTally['funnel']) => rows.reduce((sum, r) => sum + r.funnel[k], 0);
+  console.log(`  떠난 손님 ${fsum('left')}: 돈이 떨어진 적 ${fsum('short')}, 더 놀기 싫다 ${fsum('declined')}, 전당포·은행에 감 ${fsum('sought')}`);
+  console.log(`  채무자 평균 ${q(rows.map((r) => r.avgWorkers))}, 최대 ${q(rows.map((r) => r.maxWorkers))}, 금고 최저 ${q(rows.map((r) => r.minCoins))}, 금고가 모자람 ${q(rows.map((r) => r.refusals))}, 장부 어긋남 ${rows.reduce((s, r) => s + r.ledger, 0)}`);
 }
 
 // ── --selftest ─────────────────────────────────────────────────────────
@@ -1144,7 +1414,7 @@ function selftest(): void {
     const starter = bs.staff[0]!;
     assert(r.assign(starter, null).ok && !r.boothOpen('race'), '출발 신호가 쉬면 경주장이 닫힌다');
     runFor(r, 60);
-    assert(bs.seats.every((x) => x === null) && bs.rounds.every((x) => x === null) && bs.queue.length === 0 && rs.booths.race.group?.phase === 'idle' && race.participants.length === 0, '닫힌 경주장: 자리·한판·줄이 비고 경주는 쉰다');
+    assert(bs.seats.every((x) => x === null) && bs.rounds.every((x) => x === null) && bs.queue.length === 0 && rs.booths.race.group?.phase === 'idle' && race.participants.length === 0, `닫힌 경주장: 자리·한판·줄이 비고 경주는 쉰다 (자리 ${bs.seats.map((x) => (x === null ? '-' : `${x}:${r.monster(x)?.phase}:${r.monster(x)?.booth}:${r.monster(x)?.bankrupt}`)).join(' ')}, 줄 ${bs.queue.length}, 판 ${rs.booths.race.group?.phase})`);
     for (const b of BOOTH_IDS) rs.booths[b].unlocked = true;
     checkInvariants(r);
     console.log(`  경주장 OK: 경주 ${started}번 (둘 이상 ${multi}, 가장 많이 ${biggest}명), 결과 ${settled}, 1등 바뀜 ${progress} (응원 ${cheers}), 구경 ${crowd}, 항아리 축제 ${festivals}`);
@@ -1159,6 +1429,9 @@ function selftest(): void {
 
   // 6f) 단체 놀이 엔진 (셋째 묶음): 부스 하나만 연 마을에서 판이 돌고, 출발 조건·편 맞추기·결과·지급·응원·반응이 맞는가.
   groupLifecycles();
+
+  // 6g) 넷째 묶음: 장신구·전당포·금고·은행·파산·일터·빚 걸기 판·저장.
+  debtFlows();
 
   // 7) 오래 돌려도 멈추지 않는다 (여러 시드, 120분).
   for (const seed of [1, 2, 3]) {
@@ -1181,6 +1454,7 @@ function selftest(): void {
     const e = new Sim(newGame(seed));
     devOpenAll(e);
     const tb = tallyBooths(e);
+    const td = tallyDebt(e);
     let progress = 0;
     e.bus.on('groupEvent', (x) => {
       if (x.booth === 'race') progress++;
@@ -1193,7 +1467,7 @@ function selftest(): void {
       const tier = x.round.outcome.tier;
       lastTier.set(x.round.monster, tier);
       const m = e.monster(x.round.monster);
-      if (m !== undefined && tier !== 'win' && tier !== 'jackpot' && m.wallet < minPlayCost(e.state) && m.broke !== true) missedBroke++;
+      if (m !== undefined && m.bankrupt !== true && tier !== 'win' && tier !== 'jackpot' && m.wallet < minPlayCost(e.state) && m.broke !== true) missedBroke++;
     });
     e.bus.on('potFestival', (x) => {
       const t = lastTier.get(x.monster);
@@ -1210,8 +1484,14 @@ function selftest(): void {
     for (let i = 0; i < n; i++) {
       e.tick(SIM.dt);
       checkInvariants(e);
+      sampleDebt(td, e.state, SIM.dt);
       if (i % 10 === 0) chief(e, () => {});
     }
+    // 넷째 묶음: 맡긴 장신구 장부가 맞고, 파산한 손님은 풀려났거나 아직 일하는 중, 빚 걸기 판이 열린다.
+    const lerr = checkLedger(e, td);
+    assert(lerr.length === 0, `다 열린 마을 장부: ${lerr.slice(0, 3).join(' / ')}`);
+    const dd = e.state.debtTotals;
+    assert(dd.relieved + e.state.monsters.filter((m) => m.bankrupt === true).length === dd.bankrupt && dd.bankrupt > 0 && dd.matches > 0, `파산 ${dd.bankrupt} = 풀려남 ${dd.relieved} + 일하는 중, 빚 걸기 판 ${dd.matches}`);
     // 부스가 15개라 손님 한 명이 들르는 부스가 흩어진다: 부스마다 20판 이상.
     for (const b of BOOTH_IDS) assert(tb.rounds[b] >= 20, `다 열린 마을 60분: ${b} 한판 ${tb.rounds[b]} (20 이상)`);
     for (const b of GROUP_BOOTHS) assert(tb.groups[b].n >= 10, `다 열린 마을 60분: ${b} ${tb.groups[b].n}판 (10 이상)`);
@@ -1227,6 +1507,7 @@ function selftest(): void {
     console.log(`  60분 (시드 ${seed}, 처음부터 다 열린 마을) OK: 손님 ${e.state.totals.visitors}, 한판 ${e.state.totals.rounds}, 경주 ${tb.races}번 (평균 ${(tb.runners / tb.races).toFixed(1)}명, 가장 많이 ${tb.maxRunners}명)`);
     console.log(`     ${BOOTH_IDS.map((b) => `${b} ${tb.rounds[b]}`).join(', ')}`);
     console.log(`     단체 놀이: ${GROUP_BOOTHS.map((b) => { const g = tb.groups[b]; return `${b} ${g.n}판 평균 ${(g.runners / Math.max(1, g.n)).toFixed(1)}명 (접힘 ${g.cancelled})`; }).join(', ')}, 판 끝 구경 ${watching}`);
+    console.log(`     ${debtLine(e.state)}`);
   }
   console.log('\nselftest 통과');
 }
@@ -1793,8 +2074,9 @@ function groupLifecycles(): void {
       if (o === undefined) return;
       finished.delete(x.id);
       const keys = detailKeys(o.detail);
-      // 항아리 축제·빈털터리는 공통 표.
-      const ok = reactionLabels(o.tier, b, keys[0]).includes(x.reaction.label) || reactionLabels('broke').includes(x.reaction.label) || reactionLabels('jackpot').includes(x.reaction.label);
+      // 항아리 축제·빈털터리는 공통 표, 빚 걸기 판의 채무자는 빚 반응 (반·0·늘어남).
+      const debtLabels = (['matchHalved', 'matchCleared', 'matchAdded'] as const).flatMap((k) => debtReactionLabels(k));
+      const ok = reactionLabels(o.tier, b, keys[0]).includes(x.reaction.label) || reactionLabels('broke').includes(x.reaction.label) || reactionLabels('jackpot').includes(x.reaction.label) || debtLabels.includes(x.reaction.label);
       if (!ok) badReact++;
     });
     runFor(r, 900);
@@ -1870,7 +2152,7 @@ function groupLifecycles(): void {
       bsv.race = race;
     }
     const back = normalizeState(old);
-    assert(back !== null && back.version === 3, '옛 저장(2)을 읽는다');
+    assert(back !== null && back.version === 4, '옛 저장(2)을 읽는다 (2 → 3 → 4)');
     const twin = new Sim(back);
     runFor(a, 40);
     runFor(twin, 40);
@@ -1883,6 +2165,578 @@ function groupLifecycles(): void {
     };
     assert(strip(a.state) === strip(twin.state), '옛 저장(2)에서 이어도 경주가 똑같이 흐른다');
     console.log('  옛 저장(2 → 3) OK');
+  }
+}
+
+
+/// ── 넷째 묶음 (장신구·전당포·은행·파산·일터·빚 걸기 판) 시험 ───────────────────
+
+/** 부스 하나(b)만 열고 나머지는 닫은 마을 + 전당포·은행·일터 레벨 1, 금고 넉넉. */
+function debtVillage(seed: number, only: BoothId | null = 'slot'): Sim {
+  const s = new Sim(newGame(seed));
+  devOpenAll(s);
+  if (only !== null) for (const b of BOOTH_IDS) if (b !== only) s.state.booths[b].unlocked = false;
+  for (const id of ['pawnshop', 'bank', 'workyard'] as BuildingId[]) s.state.buildings[id].level = 1;
+  s.state.coins = 5000;
+  // 처음 손님은 지우고 새 손님도 오지 않게 (시험 손님만).
+  s.state.monsters.length = 0;
+  s.state.spawnTimer = 1e9;
+  return s;
+}
+
+/** 손님 하나를 광장에 (시험용: 장신구·지갑·기분·성격을 정한다). 쓴 코인 60 (처음 지갑 = 지갑 + 60). */
+function testGuest(s: Sim, opts: { wallet: number; mood?: number; acc?: { key: AccessoryId; value: number }[]; species?: SpeciesId; traits?: TraitId[]; patience?: number }): Monster {
+  const st = s.state;
+  const rng = new Rng(st.nextId * 31 + 7);
+  const m = createMonster(rng, st, st.nextId++, { x: 3200, y: 4600 }, null);
+  if (opts.species !== undefined) m.species = opts.species;
+  m.phase = 'wandering';
+  m.timer = 0.2;
+  m.wallet = opts.wallet;
+  m.mood = opts.mood ?? 70;
+  m.patience = opts.patience ?? 6;
+  m.traits = opts.traits ?? ['cheerful'];
+  m.accessories = (opts.acc ?? []).map((a) => ({ key: a.key, slot: ACCESSORIES[a.key].slot, value: a.value }));
+  m.firstPlay = st.time;
+  m.stats.spent = 60;
+  st.monsters.push(m);
+  return m;
+}
+
+/** 조건이 맞을 때까지 (최대 sec초) 돌린다. 맞았으면 true. */
+function runUntil(s: Sim, sec: number, cond: () => boolean): boolean {
+  const n = Math.round(sec / SIM.dt);
+  for (let i = 0; i < n; i++) {
+    s.tick(SIM.dt);
+    checkInvariants(s);
+    if (cond()) return true;
+  }
+  return cond();
+}
+
+/** 더 놀고 싶은 마음 (PAWN·BANK.want)과 빚 쫓기 (BANK.chase)를 고정해 fn을 돌린다 (시험용: 확률을 빼고 흐름만 본다). */
+function withWant<T>(p: number, fn: () => T, chase: number | null = null): T {
+  const tables = [PAWN.want, BANK.want] as unknown as { lo: number; hi: number }[];
+  const ch = BANK.chase as unknown as { chance: number };
+  const saved = tables.map((t) => [t.lo, t.hi] as const);
+  const savedChase = ch.chance;
+  for (const t of tables) {
+    t.lo = p;
+    t.hi = p;
+  }
+  if (chase !== null) ch.chance = chase;
+  try {
+    return fn();
+  } finally {
+    tables.forEach((t, i) => {
+      const v = saved[i];
+      if (v !== undefined) [t.lo, t.hi] = v;
+    });
+    ch.chance = savedChase;
+  }
+}
+
+/** 이 손님의 반응 이름을 모은다 (monsterReact). */
+function reactLog(s: Sim, id: number): string[] {
+  const out: string[] = [];
+  s.bus.on('monsterReact', (e) => {
+    if (e.id === id) out.push(e.reaction.label);
+  });
+  return out;
+}
+
+function debtFlows(): void {
+  // a) 장신구 고르기: 하나 35%·둘 8% 안팎, 자리가 겹치지 않고, 고블린에게 돈주머니는 없다.
+  {
+    const rng = new Rng(7);
+    let one = 0;
+    let two = 0;
+    const N = 20000;
+    for (let i = 0; i < N; i++) {
+      const sp = SPECIES_IDS[i % SPECIES_IDS.length] as SpeciesId;
+      const list = rollAccessories(rng, sp);
+      if (list.length === 1) one++;
+      if (list.length === 2) two++;
+      assert(new Set(list.map((a) => a.slot)).size === list.length, '장신구 자리가 겹치지 않는다');
+      for (const a of list) {
+        const d = ACCESSORIES[a.key];
+        assert(a.slot === d.slot && a.value >= d.value[0] && a.value <= d.value[1], `장신구 ${a.key} 자리·값`);
+        assert(!(sp === 'goblin' && a.key === 'acc_coin_pouch'), '고블린에게 돈주머니를 달지 않는다');
+      }
+    }
+    assert(Math.abs(one / N - ACCESSORY_SPAWN.one) < 0.02 && Math.abs(two / N - ACCESSORY_SPAWN.two) < 0.015, `장신구 비율 하나 ${(one / N).toFixed(3)} 둘 ${(two / N).toFixed(3)}`);
+    console.log(`  장신구 고르기 OK: 하나 ${((one / N) * 100).toFixed(1)}%, 둘 ${((two / N) * 100).toFixed(1)}%`);
+  }
+
+  // a2) 더 놀고 싶은 마음: 기분·끈기가 클수록 크고, 대담이는 더, 겁쟁이는 은행을 덜, 언제나 lo~hi.
+  {
+    const g = (mood: number, patience: number, traits: TraitId[], t: typeof PAWN.want | typeof BANK.want) => wantMore({ mood, patience, traits }, t);
+    for (const t of [PAWN.want, BANK.want]) {
+      assert(g(90, 5, [], t) > g(30, 5, [], t) && g(60, 8, [], t) > g(60, 1, [], t), '기분·끈기가 클수록 더 놀고 싶다');
+      assert(g(60, 5, ['bold'], t) > g(60, 5, [], t), '대담이는 더 놀고 싶다');
+      for (const mood of [0, 50, 100]) for (const p of [0, 9, 30]) for (const tr of [[], ['bold', 'lucky'], ['coward']] as TraitId[][]) {
+        const v = g(mood, p, tr, t);
+        assert(v >= t.lo - 1e-9 && v <= t.hi + 1e-9, `더 놀고 싶은 마음 ${v} (${t.lo}~${t.hi})`);
+      }
+    }
+    assert(g(60, 5, ['coward'], BANK.want) < g(60, 5, [], BANK.want) - 0.2, '겁쟁이는 은행을 무서워한다');
+    // 빚 걸기 판 짝: 빚이 비슷한 채무자끼리.
+    const rng = new Rng(3);
+    for (let i = 0; i < 50; i++) {
+      const pool = [{ debt: 10 }, { debt: 55 }, { debt: 12 }, { debt: 50 }];
+      const out = pairDebtors(rng, pool, 2);
+      assert(out.length === 4, '짝 둘');
+      for (let k = 0; k < 4; k += 2) assert(Math.abs((out[k]?.debt ?? 0) - (out[k + 1]?.debt ?? 0)) <= 5, `짝은 빚이 비슷하다 (${out.map((x) => x.debt).join(',')})`);
+      assert(pairDebtors(rng, pool.slice(0, 3), 2).length === 2 && pairDebtors(rng, pool.slice(0, 1), 1).length === 0, '모자라면 짝 수만큼');
+    }
+    console.log('  더 놀고 싶은 마음·빚 걸기 짝 OK');
+  }
+
+  // b) 전당포: 돈이 떨어진 손님이 장신구를 맡기고 (금고에서 빌린다, '맡겨야겠다…'), 따면 되찾는다. 못 찾고 떠나면 컬렉션.
+  withWant(1, () => {
+    const s = debtVillage(11);
+    const st = s.state;
+    const m = testGuest(s, { wallet: 1, acc: [{ key: 'acc_ribbon', value: 26 }, { key: 'acc_scarf', value: 33 }] });
+    const labels = reactLog(s, m.id);
+    const coins0 = st.coins;
+    let pawnedEv = 0;
+    s.bus.on('pawned', (e) => {
+      if (e.id === m.id) pawnedEv++;
+    });
+    assert(runUntil(s, 60, () => m.pawned.length > 0), '돈이 떨어진 손님이 전당포에 맡긴다');
+    const t = m.pawned[0]!;
+    assert(t.key === 'acc_scarf' && t.price === pawnPrice(st, { value: 33 }) && pawnedEv === 1, '값이 가장 큰 장신구를 맡기고 그 값을 빌린다');
+    assert(st.coins === coins0 - t.price && !m.accessories.some((a) => a.key === 'acc_scarf'), '금고에서 나가고 몸에서 빠진다');
+    assert(debtReactionLabels('seekPawn').some((l) => labels.includes(l)) && debtReactionLabels('pawn').some((l) => labels.includes(l)), `맡기러 가며·맡기고 반응 (${labels.join(', ')})`);
+    // 따서 지갑이 넉넉해지면 되찾는다.
+    m.wallet = 200;
+    const coins1 = st.coins;
+    assert(runUntil(s, 90, () => m.pawned.length === 0), '지갑이 넉넉해지면 되찾는다');
+    assert(m.accessories.some((a) => a.key === 'acc_scarf') && st.coins >= coins1 + redeemCost(t) - 1 && st.debtTotals.redeemed === 1, '되찾으면 다시 몸에, 금고로 값 × 1.25');
+    assert(labels.includes('되찾았다!') || debtReactionLabels('redeem').some((l) => labels.includes(l)), '되찾으면 기쁨');
+    // 못 찾고 떠나면 컬렉션으로.
+    const m2 = testGuest(s, { wallet: 1, acc: [{ key: 'acc_mini_crown', value: 100 }] });
+    assert(runUntil(s, 60, () => m2.pawned.length > 0), '왕관을 맡긴다');
+    m2.wallet = 0;
+    m2.patience = 0;
+    let firstToast = false;
+    s.bus.on('pawnCollected', (e) => {
+      if (e.key === 'acc_mini_crown' && e.first && e.from === m2.id) firstToast = true;
+    });
+    assert(runUntil(s, 200, () => s.monster(m2.id) === undefined), '못 찾고 떠난다');
+    assert((st.pawnCollection.acc_mini_crown ?? 0) === 1 && firstToast && st.debtTotals.forfeited === 1, '못 찾고 떠난 장신구는 전당포 컬렉션에');
+    console.log(`  전당포 OK: 맡김 ${st.debtTotals.pawned}, 되찾음 ${st.debtTotals.redeemed}, 컬렉션 ${JSON.stringify(st.pawnCollection)}`);
+  });
+
+  // b2) 더 놀기 싫다: 거의 다 잃었을 때 한 번, 정말 못 놀 때 한 번만 묻는다 ('싫다'면 그 단계에서는 다시 묻지 않는다).
+  withWant(0, () => {
+    const s = debtVillage(19);
+    const st = s.state;
+    const m = testGuest(s, { wallet: 20, acc: [{ key: 'acc_ribbon', value: 26 }] });
+    // 처음 지갑 80의 35%보다 적지만 아직 한판은 된다 → low.
+    assert(m.wallet >= minPlayCost(st) && m.wallet < 80 * PAWN.lowFrac, '시험 손님은 거의 다 잃었다');
+    assert(runUntil(s, 30, () => m.declined === 'low'), '거의 다 잃었을 때 묻고 싫다고 한다');
+    assert(m.pawned.length === 0 && m.errand !== 'pawn', '싫으면 맡기지 않는다');
+    m.wallet = 0;
+    assert(runUntil(s, 60, () => m.declined === 'broke' || s.monster(m.id) === undefined), '정말 못 놀 때 다시 묻는다');
+    assert(st.debtTotals.pawned === 0, '싫다고 한 손님은 맡기지 않는다');
+    // 싫다고 한 단계에서는 다시 묻지 않는다 (지금 마음이 바뀌어도).
+    const m3 = testGuest(s, { wallet: 0, acc: [{ key: 'acc_ribbon', value: 26 }] });
+    m3.declined = 'broke';
+    withWant(1, () => runUntil(s, 40, () => s.monster(m3.id) === undefined || m3.phase === 'leaving'));
+    assert(m3.pawned.length === 0 && st.debtTotals.pawned === 0, '정말 못 놀 때 싫다고 했으면 다시 묻지 않는다');
+    console.log('  더 놀기 싫다 OK (한 단계에 한 번)');
+  });
+
+  // c) 금고가 모자라면 빌려주지 않는다 (코인이 음수가 되지 않고, 빌려준 뒤에도 VAULT.reserve가 남는다).
+  withWant(1, () => {
+    const s = debtVillage(12);
+    const st = s.state;
+    st.coins = 10;
+    let empty = 0;
+    s.bus.on('vaultEmpty', () => empty++);
+    const m = testGuest(s, { wallet: 0, acc: [{ key: 'acc_ribbon', value: 25 }] });
+    runFor(s, 30);
+    assert(m.pawned.length === 0 && m.debt === 0 && st.coins >= 0 && empty >= 1 && m.declined === 'broke', '금고가 모자라면 맡기기·대출 없음 (vaultEmpty)');
+    // 금고가 빌려줄 만큼: 빌려준 뒤에도 reserve가 남는다.
+    st.coins = VAULT.reserve + 25;
+    const m2 = testGuest(s, { wallet: 0, acc: [{ key: 'acc_ribbon', value: 25 }] });
+    assert(runUntil(s, 60, () => m2.pawned.length > 0), '금고가 빌려줄 만큼이면 맡긴다');
+    assert(st.coins >= VAULT.reserve, `빌려준 뒤에도 금고 ${st.coins} ≥ ${VAULT.reserve}`);
+    console.log('  금고 OK');
+  });
+
+  // d) 은행 → 빚 쫓기 → 파산 → 일터 → 다 갚음: 장신구가 없으면 빌리고 ('빌려야겠다…'), 갚을 만큼 없으면 '한판만 더' (BANK.chase.max까지),
+  //    떠날 때 못 갚으면 파산해서 일하고 (1코인마다 laborTick, 재료 coinsPerMat마다 + 한숨·영차), 다 갚으면 단골 ('다시 일어선 단골')로 떠난다.
+  withWant(
+    1,
+    () => {
+      const s = debtVillage(13);
+      const st = s.state;
+      const m = testGuest(s, { wallet: 1 });
+      const labels = reactLog(s, m.id);
+      assert(runUntil(s, 60, () => m.debt > 0), '장신구가 없는 손님은 은행에서 빌린다');
+      const loan = bankLoan(st);
+      assert(m.debt === loanDebt(loan) && m.loans === 1 && st.debtTotals.loans === 1, `빌린 코인 ${loan}, 갚을 돈 ×${BANK.interest}`);
+      assert(debtReactionLabels('seekLoan').some((l) => labels.includes(l)), '빌리러 가며 반응');
+      // 빚이 있으면 더 빌려주지 않는다.
+      assert(!bankOpenFor(st, m), '빚이 있으면 은행이 더 빌려주지 않는다');
+      // 끈기가 다 됐지만 갚을 만큼 없다: 한판만 더 (확률 1로 BANK.chase.max번).
+      let paid = -1;
+      let left = -1;
+      s.bus.on('bankrupt', (e) => {
+        if (e.id !== m.id) return;
+        paid = e.paid;
+        left = e.debt;
+      });
+      m.wallet = 30;
+      m.patience = 0;
+      const rounds0 = m.stats.rounds;
+      assert(runUntil(s, 300, () => (m.chased ?? 0) >= BANK.chase.max || m.bankrupt === true || m.debt === 0), '빚을 갚으려고 한판만 더');
+      assert(m.stats.rounds > rounds0, `끈기가 다 된 뒤에도 더 놀았다 (${m.stats.rounds - rounds0}판)`);
+      // 다 잃고 떠난다 → 파산.
+      if (m.bankrupt !== true) {
+        m.wallet = 3;
+        m.patience = 0;
+        m.chased = BANK.chase.max;
+        if (m.debt === 0) m.debt = loanDebt(loan);
+      }
+      assert(runUntil(s, 120, () => m.bankrupt === true), '떠날 때 못 갚으면 파산');
+      assert(paid >= 0 && left === m.debt && m.wallet === 0 && m.labor?.since !== undefined, `지갑을 다 내고 (${paid}) 남은 빚 ${m.debt}`);
+      assert(runUntil(s, 180, () => m.phase === 'working'), '일터로 가서 일한다');
+      let ticks = 0;
+      let outs = 0;
+      s.bus.on('laborTick', (e) => {
+        if (e.id !== m.id) return;
+        ticks++;
+        assert(e.debt === m.debt && e.total >= e.debt, 'laborTick = 남은 빚');
+      });
+      s.bus.on('laborOutput', (e) => {
+        if (e.id === m.id) outs++;
+      });
+      const debt1 = m.debt;
+      const mats0 = st.materials.mat_veggie + st.materials.mat_ore;
+      runFor(s, LABOR.secPerCoin * LABOR.coinsPerMat * 1.2);
+      assert(m.debt < debt1 && ticks === debt1 - m.debt && outs >= 1 && st.materials.mat_veggie + st.materials.mat_ore > mats0 && st.debtTotals.laborMats >= 1, `일하면 빚이 줄고 (1코인마다 laborTick ${ticks}) 재료가 나온다 (${outs})`);
+      assert([...debtReactionLabels('laborFarm'), ...debtReactionLabels('laborMine'), ...debtReactionLabels('cheered')].some((l) => labels.includes(l)), `일하며 한숨·영차 (${labels.join(', ')})`);
+      // 응원하면 잠깐 빨라진다.
+      const rate0 = laborRate(st, m);
+      assert(s.cheer(m.id).ok && laborRate(st, m) > rate0 * 1.4 - 1e-9, '응원 톡 = 잠깐 빨라진다');
+      // 다 갚는다.
+      m.debt = 2;
+      let cleared: boolean | null = null;
+      s.bus.on('debtCleared', (e) => {
+        if (e.id === m.id) cleared = e.forgiven;
+      });
+      assert(runUntil(s, 30, () => cleared !== null), '다 갚으면 홀가분');
+      const got = cleared as boolean | null;
+      assert(got === false && m.bankrupt === false && m.phase === 'relieved', '스스로 다 갚았다 (반장이 덜어 준 것 아님)');
+      // 단골 목록에는 떠나는 순간에 (마을에 있는 동안 같은 단골이 또 오지 않게).
+      const isReg = (): boolean => (st.regulars ?? []).some((r) => r.nickname === m.nickname && r.species === m.species && r.recovered === true);
+      assert(!isReg(), '다 갚고 아직 마을에 있는 동안은 단골 목록에 없다');
+      assert(debtReactionLabels('relieved').some((l) => labels.includes(l)), '다 갚은 반응');
+      // 파산했던 손님은 떠날 때 종 재료·귀한 물건을 남기지 않는다 (기분이 좋아도).
+      m.mood = 100;
+      m.hadJackpot = true;
+      let leftEv: SimEvents['monsterLeft'] | null = null;
+      s.bus.on('monsterLeft', (e) => {
+        if (e.id === m.id) leftEv = e;
+      });
+      assert(runUntil(s, 300, () => s.monster(m.id) === undefined), '다 갚고 떠난다');
+      const gone = leftEv as SimEvents['monsterLeft'] | null;
+      assert(gone !== null && gone.material === null && gone.precious === null, '파산했던 손님은 떠날 때 종 재료·귀한 물건이 없다');
+      assert(isReg(), '다 갚고 떠나면 다시 일어선 단골');
+      assert(st.debtTotals.relieved === 1 && st.debtTotals.bankrupt === 1 && st.debtTotals.forgiven === 0, '파산 1 다 갚음 1');
+      console.log(`  은행·빚 쫓기·파산·일터 OK: 빌림 ${loan} → 빚 ${loanDebt(loan)}, 한판만 더 ${BANK.chase.max}번, 일터 재료 ${st.debtTotals.laborMats}`);
+    },
+    1,
+  );
+
+  // d2) 떠나기 전에 낼 수 있으면: 은행 빚을 갚고, 맡긴 장신구를 되찾고 떠난다 (파산·컬렉션 없음).
+  withWant(1, () => {
+    const s = debtVillage(20);
+    const st = s.state;
+    const m = testGuest(s, { wallet: 1, acc: [{ key: 'acc_star_pin', value: 24 }] });
+    assert(runUntil(s, 60, () => m.pawned.length > 0), '맡긴다');
+    // 빚도 있게: 은행 대출을 한 것처럼.
+    m.debt = 30;
+    m.loans = 1;
+    m.wallet = 30 + redeemCost(m.pawned[0]!) + 5;
+    m.patience = 0;
+    let repaid = 0;
+    let redeemed = 0;
+    s.bus.on('loanRepaid', (e) => {
+      if (e.id === m.id) repaid++;
+    });
+    s.bus.on('redeemed', (e) => {
+      if (e.id === m.id) redeemed++;
+    });
+    const ids = new Set<number>();
+    s.bus.on('monsterLeft', (e) => ids.add(e.id));
+    assert(runUntil(s, 300, () => ids.has(m.id)), '볼일을 보고 떠난다');
+    assert(repaid === 1 && redeemed === 1 && st.debtTotals.bankrupt === 0 && st.debtTotals.forfeited === 0, `떠나기 전에 갚고 (${repaid}) 되찾고 (${redeemed}) 떠난다`);
+    console.log('  떠나기 전 갚기·되찾기 OK');
+  });
+
+  // e) 일터 자리: 자리보다 채무자가 많으면 기다리고, 자리가 나면 가장 오래 기다린 채무자가 일한다.
+  {
+    const s = debtVillage(14);
+    const st = s.state;
+    const slots = workSlots(st, 'farm') + workSlots(st, 'mine');
+    const ids: number[] = [];
+    for (let i = 0; i < slots + 2; i++) {
+      const m = testGuest(s, { wallet: 0 });
+      assert(s.devBankrupt(m.id, 100 + i), '개발용 파산');
+      ids.push(m.id);
+      runFor(s, 3);
+    }
+    runFor(s, 120);
+    const ms = ids.map((id) => s.monster(id)!);
+    const working = ms.filter((m) => m.phase === 'working').length;
+    const waiting = ms.filter((m) => m.phase === 'waitWork');
+    assert(working === slots && waiting.length === 2, `일하는 ${working} (자리 ${slots}), 기다리는 ${waiting.length}`);
+    // 하나가 다 갚으면 가장 오래 기다린 채무자가 그 자리로.
+    const longest = waiting.slice().sort((a, b) => (b.phaseTime ?? 0) - (a.phaseTime ?? 0))[0]!;
+    const w = ms.find((m) => m.phase === 'working')!;
+    w.debt = 1;
+    runFor(s, 40);
+    assert(ms.filter((m) => m !== w && m.phase === 'working').length === slots && longest.phase === 'working', '자리가 나면 가장 오래 기다린 채무자가 일한다');
+    console.log(`  일터 자리 OK: 자리 ${slots}, 기다림 2 → 1 (오래 기다린 손님부터)`);
+  }
+
+  // e2) 반장: 일하는 채무자를 다독이고 (foremanCheer, 잠깐 빨라짐), 파산하고 LABOR.forgiveSec가 지나면 남은 빚을 덜어 준다.
+  {
+    const s = debtVillage(21);
+    const st = s.state;
+    const m = testGuest(s, { wallet: 0 });
+    s.devBankrupt(m.id, 90);
+    assert(runUntil(s, 180, () => m.phase === 'working'), '일한다');
+    let cheered = 0;
+    s.bus.on('foremanCheer', (e) => {
+      if (e.id === m.id) cheered++;
+    });
+    assert(runUntil(s, LABOR.foreman.everySec + 1, () => cheered > 0), '반장이 다독인다');
+    assert((m.labor?.boostSec ?? 0) > 0 && (m.labor?.boostMult ?? 1) >= LABOR.foreman.mult, '다독이면 잠깐 빨라진다');
+    // 오래 일했다 (파산한 지 forgiveSec).
+    m.labor!.since = st.time - LABOR.forgiveSec - 1;
+    const left = m.debt;
+    let forgiven: boolean | null = null;
+    s.bus.on('debtCleared', (e) => {
+      if (e.id === m.id) forgiven = e.forgiven;
+    });
+    runFor(s, 1);
+    const fg = forgiven as boolean | null;
+    assert(fg === true && m.bankrupt === false && m.phase === 'relieved' && st.debtTotals.forgiven === 1 && left > 0, '오래 일하면 반장이 남은 빚을 덜어 준다');
+    assert(runUntil(s, 300, () => s.monster(m.id) === undefined), '덜어 받고 떠난다');
+    console.log(`  반장 OK: 다독임 ${cheered}, 남은 빚 ${left} 덜어 줌`);
+  }
+
+  // f) 빚 걸기 판 (밀어내기·줄다리기 1:1): 쉬는 부스에 채무자 둘을 불러 겨루고, 이기면 빚이 반 (대박이면 0), 지면 상대 빚만큼 더.
+  for (const b of ['ssireum', 'tug'] as const) {
+    const s = debtVillage(15, b);
+    const st = s.state;
+    const a = testGuest(s, { wallet: 0 });
+    const c = testGuest(s, { wallet: 0 });
+    // 줄다리기는 부를 수 있는 채무자가 tugMin명 이상일 때만 (짝 둘). 1:1 시험은 tugMin을 잠깐 2로.
+    const tugMin = DEBT_MATCH as unknown as { tugMin: number };
+    const savedMin = tugMin.tugMin;
+    tugMin.tugMin = 2;
+    s.devBankrupt(a.id, 40);
+    s.devBankrupt(c.id, 24);
+    const la = reactLog(s, a.id);
+    const lc = reactLog(s, c.id);
+    let called = 0;
+    let settled: SimEvents['debtSettled'] | null = null;
+    // 판을 열 때의 빚 (일터에서 일하는 동안 줄었다: 걸어가는 동안은 그대로).
+    const stake = new Map<number, number>();
+    s.bus.on('debtMatchCalled', (e) => {
+      if (e.booth !== b) return;
+      called++;
+      for (const id of e.debtors) stake.set(id, s.monster(id)?.debt ?? -1);
+    });
+    s.bus.on('debtSettled', (e) => {
+      settled = e;
+    });
+    runFor(s, 60);
+    // 확인 때마다 chance로 연다: 여러 번 확인하게 시계를 당긴다.
+    assert(
+      runUntil(s, 400, () => {
+        if (called === 0) st.debtCheck = Math.min(st.debtCheck, 0.05);
+        return settled !== null;
+      }),
+      `${b} 빚 걸기 판이 열리고 끝난다`,
+    );
+    tugMin.tugMin = savedMin;
+    const ev = settled as SimEvents['debtSettled'] | null;
+    assert(ev !== null && ev.booth === b && ev.changes.length === 2, `${b} 빚 정산 둘`);
+    for (const ch of ev.changes) {
+      const mine = stake.get(ch.id)!;
+      const [otherId, other] = [...stake.entries()].find(([id]) => id !== ch.id)!;
+      // 걸어가는 동안·기다리는 동안은 일하지 않았다 (빚 그대로 걸었다).
+      const won = ch.tier === 'win' || ch.tier === 'jackpot';
+      const want = won ? (ch.tier === 'jackpot' ? 0 : Math.round(mine * DEBT_MATCH.winKeep)) : Math.min(DEBT_MATCH.maxDebt, mine + other);
+      assert(ch.before === mine && ch.after === want, `${b} 빚 ${ch.before} → ${ch.after} (${ch.tier}, 바라는 값 ${want})`);
+      assert(ch.opponent === otherId && ch.result === (won ? (ch.tier === 'jackpot' ? 'cleared' : 'halved') : 'added'), `${b} 정산의 상대·결과 (${ch.opponent}, ${ch.result})`);
+      const log = ch.id === a.id ? la : lc;
+      const kind = ch.result === 'halved' ? 'matchHalved' : ch.result === 'cleared' ? 'matchCleared' : 'matchAdded';
+      assert(debtReactionLabels(kind).some((l) => log.includes(l)) && debtReactionLabels('matchCalled').some((l) => log.includes(l)), `${b} 채무자 반응: 불려 갈 때·정산 (${log.join(', ')})`);
+    }
+    assert(st.debtTotals.matches === 1, `${b} 빚 걸기 판 1`);
+    // 끝나면 일터로 (빚이 0이면 홀가분). 한 번 겨룬 채무자는 이번 파산에 다시 부르지 않는다 (DEBT_MATCH.maxPerStint).
+    assert(
+      runUntil(s, 300, () => [a, c].every((m) => s.monster(m.id) === undefined || m.phase === 'working' || m.phase === 'waitWork' || m.phase === 'relieved' || m.phase === 'leaving')),
+      `${b} 판이 끝나면 일터로`,
+    );
+    assert([a, c].every((m) => s.monster(m.id) === undefined || m.bankrupt !== true || (m.labor?.matches ?? 0) >= DEBT_MATCH.maxPerStint), `${b} 겨룬 횟수`);
+    st.debtCheck = 0.05;
+    runFor(s, 30);
+    assert(st.debtTotals.matches === 1, `${b} 한 번 겨룬 채무자는 다시 부르지 않는다`);
+    console.log(`  빚 걸기 판 ${b} OK: ${ev.changes.map((x) => `${x.before}→${x.after} (${x.tier}, ${x.result})`).join(', ')}`);
+  }
+
+  // f2) 줄다리기 2:2 빚 걸기 판: 빚이 비슷한 채무자끼리 짝 (자리 2k ↔ 2k+1), 진 채무자는 짝 상대의 빚만큼 더. 빚이 minStake보다 적으면 부르지 않는다.
+  {
+    const s = debtVillage(22, 'tug');
+    const st = s.state;
+    const debts = [10, 55, 12, 50, DEBT_MATCH.minStake - 1];
+    const ms = debts.map((d) => {
+      const m = testGuest(s, { wallet: 0 });
+      s.devBankrupt(m.id, d);
+      return m;
+    });
+    // 일하는 동안 빚이 줄지 않게 아주 느리게 (짝을 빚으로 보려고).
+    for (const m of ms) if (m.labor) m.labor.progress = -1e9;
+    let called: MonsterId[] = [];
+    let settled: SimEvents['debtSettled'] | null = null;
+    s.bus.on('debtMatchCalled', (e) => {
+      if (e.booth === 'tug') called = e.debtors.slice();
+    });
+    s.bus.on('debtSettled', (e) => {
+      settled = e;
+    });
+    runFor(s, 30);
+    assert(
+      runUntil(s, 400, () => {
+        if (called.length === 0) st.debtCheck = Math.min(st.debtCheck, 0.05);
+        return settled !== null;
+      }),
+      '줄다리기 2:2 빚 걸기 판',
+    );
+    const debtOf = new Map(ms.map((m, i) => [m.id, debts[i]!]));
+    assert(called.length === 4 && !called.includes(ms[4]!.id), `넷을 부르고 빚이 적은 채무자는 뺀다 (${called.map((id) => debtOf.get(id)).join(',')})`);
+    for (let k = 0; k < 4; k += 2) assert(Math.abs(debtOf.get(called[k]!)! - debtOf.get(called[k + 1]!)!) <= 5, '짝은 빚이 비슷하다 (자리 2k ↔ 2k+1)');
+    const ev = settled as SimEvents['debtSettled'] | null;
+    assert(ev !== null && ev.changes.length === 4, '정산 넷');
+    for (const ch of ev.changes) {
+      const seat = called.indexOf(ch.id);
+      const opp = called[seat ^ 1]!;
+      assert(ch.opponent === opp, '줄다리기 상대 = 짝 (자리 2k ↔ 2k+1)');
+      if (ch.result === 'added') assert(ch.after === Math.min(DEBT_MATCH.maxDebt, ch.before + debtOf.get(opp)!), `진 채무자 = 자기 빚 + 짝 상대 빚 (${ch.before} + ${debtOf.get(opp)} → ${ch.after})`);
+      else assert(ch.after === (ch.result === 'cleared' ? 0 : Math.round(ch.before * DEBT_MATCH.winKeep)), '이긴 채무자는 반 (대박이면 0)');
+    }
+    console.log(`  줄다리기 2:2 빚 걸기 판 OK: ${ev.changes.map((x) => `${x.before}→${x.after}`).join(', ')}`);
+  }
+
+  // g) 저장·불러오기 (파산한 손님·맡긴 장신구·컬렉션·빚 걸기 판 중 그대로), 옛 저장(3) → 4.
+  withWant(1, () => {
+    const s = debtVillage(16, 'ssireum');
+    const st = s.state;
+    const p = testGuest(s, { wallet: 1, acc: [{ key: 'acc_tophat', value: 60 }] });
+    runUntil(s, 60, () => p.pawned.length > 0);
+    const w = testGuest(s, { wallet: 0 });
+    s.devBankrupt(w.id, 50);
+    const w2 = testGuest(s, { wallet: 0 });
+    s.devBankrupt(w2.id, 30);
+    runFor(s, 30);
+    st.pawnCollection.acc_ribbon = 2;
+    const back = normalizeState(JSON.parse(JSON.stringify(st)));
+    assert(back !== null && back.version === 4, '저장 4를 읽는다');
+    const twin = new Sim(back);
+    runFor(s, 30);
+    runFor(twin, 30);
+    assert(stripTime(s.state) === stripTime(twin.state), '파산·일터·맡긴 장신구가 저장 뒤에도 똑같이 흐른다');
+    // 빚 걸기 판 중에 저장.
+    assert(
+      runUntil(s, 400, () => {
+        if (st.debtTotals.matches === 0) st.debtCheck = Math.min(st.debtCheck, 0.05);
+        return st.booths.ssireum.group?.mode === 'debt' && st.booths.ssireum.group.phase === 'running';
+      }),
+      '빚 걸기 판이 달린다',
+    );
+    const mid = new Sim(normalizeState(JSON.parse(JSON.stringify(st)))!);
+    runFor(s, 40);
+    runFor(mid, 40);
+    assert(stripTime(s.state) === stripTime(mid.state), '빚 걸기 판 중 저장·불러오기 뒤 40초가 똑같이 흐른다');
+    // 옛 저장 3: 넷째 묶음 칸이 없다.
+    const old = JSON.parse(JSON.stringify(newGame(17))) as Record<string, unknown>;
+    old.version = 3;
+    for (const k of ['pawnCollection', 'debtTotals', 'debtMatchAt', 'debtCheck']) delete old[k];
+    for (const k of ['pawnshop', 'bank', 'workyard']) delete (old.buildings as Record<string, unknown>)[k];
+    delete (old.materials as Record<string, unknown>).mat_veggie;
+    for (const m of old.monsters as Record<string, unknown>[]) {
+      delete m.accessories;
+      delete m.pawned;
+      delete m.debt;
+    }
+    const up = normalizeState(old);
+    assert(up !== null && up.version === 4 && up.buildings.pawnshop.level === 0 && up.materials.mat_veggie === 0 && up.debtTotals.forgiven === 0 && up.monsters.every((m) => Array.isArray(m.accessories) && m.debt === 0), '옛 저장(3) → 4');
+    const us = new Sim(up);
+    runFor(us, 60);
+    // 기초 작업 때의 저장 4 (forgiven·since·foremanTimer가 없다)도 읽는다.
+    const early = JSON.parse(JSON.stringify(st)) as Record<string, unknown>;
+    delete (early.debtTotals as Record<string, unknown>).forgiven;
+    delete early.foremanTimer;
+    for (const m of early.monsters as Record<string, unknown>[]) if (m.labor !== null && typeof m.labor === 'object') delete (m.labor as Record<string, unknown>).since;
+    const es = normalizeState(early);
+    assert(es !== null && es.debtTotals.forgiven === 0, '기초 작업 때의 저장 4');
+    runFor(new Sim(es), 60);
+    console.log('  저장 4 (빚 걸기 판 중 포함)·옛 저장(3 → 4) OK');
+  });
+
+  // h) 전당포·은행·일터 짓기: 회관 레벨, 레벨 0 = 빈 부지.
+  {
+    const s = new Sim(newGame(18));
+    const st = s.state;
+    assert(st.buildings.pawnshop.level === 0 && st.buildings.bank.level === 0 && st.buildings.workyard.level === 0, '처음엔 빈 부지');
+    st.coins = 2000;
+    assert(s.buildingLockReason('bank') !== null && !s.upgradeBuilding('bank').ok, '은행은 회관 2부터');
+    assert(s.upgradeBuilding('pawnshop').ok && s.buildingBuilt('pawnshop'), '전당포는 회관 1에 짓는다');
+    console.log('  짓기 OK');
+  }
+
+  // i) 넷째 묶음 반응 표: 종류마다 둘 이상, 이름이 겹치지 않는 종류끼리 (허리가 아파… 같은 일터 말은 밭·광산 같이), 기획의 말이 있다.
+  {
+    for (const k of DEBT_REACT_KINDS) assert(debtReactionLabels(k).length >= 2, `${k} 반응 둘 이상`);
+    const all = DEBT_REACT_KINDS.flatMap((k) => debtReactionLabels(k));
+    for (const want of ['맡겨야겠다…', '되찾았다!', '빚이 늘었다…', '홀가분해!', '흙투성이 한숨', '빚이 반으로!', '빚이 사라졌다!', '언제 내 차례…']) assert(all.includes(want), `반응 '${want}'`);
+    console.log(`  넷째 묶음 반응 표 OK (${DEBT_REACT_KINDS.length}종류, ${new Set(all).size}가지)`);
+  }
+
+  // j) 오래 돌리기 (넷째 묶음 건물이 있는 마을, 촌장 있음): 장부 (맡김 = 되찾음 + 컬렉션 + 아직 맡긴 것, 둘로 끝나지 않음),
+  //    빚·금고가 음수가 아니고 (불변식), 파산한 손님은 모두 풀려나거나 아직 일하는 중 (BANKRUPT_MAX 안: 불변식).
+  for (const seed of [7, 8]) {
+    const s = new Sim(newGame(seed));
+    const st = s.state;
+    st.coins = 600;
+    st.buildings.hall.level = 2;
+    for (const d of Object.keys(DISTRICTS) as DistrictId[]) if (DISTRICTS[d].hall <= 2 && !st.districts.includes(d)) st.districts.push(d);
+    for (const id of ['pawnshop', 'bank', 'workyard'] as BuildingId[]) st.buildings[id].level = 1;
+    const t = tallyDebt(s);
+    const chief = makeGreedyChief(seed);
+    const n = Math.round((45 * 60) / SIM.dt);
+    for (let i = 0; i < n; i++) {
+      s.tick(SIM.dt);
+      checkInvariants(s);
+      sampleDebt(t, st, SIM.dt);
+      if (i % 10 === 0) chief(s, () => {});
+    }
+    const errs = checkLedger(s, t);
+    assert(errs.length === 0, `장부: ${errs.slice(0, 3).join(' / ')}`);
+    const d = st.debtTotals;
+    const working = st.monsters.filter((m) => m.bankrupt === true).length;
+    assert(d.relieved + working === d.bankrupt, `파산 ${d.bankrupt} = 풀려남 ${d.relieved} + 일하는 중 ${working}`);
+    assert(d.pawned > 0 && d.forfeited + d.redeemed > 0, `맡김 ${d.pawned}, 되찾음 ${d.redeemed}, 컬렉션 ${d.forfeited}`);
+    console.log(`  넷째 묶음 45분 (시드 ${seed}) OK: ${debtLine(st)}`);
   }
 }
 

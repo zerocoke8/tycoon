@@ -68,6 +68,8 @@ const OBJECT_BOOTHS: Readonly<Record<string, readonly BoothId[]>> = {
 };
 
 const boothReady = (b: BoothId, hall: number): boolean => boothDef(b).unlock.hall <= hall;
+/** 진행자가 아닌 마을 주민 그림 (넷째 묶음: 전당포 주인·은행원·일터 반장). 늘 불러온다. */
+const NPC_ARTS: readonly string[] = ['pawnbroker', 'banker', 'foreman'];
 const speciesHall = (s: string): number | undefined => (SPECIES as Readonly<Record<string, { readonly hall: number } | undefined>>)[s]?.hall;
 
 /**
@@ -83,7 +85,7 @@ function wanted(group: string, key: string, hall: number): boolean {
       return h !== undefined && h <= hall;
     }
     case 'characters':
-      return key === 'chief' || HOST_PRESETS.some((h) => h.art === key);
+      return key === 'chief' || NPC_ARTS.includes(key) || HOST_PRESETS.some((h) => h.art === key);
     case 'map':
       return key !== 'ground';
     case 'closeup':

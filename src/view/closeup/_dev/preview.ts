@@ -2,11 +2,12 @@
 //   ?booth=slot|oddeven|cups|darts|wheel|duck|ring|race|claw|pouch &tier=jackpot|win|nearMiss|lose &at=초(한판 시작 뒤, 그 시각에서 멈춤; 없으면 계속 돈다)
 //   &seats=1|2 (경주장은 6까지) &sp=dragon|crab|… &w=&h= (패널 크기, 없으면 UI와 같은 계산)
 //   ?real=초 : 진짜 Sim을 그만큼 돌린 뒤 한판 중인 부스를 열고, &at=초 더 돌려 멈춘다 (&seed=, &hop=1 부스 바꿔 열기, &catch=초 20초에 몰아서 계산).
+//   넷째 묶음: &acc=acc_tophat,acc_scarf,… (가짜 손님이 단 장신구), &bankrupt=1 (가짜 손님이 파산한 모습: 어둠·슬픈 포즈)
 
 import { Application } from 'pixi.js';
 import { Emitter } from '../../../core/events.ts';
 import { tweens } from '../../../core/tween.ts';
-import { BOOTH_IDS, BOOTHS, HOST_PRESETS, type BoothId, type OutcomeTier, type SpeciesId } from '../../../data/defs.ts';
+import { ACCESSORIES, type AccessoryId, BOOTH_IDS, BOOTHS, HOST_PRESETS, type BoothId, type OutcomeTier, type SpeciesId } from '../../../data/defs.ts';
 import type { SimApi } from '../../../sim/api.ts';
 import type { ActiveRound, BoothState, GameState, Monster, Reaction, RoundDetail, SimEvents } from '../../../sim/types.ts';
 import { Sim, newGame } from '../../../sim/sim.ts';
@@ -19,6 +20,8 @@ const tier = (q.get('tier') ?? 'win') as OutcomeTier;
 const atRaw = q.get('at');
 const seats = Number(q.get('seats') ?? '1');
 const species = (q.get('sp') ?? 'dragon') as SpeciesId;
+const accKeys = (q.get('acc') ?? '').split(',').filter((k): k is AccessoryId => k in ACCESSORIES);
+const bankrupt = q.get('bankrupt') === '1';
 
 function detail(): RoundDetail {
   switch (booth) {
@@ -66,7 +69,7 @@ const REACT: Record<OutcomeTier, Reaction> = {
 };
 
 const mon = (id: number, sp: SpeciesId): Monster =>
-  ({ id, species: sp, nickname: '콩', traits: ['cheerful'], wallet: 50, mood: 60, patience: 3, phase: 'playing', pos: { x: 0, y: 0 }, facing: -1, path: [], booth, seat: id - 1, pose: 'base', stats: { rounds: 0, wins: 0, jackpots: 0, nearMisses: 0, spent: 0, won: 0 }, timer: 0, cheerCooldown: 0, hadJackpot: false, mats: 1 }) as Monster;
+  ({ id, species: sp, nickname: '콩', traits: ['cheerful'], wallet: 50, mood: 60, patience: 3, phase: 'playing', pos: { x: 0, y: 0 }, facing: -1, path: [], booth, seat: id - 1, pose: 'base', stats: { rounds: 0, wins: 0, jackpots: 0, nearMisses: 0, spent: 0, won: 0 }, timer: 0, cheerCooldown: 0, hadJackpot: false, mats: 1, accessories: accKeys.map((k) => ({ key: k, slot: ACCESSORIES[k].slot, value: ACCESSORIES[k].value[0] })), pawned: [], debt: bankrupt ? 40 : 0, bankrupt }) as Monster;
 
 // 진행자: 그 부스 자리마다 그림이 맞는 진행자 (HOST_PRESETS).
 const roles = BOOTHS[booth].roles.map((_, role) => HOST_PRESETS.find((p) => p.booth === booth && p.role === role));

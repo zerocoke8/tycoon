@@ -438,7 +438,12 @@ export class RaceScene implements CloseupScene {
       a.eager = 0;
     }
     this.drawRace(bs, dt);
-    for (const a of this.actors) a?.update(dt, this.time);
+    for (const a of this.actors) {
+      if (a === null) continue;
+      // 장신구·파산 어둠 (넷째 묶음)
+      a.sync(this.sim.monster(a.id), dt);
+      a.update(dt, this.time);
+    }
     for (const h of this.hosts) h?.update(this.time);
     if (this.bubble !== null && this.time >= this.bubble.until) {
       this.bubble.node.destroy({ children: true });

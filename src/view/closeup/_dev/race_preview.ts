@@ -31,7 +31,7 @@ const REACT: Record<OutcomeTier, Reaction> = {
 };
 
 const mon = (id: number, sp: SpeciesId): Monster =>
-  ({ id, species: sp, nickname: '콩', traits: ['cheerful'], wallet: 50, mood: 60, patience: 3, phase: 'playing', pos: { x: 0, y: 0 }, facing: -1, path: [], booth: 'race', seat: id - 1, pose: 'base', stats: { rounds: 0, wins: 0, jackpots: 0, nearMisses: 0, spent: 0, won: 0 }, timer: 0, cheerCooldown: 0, hadJackpot: false, mats: 1 }) as Monster;
+  ({ id, species: sp, nickname: '콩', traits: ['cheerful'], wallet: 50, mood: 60, patience: 3, phase: 'playing', pos: { x: 0, y: 0 }, facing: -1, path: [], booth: 'race', seat: id - 1, pose: 'base', stats: { rounds: 0, wins: 0, jackpots: 0, nearMisses: 0, spent: 0, won: 0 }, timer: 0, cheerCooldown: 0, hadJackpot: false, mats: 1, accessories: [], pawned: [], debt: 0 }) as Monster;
 
 const roles = BOOTHS.race.roles.map((_, role) => HOST_PRESETS.find((p) => p.booth === 'race' && p.role === role));
 const closed = q.get('closed') !== null;

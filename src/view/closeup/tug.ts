@@ -7,6 +7,7 @@
 // 결과 글자는 편마다 하나 (가운데 위 '홍 승리!'·'역전승!'), 코인은 이긴 손님마다 항아리에서.
 // 진행자: 심판(자리 0, 가운데 뒤, 리본을 따라 조금 움직임, 시작 '삐익!'), 응원단장(자리 1, 오른쪽 뒤, 폼폼을 흔들며 응원 말풍선).
 // 판에 끼지 못하고 다음 판을 기다리는 손님(편 인원 맞추기)은 줄을 잡지 않고 뒤에서 응원한다.
+// 빚 걸기 판 (넷째 묶음): 편마다 채무자 1~2 (발밑 표 = 편 + 건 빚, 앞뒤 줄로 엇갈림), 결과 글자·표 숫자는 GroupScene.
 
 import { Container, Graphics } from 'pixi.js';
 import { SIDES, SPECIES } from '../../data/defs.ts';
@@ -127,6 +128,15 @@ export class TugScene extends GroupScene {
   protected override pickText(e: GroupEntry): string | null {
     // 자리가 붙어 있어 짧게 (편 이름만).
     return SIDE_NAME(e.pick);
+  }
+
+  /** 빚 걸기 판 채무자 표: 자리가 붙어 있어 뒷줄(k 홀수)은 발 바로 아래, 앞줄은 조금 더 아래·바깥으로 엇갈린다. */
+  protected override debtBadgeAt(seat: number, fs: number): { x: number; y: number } {
+    const at = this.seatAt[seat];
+    if (at === undefined) return super.debtBadgeAt(seat, fs);
+    const back = Math.floor(seat / 2) % 2 === 1;
+    const out = sideOf(seat) === 0 ? -1 : 1;
+    return back ? { x: at.x, y: at.y + fs * 0.25 } : { x: at.x + out * fs * 0.9, y: at.y + fs * 1.55 };
   }
 
   protected drawPlay(play: GroupPlay | null, t: number, dt: number): void {

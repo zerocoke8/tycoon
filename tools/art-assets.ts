@@ -359,7 +359,7 @@ const CHARACTERS: readonly Entry[] = [
   ),
   villager(
     'host_cups',
-    '컵 야바위 부스 진행자',
+    '구슬 찾기 부스 진행자',
     'the host of the cup game booth: a skinny, playful young man with a big floppy flat cap (#8a7a6a) over messy dark hair, a lavender shirt (#c9b8e0), a brown vest, brown trousers. ' +
       'He holds one small upside-down wooden cup in one hand. A mischievous but kind wink.',
   ),
@@ -465,7 +465,7 @@ const BUILDINGS: readonly Entry[] = [
   ),
   building(
     'booth_cups',
-    '컵 야바위 부스',
+    '구슬 찾기 부스',
     'A small play booth: the CUP game booth. A small round striped tent in cream (#f6ebd5) and soft lavender (#c9b8e0) with a pointed top and a little flag, its front flaps tied open, ' +
       'and in front of it a small round wooden table with three small upside-down brown wooden cups in a row and one small red ball (#c9614a) beside them.',
   ),
@@ -532,7 +532,7 @@ const CLOSEUP_BGS: readonly Entry[] = [
   ),
   closeupBg(
     'bg_cups',
-    '컵 야바위 부스 확대 배경',
+    '구슬 찾기 부스 확대 배경',
     'This booth: the CUP game tent. The inside of a striped tent: plain flat pale lavender (#e6ddf1) cloth walls filling most of the image with two or three soft vertical cream stripes, a scalloped tent edge across the very top, ' +
       'and a plain warm wooden floor strip (#c9995f) across the bottom fifth of the image with one simple floor line.',
   ),
@@ -561,7 +561,7 @@ const OBJECTS: readonly Entry[] = [
     { max: 400 },
   ),
   closeupObject('table', '부스 탁자', 'A small low round-cornered wooden table (#a0703f) seen from the front, a plain cream tablecloth (#f6ebd5) hanging over its front edge, short stubby legs. Nothing on top of the table.', { max: 640 }),
-  closeupObject('cup', '야바위 컵', 'ONE small upside-down wooden cup (#a0703f), wider at the bottom, with one simple band line around it.', { small: true, max: 256 }),
+  closeupObject('cup', '구슬 찾기 컵', 'ONE small upside-down wooden cup (#a0703f), wider at the bottom, with one simple band line around it.', { small: true, max: 256 }),
   closeupObject('ball', '구슬', 'ONE small round red ball (#c9614a), a plain circle with nothing on it.', { small: true, max: 128 }),
   closeupObject('dartboard', '다트 과녁', 'A big round dart target board hanging flat: three plain rings (outer cream #f6ebd5, middle soft orange #f2b279, small red center #c9614a), a plain brown wooden rim (#8a5a3a), NO numbers, NO lines dividing it.', { max: 640 }),
   closeupObject('dart', '다트', 'ONE toy dart pointing to the right: a short round wooden body (#a0703f), a soft cream feather tail (#f6ebd5) at its left end, a round blunt metal tip (#b3aea8) at its right end.', { small: true, max: 192 }),
@@ -1074,6 +1074,85 @@ const GROUP_STAFF: readonly Entry[] = [
   villager('kite_wind', '바람지기', 'the wind watcher of the kite contest: a small dreamy child with fluffy light brown hair, a soft yellow raincoat (#f3d36a), holding up a little colorful pinwheel on a stick. Looking up at the sky with a tiny smile.'),
 ];
 
+// ── 넷째 묶음 (2026-10-18): 장신구·전당포·은행·파산·일터 ───────────────────────────
+// 손님이 몸에 달고 오는 장신구 (머리·목·옆구리에 코드로 붙인다: 작게 보이니 아이템 아이콘 세트처럼 굵게).
+// 돈이 떨어지면 전당포에 장신구를 맡기고, 그래도 모자라면 은행 대출, 못 갚으면 파산해서 일터(밭·광산)에서 일한다.
+// 고블린에게는 돈주머니를 달지 않는다 (고블린+돈 = 비하 고정관념, Codex 안전 검사에도 걸렸다).
+
+const ACCESSORIES: readonly Entry[] = [
+  itemIcon('acc_flower_crown', '장신구: 꽃관 (머리)', ITEM('One small round flower crown: a ring of green leaves (#8fae6b) with four small round flowers (soft pink #f2b5a8, cream, soft yellow #f3d36a, soft orange #f2b279), seen a little from the front.')),
+  itemIcon('acc_ribbon', '장신구: 리본 (머리)', ITEM('One plump ribbon bow in soft red (#c9614a) with two short rounded tails, seen from the front.')),
+  itemIcon('acc_tophat', '장신구: 작은 실크햇 (머리)', ITEM('One tiny chunky top hat in soft charcoal (#5f5a55, clearly lighter than the outline) with a soft red band (#c9614a) and a short brim, seen from the front.')),
+  itemIcon('acc_straw_hat', '장신구: 밀짚모자 (머리)', ITEM('One small round straw hat (#e2c27a) with a wide brim and a soft blue band (#7fa8d6), seen a little from the front.')),
+  itemIcon('acc_star_pin', '장신구: 별 머리핀 (머리)', ITEM('One small chunky hair clip with a plump five-pointed star in soft yellow (#f3d36a) on it, seen from the front.')),
+  itemIcon('acc_mini_crown', '장신구: 작은 왕관 (머리, 귀함)', ITEM('One tiny chunky golden crown (#f3d36a) with three rounded points, each tipped with a small round sky-blue gem (#8ec8ee). No shine.')),
+  itemIcon('acc_scarf', '장신구: 목도리 (목)', ITEM('One short cozy knitted-looking scarf in soft mint (#bfe6d2) loosely tied in a loop with two short hanging ends, drawn as flat simple shapes (no knit texture).')),
+  itemIcon('acc_pearl_necklace', '장신구: 진주 목걸이 (목, 귀함)', ITEM('One short necklace of seven round cream-white pearls (#f4efe3) on a thin string, curved in a U shape, seen from the front. No shine.')),
+  itemIcon('acc_bell_collar', '장신구: 방울 목걸이 (목)', ITEM('One small soft red collar band (#c9614a) curved in a U shape with one round golden bell (#d9a441) hanging in the middle.')),
+  itemIcon('acc_coin_pouch', '장신구: 돈주머니 (옆구리)', ITEM('One small round cloth coin pouch in warm brown (#a0785a) tied at the top with a cord, two round gold coins (#f3d36a) peeking out of the opening.')),
+];
+
+const DEBT_MAP: readonly Entry[] = [
+  building(
+    'pawnshop',
+    '전당포',
+    'The village pawnshop: a narrow cozy two-story shop with soft lavender-grey walls (#b9b0c8), a dark plum roof (#7a5f78), a round-topped door, and one big front display window with a few small treasures inside (a tiny crown, a ribbon, a hat) on little shelves. ' +
+      'Signs carry only a simple picture symbol of three small round balls hanging from a bar.',
+  ),
+  building(
+    'bank',
+    '은행',
+    'The village bank: a small sturdy cream stone building (#e8dfcc) with two short round columns at the front, a low triangular roof in soft blue-grey (#8b9bb0), a heavy round-topped wooden door, and two small barred windows. ' +
+      'Signs carry only a simple picture symbol of a round gold coin.',
+  ),
+  building(
+    'farm_plot',
+    '일터: 밭',
+    'A small fenced vegetable field for the village work yard: a rectangle of tilled soft brown soil (#a0785a) in four simple rows with small green sprouts and a few round cabbages, a low simple wooden fence on two sides, ' +
+      'and a small wooden tool rack with a hoe and a watering can at one corner. Seen in the 3/4 top-down view. No people.',
+  ),
+  building(
+    'mine_entrance',
+    '일터: 광산',
+    'A small mine entrance for the village work yard: a low rounded rocky hill in soft grey (#b3aea8) with a dark tunnel opening framed by chunky wooden beams (#a0703f), a short rail track coming out of it, ' +
+      'and a lantern hanging by the entrance drawn as a flat warm yellow square (no glow). No people.',
+  ),
+  prop('ore_cart', '광석 수레', 'A small mine cart on a short piece of rail, full of round grey ore lumps (#9a948d) with two small soft yellow specks.'),
+  prop('crop_basket', '채소 바구니', 'A round woven basket (#c9995f) full of fresh vegetables: two round cabbages, a few carrots with green tops and one potato.'),
+];
+
+const DEBT_ITEMS: readonly Entry[] = [
+  itemIcon('hoe', '괭이 (노동 도구)', ITEM('One small chunky garden hoe lying diagonally: a short wooden handle (#a0703f) with a flat rounded grey blade (#b3aea8) at a right angle at the end.')),
+  itemIcon('pickaxe', '곡괭이 (노동 도구)', ITEM('One small chunky pickaxe lying diagonally: a short wooden handle (#a0703f) with a curved grey head (#b3aea8) with two blunt rounded ends.')),
+  itemIcon('mat_veggie', '채소 (일터 밭)', ITEM('A small bunch of fresh vegetables: one round green cabbage (#9cbf7a) and two orange carrots (#f2a65a) with green tops.')),
+];
+
+const DEBT_STAFF: readonly Entry[] = [
+  villager(
+    'pawnbroker',
+    '전당포 주인',
+    'the village pawnbroker: a gentle, slightly sleepy old man with a round bald head and a small round white mustache, a jeweler loupe on a cord around his neck, a soft plum vest (#7a5f78) over a cream shirt. He holds a small ribbon up to look at it closely. A kind, curious smile.',
+    {
+      note: '둘째 판 (후보 둘 중 A: 얼굴이 가장 단순하고 동글하다. B는 pawnbroker.try1.png). 첫 판(pawnbroker.rejected1.png)은 사용자 지적: 그림체가 다르다 (외곽선이 옅은 갈색으로 흐리고, 주름·귀 옆 머리털 같은 잔디테일, 살짝 칠한 느낌).',
+      extra:
+        'IMPORTANT style: use the SAME very thick, bold, DARK brown (almost black-brown) outline as the second image on every shape, a clean solid line, NOT a faded or light brown line. ' +
+        'Flat colors only, no soft shading, no painterly texture. Keep the face as simple as the second image: two dot eyes, a tiny mouth, one small round mustache blob; NO wrinkles, NO cheek or forehead lines, NO ear hair tufts, NO extra hair strands.',
+    },
+  ),
+  villager('banker', '은행원', 'the village banker: a neat young woman with a short tidy dark bob, round glasses, a soft blue-grey jacket (#8b9bb0) over a cream blouse, holding a thick plain ledger book under one arm and a small round coin in the other hand. A polite, calm smile.'),
+  villager(
+    'foreman',
+    '일터 반장',
+    'the foreman of the village work yard: a sturdy, kind middle-aged woman with a short round brown hair blob under a yellow hard hat (#f3d36a), a moss-green work apron (#8fae6b), rolled sleeves, a whistle on a cord, holding a small clipboard. A strict but warm smile.',
+    {
+      note: '둘째 판 (후보 둘 중 A: 선 21px, 매끈한 덩어리 머리. B는 foreman.try1.png). 첫 판(foreman.rejected1.png)은 사용자 지적: 그림체가 다르다 (곱슬머리가 잔 가닥·질감으로 그려지고 얼굴 디테일이 많다).',
+      extra:
+        'IMPORTANT style: use the SAME very thick, bold, dark brown outline as the second image on every shape. The hair is ONE or two big simple smooth blob shapes like the second image, with at most two inner lines: NO curls drawn as strands, NO hair texture. ' +
+        'Keep the face as simple as the second image: two dot eyes and a tiny mouth (at most two tiny round blush dots); no eyebrow lines, no extra face lines. Flat colors only, no shading.',
+    },
+  ),
+];
+
 // ── 목록 ─────────────────────────────────────────────────────────────────
 
 /**
@@ -1109,6 +1188,9 @@ export const PROJECT_ASSETS: readonly ArtAsset[] = lockLeads([
   ...inGroup('items', ...GROUP_ITEMS),
   ...inGroup('closeup', ...GROUP_CLOSEUP),
   ...inGroup('characters', ...GROUP_STAFF),
+  ...inGroup('items', ...ACCESSORIES, ...DEBT_ITEMS),
+  ...inGroup('map', ...DEBT_MAP),
+  ...inGroup('characters', ...DEBT_STAFF),
 ]);
 
 // 쓰지 않는 키트 이름 (빌드 검사에서 지우지 않게): mapSameSet은 놀이부스 다음 판에서 쓸 수 있다.

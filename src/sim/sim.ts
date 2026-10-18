@@ -2,24 +2,27 @@
 // 손님 상태 기계: arriving → wandering → toBooth → queued → toSeat → playing → reacting → (다시 한판 | wandering | resting | leaving).
 // 걷는 phase는 path가 남아 있는 동안 걷고, 다 걸으면 그 phase의 일을 한다 (wandering·resting·spectating은 timer만큼 머문다).
 // 무작위는 모두 this.rng (상태는 GameState.rng에 바로 쓰인다).
+// 넷째 묶음 (DESIGN 3.7): 돈이 떨어진 손님 → 전당포(장신구 맡기기)·은행(대출) 볼일 (toPawnshop·atPawnshop·toBank·atBank) → 지갑이 넉넉해지면 되찾기·갚기,
+// 떠날 때 빚을 못 갚으면 파산 → 일터 (toWork → working | waitWork) → 다 갚으면 relieved → 떠나 단골. 빚 걸기 판은 '단체 놀이' 묶음의 mode 'debt'.
 
 import { Emitter } from '../core/events.ts';
 import { Rng } from '../core/rng.ts';
-import { BOOTHS, BOOTH_IDS, boothDef, GROUP_RULES, isGroupBooth, MATERIALS, MOOD, PRECIOUS, RECIPES, SIM, SPECIES, SPECIES_IDS, STAFF_STAT_NAMES, type BoothId, type BuildingId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type PreciousId, type SpeciesId } from '../data/defs.ts';
-import { BOOTH_SPOTS, BUILDING_SPOTS, DISTRICTS, NODES, REST_SPOTS, type DistrictId, type Pt } from '../data/map.ts';
+import { ACCESSORIES, BANK, BOOTHS, BOOTH_IDS, boothDef, BUILD_HALL, BUILDINGS, DEBT_MATCH, GROUP_RULES, isGroupBooth, LABOR, MATERIALS, MOOD, PAWN, PRECIOUS, RECIPES, SIDES, SIM, SPECIES, SPECIES_IDS, STAFF_STAT_NAMES, VAULT, WORK_FACILITIES, type AccessoryId, type BoothId, type BuildingId, type GoodId, type GroupBoothId, type MaterialId, type OutcomeTier, type PreciousId, type SpeciesId } from '../data/defs.ts';
+import { BOOTH_SPOTS, BUILDING_SPOTS, DISTRICTS, NODES, REST_SPOTS, SHOP_SPOTS, WORK_YARD, type DistrictId, type Pt } from '../data/map.ts';
 import type { Cost, Result, SimApi } from './api.ts';
 import * as B from './booths.ts';
-import { addMaterial, canAfford, costOf, fountainMoodPerMin, gateSpawnSec, goodDef, hallVisitors, missingReason, nextBuildingCost, officeCandidates, pay, warehouseCap, workshopSlots, workshopSpeed } from './economy.ts';
+import { addMaterial, canAfford, costOf, fountainMoodPerMin, gateSpawnSec, goodDef, hallVisitors, isBuilt, missingReason, nextBuildingCost, officeCandidates, pay, warehouseCap, workshopSlots, workshopSpeed } from './economy.ts';
+import { bankLoan, bankOpenFor, canLend, counterPt, debtEligible, errandShop, laborGauge, laborRate, loanDebt, pairDebtors, pawnPick, pawnPrice, pickWorkSpot, redeemCost, redeemPick, waitPt, wantMore, workPt, workSlots } from './debt.ts';
 import { decideOutcome } from './games.ts';
 import { betFraction, createMonster, displayName, faceToward, nameSubject, speedOf, stepMove } from './monsters.ts';
 import { dist, distancesFrom, nearestNodes, openNodes, pointOpen, route } from './path.ts';
-import { groupGame, groupGatherSec, groupStartSoonSec, idleGroup } from './group/index.ts';
-import { cheerKey, groupBuzzReaction, groupCheerReaction, groupSpectateReaction, moodDelta, pickReaction, snackReaction, spectateReaction } from './reactions.ts';
+import { groupGame, groupGatherSec, groupStartSoonSec, idleGroup, type GroupReadiness } from './group/index.ts';
+import { cheerKey, debtReaction, groupBuzzReaction, groupCheerReaction, groupSpectateReaction, moodDelta, pickReaction, snackReaction, spectateReaction, type DebtReactKind } from './reactions.ts';
 import { clearSave, newGame, saveGame } from './save.ts';
 import { fillCandidates, hirePost, levelUpCost, presetCandidates, presetPost, raiseStat, suits } from './staff.ts';
 import { josa } from './text.ts';
 import { TUNE } from './tuning.ts';
-import type { ActiveRound, GameState, GroupBuzz, GroupCheer, GroupEntry, GroupPlay, GroupState, Monster, MonsterId, MonsterPhase, Pose, Regular, RoundOutcome, SimBus, SimEvents, Staff, StaffId, StaffPost } from './types.ts';
+import type { ActiveRound, DebtChange, Errand, GameState, GroupBuzz, GroupCheer, GroupEntry, GroupPlay, GroupState, LaborState, Monster, MonsterId, MonsterPhase, Pose, Reaction, Regular, RoundOutcome, SimBus, SimEvents, Staff, StaffId, StaffPost } from './types.ts';
 
 export { clearSave, loadGame, newGame, saveGame } from './save.ts';
 
@@ -30,7 +33,10 @@ const clampMood = (v: number): number => Math.max(0, Math.min(100, v));
 const CATCHUP_TOAST_SEC = 20;
 
 /** catchUp 동안 내지 않는 연출 이벤트 (끝나고 coinsChanged·itemsChanged·요약 토스트를 한 번씩 낸다). */
-const QUIET_EVENTS: ReadonlySet<string> = new Set(['monsterReact', 'monsterSpectate', 'monsterCheered', 'roundStarted', 'roundFinished', 'potFestival', 'groupJoined', 'groupStarted', 'groupEvent', 'groupFinished', 'groupCancelled', 'coinsChanged', 'itemsChanged', 'toast']);
+const QUIET_EVENTS: ReadonlySet<string> = new Set([
+  'monsterReact', 'monsterSpectate', 'monsterCheered', 'roundStarted', 'roundFinished', 'potFestival', 'groupJoined', 'groupStarted', 'groupEvent', 'groupFinished', 'groupCancelled', 'coinsChanged', 'itemsChanged', 'toast',
+  'pawned', 'redeemed', 'pawnCollected', 'vaultEmpty', 'loanTaken', 'loanRepaid', 'bankrupt', 'laborTick', 'laborOutput', 'foremanCheer', 'debtCleared', 'debtMatchCalled', 'debtSettled',
+]);
 
 const samePost = (a: StaffPost | null, b: StaffPost | null): boolean => (a === null || b === null ? a === b : a.booth === b.booth && a.role === b.role);
 
@@ -41,10 +47,18 @@ export class Sim implements SimApi {
   private quiet = false;
   private quietItems = false;
   private lastCapToast = -Infinity;
+  private lastVaultToast = -Infinity;
 
   constructor(state: GameState) {
     this.state = state;
     state.regulars ??= [];
+    state.pawnCollection ??= {};
+    state.debtTotals ??= { pawned: 0, redeemed: 0, forfeited: 0, loans: 0, repaid: 0, bankrupt: 0, relieved: 0, forgiven: 0, matches: 0, laborMats: 0, laborBy: { farm: 0, mine: 0 } };
+    state.debtTotals.laborBy ??= { farm: 0, mine: 0 };
+    state.debtTotals.forgiven ??= 0;
+    state.foremanTimer ??= LABOR.foreman.everySec;
+    state.debtMatchAt ??= {};
+    state.debtCheck ??= DEBT_MATCH.checkSec;
     // 난수 상태를 GameState.rng에 바로 읽고 쓴다 (저장·불러오기 뒤에도 같은 흐름).
     const rng = new Rng(0);
     Object.defineProperty(rng, 'state', {
@@ -69,8 +83,9 @@ export class Sim implements SimApi {
     this.bus.emit(type, payload);
   }
 
-  private toast(text: string, kind: 'info' | 'good' | 'warn' = 'info'): void {
-    this.emit('toast', { text, kind });
+  /** 알림 (topic 'debt' = 빚 알림 묶음: UI가 자주 띄우지 않는다, booth = 그 부스 이야기: 그 부스 패널이 열려 있으면 UI가 건너뛴다). */
+  private toast(text: string, kind: 'info' | 'good' | 'warn' = 'info', topic?: 'debt', booth?: BoothId): void {
+    this.emit('toast', { text, kind, ...(topic === undefined ? {} : { topic }), ...(booth === undefined ? {} : { booth }) });
   }
 
   /** 마을 수입 (참가비·팁). */
@@ -123,6 +138,17 @@ export class Sim implements SimApi {
     return nextBuildingCost(this.state, id);
   }
 
+  buildingBuilt(id: BuildingId): boolean {
+    return isBuilt(this.state, id);
+  }
+
+  buildingLockReason(id: BuildingId): string | null {
+    if (isBuilt(this.state, id)) return null;
+    const need = BUILD_HALL[id];
+    if (need === undefined || this.hallLevel() >= need) return null;
+    return `마을회관 레벨 ${need}부터 지을 수 있어요.`;
+  }
+
   boothUnlockCost(booth: BoothId): Cost | null {
     if (this.state.booths[booth].unlocked) return null;
     const u = boothDef(booth).unlock;
@@ -173,6 +199,8 @@ export class Sim implements SimApi {
     this.tickCandidates(dt);
     this.tickCrafting(dt);
     this.tickBooths(dt);
+    this.tickDebtMatches(dt);
+    this.tickForeman(dt);
     for (const m of st.monsters.slice()) this.tickMonster(m, dt);
     for (const b of BOOTH_IDS) this.pump(b);
   }
@@ -220,8 +248,8 @@ export class Sim implements SimApi {
     const st = this.state;
     st.spawnTimer -= dt;
     if (st.spawnTimer > 0) return;
-    // 입구에서 걸어 들어오는 손님은 세지 않는다 (지도가 커도 노는 손님 수가 그대로).
-    const present = st.monsters.filter((m) => m.phase !== 'leaving' && m.phase !== 'arriving').length;
+    // 입구에서 걸어 들어오는 손님과 일터의 채무자는 세지 않는다 (지도가 커도, 채무자가 많아도 노는 손님 수가 그대로).
+    const present = st.monsters.filter((m) => m.phase !== 'leaving' && m.phase !== 'arriving' && m.bankrupt !== true).length;
     if (present >= hallVisitors(st)) {
       st.spawnTimer = TUNE.spawnRetrySec;
       return;
@@ -239,7 +267,8 @@ export class Sim implements SimApi {
     if (regs.length > 0 && rng.chance(TUNE.regularChance)) {
       const i = rng.int(0, regs.length - 1);
       const r = regs[i];
-      if (r !== undefined && SPECIES[r.species].hall <= this.hallLevel()) {
+      // 같은 종·이름의 손님이 지금 마을에 있으면 이번엔 부르지 않는다 (같은 손님이 둘로 보이지 않게).
+      if (r !== undefined && SPECIES[r.species].hall <= this.hallLevel() && !st.monsters.some((o) => o.species === r.species && o.nickname === r.nickname)) {
         regular = r;
         regs.splice(i, 1);
       }
@@ -253,6 +282,7 @@ export class Sim implements SimApi {
     m.path = route(m.pos, this.arrivePoint(), st.districts);
     this.emit('monsterSpawned', { id: m.id });
     if (first) this.toast(`처음 보는 손님이 왔어요: ${SPECIES[m.species].name}`, 'good');
+    else if (regular?.recovered === true) this.toast(`빚을 다 갚고 떠났던 단골 ${nameSubject(m)} 다시 놀러 왔어요.`, 'good');
     else if (regular !== null) this.toast(`단골 ${nameSubject(m)} 다시 놀러 왔어요.`, 'good');
   }
 
@@ -344,8 +374,9 @@ export class Sim implements SimApi {
     return this.state.time - (m.firstPlay ?? m.born ?? this.state.time);
   }
 
-  /** 반응이 끝난 뒤의 포즈: 빈털터리로 떠나는 손님은 시무룩. */
+  /** 반응이 끝난 뒤의 포즈: 파산한 손님은 늘 축 처짐, 빈털터리로 떠나는 손님은 시무룩. */
   private idlePose(m: Monster): Pose {
+    if (m.bankrupt === true) return 'sad';
     return m.phase === 'leaving' && m.broke === true && m.snacked !== true ? 'sad' : 'base';
   }
 
@@ -360,7 +391,7 @@ export class Sim implements SimApi {
         if (m.phase !== 'reacting') m.pose = this.idlePose(m);
       }
     }
-    if (m.phase !== 'leaving') {
+    if (m.phase !== 'leaving' && m.bankrupt !== true) {
       const f = fountainMoodPerMin(st);
       if (f > 0) m.mood = clampMood(m.mood + (f / 60) * dt);
     }
@@ -420,6 +451,28 @@ export class Sim implements SimApi {
       case 'leaving':
         this.depart(m);
         break;
+      case 'toPawnshop':
+      case 'toBank':
+        this.arriveShop(m);
+        break;
+      case 'atPawnshop':
+      case 'atBank':
+        m.timer -= dt;
+        if (m.timer <= 0) this.finishErrand(m);
+        break;
+      case 'toWork':
+        this.arriveWork(m);
+        break;
+      case 'working':
+        this.tickLabor(m, dt);
+        break;
+      case 'waitWork':
+        this.tickWaitWork(m);
+        break;
+      case 'relieved':
+        m.timer -= dt;
+        if (m.timer <= 0) this.leave(m);
+        break;
     }
   }
 
@@ -441,6 +494,19 @@ export class Sim implements SimApi {
     const rng = this.rng;
     const last = m.booth;
     this.detach(m);
+    // 파산한 손님은 일터로 (빚 걸기 판이 끝났거나 접혔을 때도).
+    if (m.bankrupt === true) {
+      this.goWork(m);
+      return;
+    }
+    // 지갑이 넉넉해졌으면 은행 빚을 갚거나 맡긴 장신구를 되찾으러 간다.
+    if (this.goSettle(m, false)) return;
+    // 거의 다 잃었지만 더 놀고 싶다: 전당포·은행 (끈기·머문 시간이 남았을 때, 더 놀고 싶은지는 seekMoney가 묻는다).
+    // 돈이 다시 넉넉해졌으면 '싫다'고 한 것을 잊는다 (다음에 또 떨어지면 다시 묻는다).
+    if (!this.shortOfMoney(m)) {
+      if (m.declined) delete m.declined;
+    } else if (this.seekMoney(m)) return;
+    this.chaseDebt(m);
     if (this.shouldLeave(m)) {
       this.leave(m);
       return;
@@ -528,7 +594,25 @@ export class Sim implements SimApi {
     this.pump(b);
   }
 
+  /**
+   * 집에 가고 싶다: 갚을 은행 빚·되찾을 장신구가 있고 지갑으로 낼 수 있으면 먼저 들른다 (볼일 뒤 다시 leave).
+   * 빚을 못 갚으면 파산 (일터로). 아니면 입구로 (goHome). 파산한 손님은 일터로.
+   */
   private leave(m: Monster): void {
+    if (m.bankrupt === true) {
+      this.goWork(m);
+      return;
+    }
+    if (this.goSettle(m, true)) return;
+    if (m.debt > 0) {
+      this.goBankrupt(m);
+      return;
+    }
+    this.goHome(m);
+  }
+
+  /** 입구로 걸어 나간다 (볼일이 다 끝난 손님). */
+  private goHome(m: Monster): void {
     this.detach(m);
     this.setPhase(m, 'leaving');
     m.path = route(m.pos, NODES.gate, this.state.districts, 'gate');
@@ -588,6 +672,13 @@ export class Sim implements SimApi {
         if (r !== null && r !== undefined && r.monster === id) bs.rounds[i] = null;
       }
     }
+    if (!B.boothOpen(st, b)) {
+      // 닫힌 부스: 자리로 걸어가던 손님도 다른 걸 하러 간다 (멀리서 오던 손님이 닫힌 자리를 붙잡고 있지 않게).
+      for (const id of bs.seats) {
+        const m = id === null ? undefined : this.monster(id);
+        if (m !== undefined && m.phase === 'toSeat') this.decideSoon(m);
+      }
+    }
     if (bs.queue.length === 0) return;
     if (!B.boothOpen(st, b)) {
       for (const id of bs.queue.splice(0)) {
@@ -598,6 +689,8 @@ export class Sim implements SimApi {
       }
       return;
     }
+    // 빚 걸기 판 중인 (또는 예약된) 줄다리기 (구경하며 거는 자리가 없다): 채무자 말고는 앉히지 않는다 (줄은 판이 끝날 때까지 기다린다).
+    if ((bs.group?.mode === 'debt' || bs.group?.debtNext === true) && (DEBT_MATCH.watchOnly as readonly BoothId[]).includes(b)) return;
     B.fitSeats(st, b);
     const n = B.boothSeats(st, b);
     // 단체 놀이는 놀이 모듈이 자리를 고른다 (씨름 선수·구경, 줄다리기 적은 편 …). 그 밖은 앞자리부터.
@@ -605,7 +698,8 @@ export class Sim implements SimApi {
     let moved = false;
     for (;;) {
       const free: number[] = [];
-      for (let i = 0; i < n; i++) if ((bs.seats[i] ?? null) === null) free.push(i);
+      // 빚 걸기 판이 예약된 부스의 선수 자리는 비워 둔다.
+      for (let i = 0; i < n; i++) if ((bs.seats[i] ?? null) === null && !this.debtHeld(b, i)) free.push(i);
       if (free.length === 0) break;
       let m: Monster | undefined;
       while (m === undefined && bs.queue.length > 0) m = this.monster(bs.queue.shift() as MonsterId);
@@ -636,7 +730,9 @@ export class Sim implements SimApi {
     const st = this.state;
     const b = m.booth;
     const i = m.seat;
-    if (b === null || i === null || st.booths[b].seats[i] !== m.id || !B.boothOpen(st, b) || !B.canPlay(st, b, m)) {
+    // 빚 걸기 판에 불린 채무자는 코인 없이 (자기 빚을 건다).
+    const debtor = b !== null && this.isDebtor(b, m);
+    if (b === null || i === null || st.booths[b].seats[i] !== m.id || !B.boothOpen(st, b) || (!debtor && !B.canPlay(st, b, m))) {
       this.decide(m);
       return;
     }
@@ -690,8 +786,9 @@ export class Sim implements SimApi {
   /**
    * 한판 끝: 지급·기분·반응. crowd = 근처 손님이 따라 반응 (단체 놀이는 판 하나에 한 번, groupCrowd).
    * settled = 이미 항아리에서 뺀 지급 (단체 놀이는 이긴 손님을 한꺼번에 나눈다: finishGroup).
+   * react = 이 반응으로 (빚 걸기 판의 채무자: 빚이 반·0·늘어남 반응), 없으면 결과 반응 표에서 고른다.
    */
-  private finishRound(b: BoothId, seat: number, r: ActiveRound, crowd = true, settled: { payout: number; festival: boolean } | null = null): void {
+  private finishRound(b: BoothId, seat: number, r: ActiveRound, crowd = true, settled: { payout: number; festival: boolean } | null = null, react: Reaction | null = null): void {
     const st = this.state;
     const rng = this.rng;
     const bs = st.booths[b];
@@ -727,8 +824,8 @@ export class Sim implements SimApi {
     st.totals.rounds += 1;
     m.patience = Math.max(0, m.patience - 1);
     const cheer = B.boothCheer(bs);
-    // 빈털터리: 이기지 못했고 더 놀 코인이 없다 (돌려받은 코인이 있어도).
-    const broke = !won && m.wallet < B.minPlayCost(st);
+    // 빈털터리: 이기지 못했고 더 놀 코인이 없다 (돌려받은 코인이 있어도). 빚 걸기 판의 채무자는 빼고.
+    const broke = m.bankrupt !== true && !won && m.wallet < B.minPlayCost(st);
     if (broke) m.broke = true;
     const charm = B.boothStat(st, b, 'charm');
     const def = boothDef(b);
@@ -743,7 +840,7 @@ export class Sim implements SimApi {
     if (d.kind === 'pouch' && d.content === 'jackpot') m.surePrecious = true;
     const shown: OutcomeTier = festival ? 'jackpot' : tier;
     // 축제로 받은 대박은 부스 대박 반응('종이다 종!' 등)이 아니라 공용 대박 반응으로.
-    const reaction = pickReaction(rng, broke ? 'broke' : shown, m, cheer?.reactionBoost ?? 1, festival && tier !== 'jackpot' ? null : b, d);
+    const reaction = react ?? pickReaction(rng, broke ? 'broke' : shown, m, cheer?.reactionBoost ?? 1, festival && tier !== 'jackpot' ? null : b, d);
     this.setPhase(m, 'reacting');
     m.pose = reaction.pose;
     m.poseTime = 0;
@@ -762,14 +859,34 @@ export class Sim implements SimApi {
   private afterReact(m: Monster): void {
     const st = this.state;
     const wasAgony = m.pose === 'agony';
-    m.pose = 'base';
-    if (m.broke === true) {
+    m.pose = m.bankrupt === true ? 'sad' : 'base';
+    // 파산한 손님 (빚 걸기 판이 끝났다·파산 반응이 끝났다): 다 갚았으면 홀가분, 아니면 일터로.
+    if (m.bankrupt === true) {
+      if (m.debt <= 0) this.relieve(m, false);
+      else this.goWork(m);
+      return;
+    }
+    // 집에 가는 길에 볼일을 마쳤다 (되찾기·갚기): 다시 집으로 (남은 볼일이 있으면 그것 먼저).
+    if (m.homeward === true) {
+      m.homeward = false;
       this.leave(m);
       return;
     }
+    if (m.broke === true) {
+      // 돈이 떨어졌지만 더 놀고 싶으면 전당포·은행으로 (빈털터리로 떠나지 않는다).
+      if (this.seekMoney(m)) {
+        m.broke = false;
+        return;
+      }
+      this.leave(m);
+      return;
+    }
+    // 거의 다 잃었다 (아직 놀 수는 있다): 같은 자리에서 다시 하기 전에 더 놀고 싶은지 묻는다 (전당포·은행). 빚이 있으면 갚으려고 한판만 더.
+    if (this.shortOfMoney(m) && this.seekMoney(m)) return;
+    this.chaseDebt(m);
     const b = m.booth;
     const seat = m.seat;
-    if (b !== null && seat !== null && st.booths[b].seats[seat] === m.id && B.boothOpen(st, b) && B.canPlay(st, b, m) && !this.shouldLeave(m)) {
+    if (b !== null && seat !== null && st.booths[b].seats[seat] === m.id && B.boothOpen(st, b) && B.canPlay(st, b, m) && !this.shouldLeave(m) && !this.debtHeld(b, seat)) {
       const pa = TUNE.playAgain;
       let p: number = pa.base;
       if (wasAgony) p += pa.afterNearMiss;
@@ -790,7 +907,7 @@ export class Sim implements SimApi {
     const rng = this.rng;
     const at = B.seatPt(b, seat);
     for (const o of this.state.monsters) {
-      if (o === m || o.phase === 'leaving' || o.phase === 'playing' || o.phase === 'reacting') continue;
+      if (o === m || o.phase === 'leaving' || o.phase === 'playing' || o.phase === 'reacting' || o.bankrupt === true) continue;
       if (dist(o.pos, at) > TUNE.spectateRadius) continue;
       const watcher = o.traits.includes('watcher');
       if (tier === 'win' && !watcher) continue;
@@ -837,21 +954,27 @@ export class Sim implements SimApi {
     faceToward(m, game.face(seat).x);
     if (g.phase === 'running' || g.phase === 'done') return;
     if (g.participants.some((e) => e.monster === m.id)) return;
-    const fee = B.boothFee(st, b);
+    // 반장이 빚 걸기 판을 예약한 부스: 쉬는 판을 새로 열지 않고 (구경 자리에서) 빚 걸기 판을 기다린다.
+    if (g.phase === 'idle' && g.debtNext === true) return;
+    // 빚 걸기 판의 채무자: 참가비·건 코인 없이 자기 빚을 건다 (GroupEntry.debt).
+    const debtor = this.isDebtor(b, m);
+    const fee = debtor ? 0 : B.boothFee(st, b);
     // 지난 판에 편 맞추기로 빠진 손님은 이미 낸 참가비로 (줄다리기 lineup, startGroup).
-    const pre = g.prepaid?.indexOf(m.id) ?? -1;
+    const pre = debtor ? -1 : (g.prepaid?.indexOf(m.id) ?? -1);
     if (pre >= 0) g.prepaid?.splice(pre, 1);
-    else {
+    else if (fee > 0) {
       m.wallet -= fee;
       this.earn(fee, B.seatPt(b, seat));
     }
-    const bet = Math.max(1, Math.min(m.wallet, Math.round(m.wallet * betFraction(this.rng, m.traits) * (boothDef(b).betScale ?? 1))));
+    const bet = debtor ? 0 : Math.max(1, Math.min(m.wallet, Math.round(m.wallet * betFraction(this.rng, m.traits) * (boothDef(b).betScale ?? 1))));
     m.wallet -= bet;
     bs.pot += bet;
     m.stats.spent += (pre >= 0 ? 0 : fee) + bet;
     m.firstPlay ??= st.time;
     const { pick, role } = game.join(this.rng, seat, m, g.participants, (id) => this.monster(id));
-    g.participants.push({ monster: m.id, seat, pick, role, bet, fee });
+    const entry: GroupEntry = { monster: m.id, seat, pick, role, bet, fee };
+    if (debtor) entry.debt = m.debt;
+    g.participants.push(entry);
     const pace = B.boothStat(st, b, 'pace');
     if (g.phase === 'idle') {
       g.phase = 'gathering';
@@ -860,7 +983,10 @@ export class Sim implements SimApi {
       g.duration = 0;
       g.play = null;
     }
-    if (game.readiness(g.participants, g.elapsed) === 'soon') g.countdown = Math.min(g.countdown, groupStartSoonSec(b, pace));
+    const ready = this.groupReady(b, g);
+    // 빚 걸기 판: 마지막 채무자가 닿으면 조금 뒤 출발 (구경 손님이 모이고 3·2·1).
+    if (debtor && ready === 'soon') g.countdown = groupStartSoonSec(b, pace);
+    else if (ready === 'soon') g.countdown = Math.min(g.countdown, groupStartSoonSec(b, pace));
     if (g.participants.length >= B.boothSeats(st, b)) g.countdown = Math.min(g.countdown, GROUP_RULES[b].fullStartSec);
     this.emit('groupJoined', { booth: b, monster: m.id, seat, pick, role, bet });
   }
@@ -869,6 +995,11 @@ export class Sim implements SimApi {
   private groupWait(m: Monster): void {
     const b = m.booth;
     const g = b === null ? null : this.state.booths[b].group;
+    // 반장이 이 부스에 빚 걸기 판을 예약했다: 선수 자리에서 다음 판을 기다리던 손님은 비켜 준다 (참가자는 이번 판을 마친다).
+    if (b !== null && m.seat !== null && this.debtHeld(b, m.seat) && !(g !== null && g.phase !== 'idle' && g.participants.some((e) => e.monster === m.id))) {
+      this.decide(m);
+      return;
+    }
     if (g !== null && g.phase !== 'idle' && g.participants.some((e) => e.monster === m.id)) {
       // 참가자는 자기 자리의 놀이 쪽을 본다 (구경 자리에서 모래판으로 나서 걸어온 손님도).
       if (b !== null && m.seat !== null && isGroupBooth(b)) faceToward(m, groupGame(b).face(m.seat).x);
@@ -908,9 +1039,15 @@ export class Sim implements SimApi {
   /** 출발 전에 판을 접는다: 참가자마다 건 코인을 돌려준다 (leaveGroup과 같이). timeout이면 앉아 있던 참가자는 다른 걸 하러 간다. */
   private cancelGroup(b: GroupBoothId, g: GroupState, reason: 'closed' | 'timeout'): void {
     const left = g.participants.slice();
+    const debtors = g.mode === 'debt' ? (g.debtors ?? []).slice() : [];
     for (const e of left) this.refundBet(b, e);
     this.resetGroup(g);
     this.emit('groupCancelled', { booth: b, reason });
+    // 빚 걸기 판의 채무자는 일터로 돌아간다 (자리로 걸어오던 채무자도).
+    for (const id of debtors) {
+      const m = this.monster(id);
+      if (m !== undefined && m.booth === b) this.goWork(m);
+    }
     if (reason !== 'timeout') return;
     for (const e of left) {
       const m = this.monster(e.monster);
@@ -928,6 +1065,8 @@ export class Sim implements SimApi {
     delete g.mark;
     delete g.markAt;
     delete g.cursor;
+    delete g.mode;
+    delete g.debtors;
   }
 
   private tickGroups(dt: number): void {
@@ -940,7 +1079,9 @@ export class Sim implements SimApi {
           if (g.participants.length > 0) g.participants = [];
           break;
         case 'gathering': {
-          if (g.participants.length === 0) {
+          // 빚 걸기 판은 채무자가 걸어오는 동안 참가자가 없어도 모이는 중이다.
+          const debt = g.mode === 'debt';
+          if (g.participants.length === 0 && !debt) {
             this.resetGroup(g);
             break;
           }
@@ -952,12 +1093,12 @@ export class Sim implements SimApi {
           g.elapsed += dt;
           g.countdown = Math.max(0, g.countdown - dt);
           const game = groupGame(booth);
-          let ready = game.readiness(g.participants, g.elapsed);
-          // 출발 조건이 안 맞으면 참가자가 다른 자리로 나서 본다 (밀어내기 상대가 오지 않으면 구경 손님이 모래판으로).
-          if (ready === 'none' && game.stepIn !== undefined && this.stepInGroup(booth, g)) ready = game.readiness(g.participants, g.elapsed);
+          let ready = this.groupReady(booth, g);
+          // 출발 조건이 안 맞으면 참가자가 다른 자리로 나서 본다 (밀어내기 상대가 오지 않으면 구경 손님이 모래판으로). 빚 걸기 판은 채무자만 선수.
+          if (!debt && g.debtNext !== true && ready === 'none' && game.stepIn !== undefined && this.stepInGroup(booth, g)) ready = this.groupReady(booth, g);
           // 자리로 걸어오는 손님이 있으면 기다려 준다 (첫 손님이 앉고 gatherSec까지는 누구든, 그 뒤 조금 더는 곧 닿는 손님: waitComing).
           if (g.countdown <= 0 && ready !== 'none' && !this.waitComing(booth, g)) this.startGroup(booth, g);
-          else if (ready === 'none' && g.elapsed > GROUP_RULES[booth].maxWaitSec) this.cancelGroup(booth, g, 'timeout');
+          else if (ready === 'none' && g.elapsed > (debt ? DEBT_MATCH.maxWaitSec : GROUP_RULES[booth].maxWaitSec)) this.cancelGroup(booth, g, 'timeout');
           break;
         }
         case 'running': {
@@ -1049,7 +1190,7 @@ export class Sim implements SimApi {
       return;
     }
     // 자리를 뜬 손님이 있어 출발 조건이 깨졌으면 (씨름 선수가 떠남) 더 기다린다.
-    if (game.readiness(g.participants, g.elapsed) === 'none') return;
+    if (this.groupReady(b, g) === 'none') return;
     if (game.lineup !== undefined) {
       // 오래 기다린 손님부터 (지난 판에 빠진 손님이 이번엔 끼게): 자리에서 기다린 초(phaseTime) 순서로 고르고, 순서는 그대로 둔다.
       const waited = (e: GroupEntry): number => this.monster(e.monster)?.phaseTime ?? 0;
@@ -1170,7 +1311,7 @@ export class Sim implements SimApi {
     const joined = new Set(g.participants.map((e) => e.monster));
     const look = game.face(-1);
     for (const o of this.state.monsters) {
-      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving' || o.phase === 'reacting' || (o.poseTime ?? 0) > 0) continue;
+      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving' || o.phase === 'reacting' || o.bankrupt === true || (o.poseTime ?? 0) > 0) continue;
       if (o.phase === 'playing' && o.booth !== b) continue;
       if (dist(o.pos, game.center) > TUNE.groupSpectateRadius) continue;
       if (!rng.chance((o.traits.includes('watcher') ? TUNE.groupWatcherBuzzChance : TUNE.groupBuzzChance) + charm * TUNE.groupBuzzPerCharm)) continue;
@@ -1203,7 +1344,15 @@ export class Sim implements SimApi {
       if (r !== null && r !== undefined && r.monster === e.monster) done.push({ e, r });
     }
     const pays = this.settleGroup(b, done);
-    done.forEach(({ e, r }, i) => this.finishRound(b, e.seat, r, false, pays[i] ?? { payout: 0, festival: false }));
+    // 빚 걸기 판: 채무자 선수들의 빚을 먼저 정산한다 (이기면 반·대박이면 0, 지면 상대 빚만큼 더). 채무자의 반응은 빚 반응으로.
+    const debts = g.mode === 'debt' && play !== null ? this.settleDebts(b, g, play) : [];
+    done.forEach(({ e, r }, i) => {
+      const ch = debts.find((c) => c.id === e.monster);
+      const m = ch === undefined ? undefined : this.monster(e.monster);
+      const react = ch === undefined || m === undefined ? null : debtReaction(this.rng, ch.result === 'halved' ? 'matchHalved' : ch.result === 'cleared' ? 'matchCleared' : 'matchAdded', m);
+      this.finishRound(b, e.seat, r, false, pays[i] ?? { payout: 0, festival: false }, react);
+    });
+    if (debts.length > 0) this.debtSettledNotice(b, debts);
     if (play !== null) this.groupCrowd(b, g, play);
   }
 
@@ -1220,7 +1369,8 @@ export class Sim implements SimApi {
     let fest = -1;
     if (bs.pot >= B.boothPotCap(st, b)) {
       done.forEach(({ e }, i) => {
-        if (!won[i]) return;
+        // 빚 걸기 판의 채무자 선수는 코인을 걸지 않았다 (항아리 축제도 없다).
+        if (!won[i] || e.debt !== undefined) return;
         const best = fest < 0 ? null : done[fest];
         const w = want[i] ?? 0;
         const bw = fest < 0 ? -1 : (want[fest] ?? 0);
@@ -1255,7 +1405,7 @@ export class Sim implements SimApi {
     const center = game.center;
     const look = game.face(-1);
     for (const o of st.monsters) {
-      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving') continue;
+      if (joined.has(o.id) || o.phase === 'leaving' || o.phase === 'arriving' || o.bankrupt === true) continue;
       // 다른 부스에서 노는 손님은 빼고, 이 부스 자리에서 기다리던 손님은 넣는다.
       if ((o.phase === 'playing' || o.phase === 'reacting') && o.booth !== b) continue;
       if (dist(o.pos, center) > TUNE.groupSpectateRadius) continue;
@@ -1281,9 +1431,11 @@ export class Sim implements SimApi {
     const rng = this.rng;
     const tip = Math.max(0, Math.min(Math.floor(m.wallet), Math.round(m.mood * MOOD.tipPerMood * (1 + m.stats.wins * TUNE.tipWinBonus))));
     m.wallet -= tip;
+    // 파산했던 손님은 일한 만큼의 재료(일터)만 준다: 떠날 때 종 재료·귀한 물건은 없다 (DESIGN 3.7 돈의 흐름).
+    const recovered = m.wasBankrupt === true;
     let material: MaterialId | null = null;
     const [c0, c1] = MOOD.materialChance;
-    if (rng.chance(c0 + (c1 - c0) * Math.max(0, Math.min(1, m.mood / 100)))) {
+    if (!recovered && rng.chance(c0 + (c1 - c0) * Math.max(0, Math.min(1, m.mood / 100)))) {
       const mat = SPECIES[m.species].material;
       const want = m.mood >= TUNE.bonusMaterialMood ? 2 : 1;
       const got = addMaterial(st, mat, want);
@@ -1291,15 +1443,19 @@ export class Sim implements SimApi {
       if (got < want) this.capToast(mat);
     }
     let precious: PreciousId | null = null;
-    if (m.surePrecious === true || (m.hadJackpot && m.mood >= TUNE.preciousMood && rng.chance(MOOD.preciousChance))) {
+    if (!recovered && (m.surePrecious === true || (m.hadJackpot && m.mood >= TUNE.preciousMood && rng.chance(MOOD.preciousChance)))) {
       precious = this.pickPrecious();
       st.precious[precious] = (st.precious[precious] ?? 0) + 1;
     }
     this.earn(tip, m.pos);
     if (material !== null || precious !== null) this.emit('itemsChanged', {});
+    // 못 찾고 떠나는 장신구는 전당포 컬렉션으로.
+    for (const t of m.pawned.splice(0)) this.collect(t.key, m.id);
     this.emit('monsterLeft', { id: m.id, tip, material, precious });
     if (precious !== null) this.toast(`${nameSubject(m)} ${josa(PRECIOUS[precious].name, '을', '를')} 남기고 갔어요!`, 'good');
-    if (m.broke === true && m.snacked === true) this.addRegular(m);
+    // 단골 목록에는 떠나는 순간에 (마을에 있는 동안 같은 단골이 또 오지 않게). 빚을 다 갚은 손님은 '다시 일어선 단골'.
+    if (recovered) this.addRegular(m, true);
+    else if (m.broke === true && m.snacked === true) this.addRegular(m);
     const i = st.monsters.indexOf(m);
     if (i >= 0) st.monsters.splice(i, 1);
   }
@@ -1325,10 +1481,15 @@ export class Sim implements SimApi {
     this.toast(`창고가 가득 차서 ${josa(MATERIALS[mat].name, '을', '를')} 더 못 받았어요.`, 'warn');
   }
 
-  private addRegular(m: Monster): void {
+  /** 단골 목록에 (recovered = 파산했다가 빚을 다 갚은 손님: 다시 올 때 '다시 일어선 단골'). */
+  private addRegular(m: Monster, recovered = false): void {
     const regs = (this.state.regulars ??= []);
-    if (regs.some((r) => r.species === m.species && r.nickname === m.nickname)) return;
-    regs.push({ species: m.species, nickname: m.nickname, traits: [...m.traits] });
+    const had = regs.find((r) => r.species === m.species && r.nickname === m.nickname);
+    if (had !== undefined) {
+      if (recovered) had.recovered = true;
+      return;
+    }
+    regs.push(recovered ? { species: m.species, nickname: m.nickname, traits: [...m.traits], recovered: true } : { species: m.species, nickname: m.nickname, traits: [...m.traits] });
     while (regs.length > TUNE.regularMax) regs.shift();
   }
 
@@ -1351,6 +1512,679 @@ export class Sim implements SimApi {
     return SPECIES_IDS.filter((s) => (dex[s]?.visits ?? 0) > 0);
   }
 
+  // ── 넷째 묶음: 전당포·은행 볼일, 파산, 일터, 빚 걸기 판 (DESIGN 3.7) ─────────────────────
+  // 돈이 떨어진 손님 → seekMoney: 더 놀고 싶은지 묻는다 (기분·끈기·성격: debt.ts wantMore, 거의 다 잃었을 때와 정말 못 놀 때 한 번씩)
+  //   → 전당포에 장신구 맡기기 (없거나 전당포가 없으면 은행 대출, 빚이 없을 때만) → 볼일 (goShop → atPawnshop·atBank → finishErrand). 걸어가며 '맡겨야겠다…'.
+  // 지갑이 넉넉해지면 (그리고 떠나기 전에) goSettle: 은행 빚 갚기 먼저, 그다음 맡긴 장신구 되찾기. 떠날 때 빚을 못 갚으면 goBankrupt → 일터 (goWork).
+  // 일터: 일하는 자리(working)에서 빚이 줄고 (laborTick) 재료가 나온다 (laborOutput + 한숨·영차 반응), 자리가 없으면 기다린다 (waitWork, 오래 기다린 손님부터 자리로).
+  //   반장이 가끔 다독이고 (tickForeman), 파산하고 LABOR.forgiveSec가 지나면 남은 빚을 덜어 준다. 다 갚으면 relieve → 떠나 단골.
+  // 빚 걸기 판: tickDebtMatches가 쉬는 줄다리기·밀어내기에 빚이 비슷한 채무자끼리 불러 단체 놀이 mode 'debt'로 연다. 끝나면 settleDebts (finishGroup).
+
+  /** 빚 걸기 판에 불린 채무자인가 (그 부스의 판이 mode 'debt'이고 debtors에 있다). */
+  private isDebtor(b: BoothId, m: Monster): boolean {
+    const g = this.state.booths[b].group;
+    return m.bankrupt === true && g !== null && g.mode === 'debt' && (g.debtors ?? []).includes(m.id);
+  }
+
+  /** 출발 조건: 빚 걸기 판은 불린 채무자가 모두 참가하면 'soon', 그 밖은 놀이 모듈의 readiness. */
+  private groupReady(b: GroupBoothId, g: GroupState): GroupReadiness {
+    if (g.mode === 'debt') {
+      const ds = g.debtors ?? [];
+      return ds.length > 0 && ds.every((id) => g.participants.some((e) => e.monster === id)) ? 'soon' : 'none';
+    }
+    return groupGame(b).readiness(g.participants, g.elapsed);
+  }
+
+  /** 돈이 떨어진 단계: 정말 못 논다 (가장 싼 한판보다 적다) = broke, 아직 놀 수는 있지만 거의 다 잃었다 = low. */
+  private moneyStage(m: Monster): 'low' | 'broke' {
+    return m.wallet < B.minPlayCost(this.state) ? 'broke' : 'low';
+  }
+
+  /**
+   * 돈이 떨어졌을 때 (shortOfMoney, 끈기가 남고 머문 시간 안): 더 놀고 싶으면 (wantMore 확률, 기분 PAWN·BANK.wantMood 이상)
+   * 전당포에 장신구를 맡기러, 장신구가 없거나 전당포가 없으면 은행에서 빌리러 (은행·일터가 있고, 빚이 없고, 이번 방문에 BANK.maxLoans번 안). 갔으면 true.
+   * 한 단계(low·broke)에 한 번만 묻는다 ('싫다'면 Monster.declined). 마을 금고가 모자라면 가지 않는다 ('금고가 비었어요' 토스트는 가끔).
+   */
+  private seekMoney(m: Monster): boolean {
+    const st = this.state;
+    if (m.bankrupt === true || !this.shortOfMoney(m)) return false;
+    if (m.patience <= 0 || this.visitAge(m) > TUNE.maxVisitSec || this.age(m) > TUNE.maxStaySec) return false;
+    const stage = this.moneyStage(m);
+    if (m.declined === 'broke' || m.declined === stage) return false;
+    const a = pawnPick(m);
+    const pawn = a !== undefined && isBuilt(st, 'pawnshop') && m.mood >= PAWN.wantMood;
+    const loan = !pawn && bankOpenFor(st, m) && m.mood >= BANK.wantMood;
+    if (!pawn && !loan) return false;
+    // 은행: 일터에서 일하는 채무자가 많으면 망설인다 ('저렇게 되긴 싫어…').
+    const wary = loan ? st.monsters.filter((o) => o.bankrupt === true).length * BANK.wary : 0;
+    if (!this.rng.chance(wantMore(m, pawn ? PAWN.want : BANK.want, wary))) {
+      m.declined = stage;
+      return false;
+    }
+    if (!canLend(st, pawn && a !== undefined ? pawnPrice(st, a) : bankLoan(st))) {
+      m.declined = stage;
+      this.emit('vaultEmpty', { id: m.id, errand: pawn ? 'pawn' : 'loan' });
+      this.vaultToast();
+      return false;
+    }
+    this.goShop(m, pawn ? 'pawn' : 'loan', false);
+    return true;
+  }
+
+  /**
+   * 빚이 있는데 갚을 만큼 없다: 끈기가 다 됐어도 '갚으려고 한판만 더' (BANK.chase.chance, 한 방문에 BANK.chase.max판까지, 머문 시간 안).
+   * 한 번 마음을 접으면 (확률에 지면) 더 쫓지 않는다.
+   */
+  private chaseDebt(m: Monster): void {
+    if (m.debt <= 0 || m.bankrupt === true || m.patience > 0) return;
+    if (m.wallet >= m.debt || m.wallet < B.minPlayCost(this.state)) return;
+    if ((m.chased ?? 0) >= BANK.chase.max || this.visitAge(m) > TUNE.maxVisitSec || this.age(m) > TUNE.maxStaySec) return;
+    if (!this.rng.chance(BANK.chase.chance)) {
+      m.chased = BANK.chase.max;
+      return;
+    }
+    m.chased = (m.chased ?? 0) + 1;
+    m.patience += 1;
+  }
+
+  /** 돈이 떨어졌다: 가장 싼 한판보다 적거나, 처음 지갑(지갑 + 쓴 코인 - 받은 코인)의 PAWN.lowFrac보다 적다. */
+  private shortOfMoney(m: Monster): boolean {
+    const start = m.wallet + m.stats.spent - m.stats.won;
+    return m.wallet < Math.max(B.minPlayCost(this.state), start * PAWN.lowFrac);
+  }
+
+  /**
+   * 낼 수 있는 볼일 (갔으면 true): 은행 빚 갚기 먼저 (빚이 있으면 되찾기는 미룬다), 그다음 맡긴 장신구 되찾기 (값이 큰 것부터).
+   * homeward = 떠나기 전 (지갑으로 낼 수만 있으면), 아니면 낸 뒤에도 다음 판 몇 번 분량(BANK.repayRounds·PAWN.redeemRounds)이 남고
+   * 돈이 떨어지지 않을 때만 (빌리자마자 갚거나 맡기자마자 되찾지 않게: 따서 지갑이 넉넉해졌을 때).
+   */
+  private goSettle(m: Monster, homeward: boolean): boolean {
+    const st = this.state;
+    if (m.bankrupt === true) return false;
+    const left = (rounds: number): number => this.settleReserve(m, rounds, homeward);
+    if (m.debt > 0) {
+      if (isBuilt(st, 'bank') && m.wallet >= m.debt + left(BANK.repayRounds)) {
+        this.goShop(m, 'repay', homeward);
+        return true;
+      }
+      return false;
+    }
+    if (m.pawned.length > 0 && isBuilt(st, 'pawnshop') && redeemPick(m, left(PAWN.redeemRounds)) !== undefined) {
+      this.goShop(m, 'redeem', homeward);
+      return true;
+    }
+    return false;
+  }
+
+  /** 되찾기·갚기 뒤에도 남길 코인: 떠나기 전(homeward)이면 0, 아니면 다음 판 rounds번 분량과 '거의 다 잃음' 선 가운데 큰 것. */
+  private settleReserve(m: Monster, rounds: number, homeward: boolean): number {
+    if (homeward) return 0;
+    const low = (m.wallet + m.stats.spent - m.stats.won) * PAWN.lowFrac;
+    return Math.max(B.minPlayCost(this.state) * rounds, low);
+  }
+
+  /** 볼일을 보러 가게 계산대로 (먼저 온 손님이 쓰지 않는 자리). 걸어가며 작게 반응한다 ('맡겨야겠다…', '되찾으러 가자!'). */
+  private goShop(m: Monster, errand: Errand, homeward: boolean): void {
+    const st = this.state;
+    this.detach(m);
+    const shop = errandShop(errand);
+    const used = new Set(st.monsters.filter((o) => o !== m && o.errand !== null && o.errand !== undefined && errandShop(o.errand) === shop).map((o) => o.counter ?? -1));
+    let i = 0;
+    while (used.has(i)) i++;
+    m.errand = errand;
+    m.counter = i;
+    m.homeward = homeward;
+    this.setPhase(m, shop === 'pawnshop' ? 'toPawnshop' : 'toBank');
+    m.path = route(m.pos, counterPt(shop, i), st.districts, SHOP_SPOTS[shop].front);
+    m.pose = 'base';
+    m.poseTime = 0;
+    this.sideReact(m, errand === 'pawn' ? 'seekPawn' : errand === 'loan' ? 'seekLoan' : errand === 'redeem' ? 'goRedeem' : 'goRepay');
+  }
+
+  /** 걷거나 일하는 중의 작은 반응 (phase는 그대로, 포즈는 반응 시간만큼 뒤 idlePose로). */
+  private sideReact(m: Monster, kind: DebtReactKind): void {
+    const reaction = debtReaction(this.rng, kind, m);
+    m.pose = reaction.pose;
+    m.poseTime = reaction.duration;
+    this.recordDex(m, reaction.label);
+    this.emit('monsterReact', { id: m.id, reaction });
+  }
+
+  /** 계산대에 닿았다: 주인을 보고 잠깐 (PAWN·BANK.counterSec) 볼일을 본다. */
+  private arriveShop(m: Monster): void {
+    if (m.errand === null || m.errand === undefined) {
+      this.decide(m);
+      return;
+    }
+    const shop = errandShop(m.errand);
+    this.setPhase(m, shop === 'pawnshop' ? 'atPawnshop' : 'atBank');
+    faceToward(m, SHOP_SPOTS[shop].npc.x);
+    m.timer = shop === 'pawnshop' ? PAWN.counterSec : BANK.counterSec;
+  }
+
+  /** 볼일 끝: 맡기기·되찾기·빌리기·갚기를 하고 반응한다 (반응이 끝나면 다음 할 일, homeward면 다시 집으로). */
+  private finishErrand(m: Monster): void {
+    const st = this.state;
+    const e = m.errand ?? null;
+    const at = counterPt(e === null ? 'bank' : errandShop(e), m.counter ?? 0);
+    m.errand = null;
+    delete m.counter;
+    let kind: DebtReactKind | null = null;
+    switch (e) {
+      case 'pawn': {
+        const a = pawnPick(m);
+        if (a === undefined) break;
+        const price = pawnPrice(st, a);
+        if (!canLend(st, price)) {
+          // 걸어오는 동안 금고가 비었다: 이 단계에서는 다시 오지 않는다.
+          this.emit('vaultEmpty', { id: m.id, errand: 'pawn' });
+          this.vaultToast();
+          m.declined = this.moneyStage(m);
+          kind = 'refused';
+          break;
+        }
+        m.accessories.splice(m.accessories.indexOf(a), 1);
+        m.pawned.push({ key: a.key, slot: a.slot, value: a.value, price });
+        this.lend(price, at);
+        m.wallet += price;
+        this.afterBorrow(m);
+        st.debtTotals.pawned += 1;
+        this.emit('pawned', { id: m.id, key: a.key, price, at: { x: at.x, y: at.y } });
+        kind = 'pawn';
+        break;
+      }
+      case 'redeem': {
+        // goSettle과 같은 남길 코인으로 (비싼 것을 되찾고 돈이 떨어져 곧바로 다시 맡기지 않게).
+        const t = redeemPick(m, this.settleReserve(m, PAWN.redeemRounds, m.homeward === true));
+        if (t === undefined) break;
+        const cost = redeemCost(t);
+        m.wallet -= cost;
+        m.pawned.splice(m.pawned.indexOf(t), 1);
+        m.accessories.push({ key: t.key, slot: t.slot, value: t.value });
+        this.vaultIn(cost, cost - t.price, at);
+        st.debtTotals.redeemed += 1;
+        this.emit('redeemed', { id: m.id, key: t.key, cost, at: { x: at.x, y: at.y } });
+        kind = 'redeem';
+        break;
+      }
+      case 'loan': {
+        if (!bankOpenFor(st, m)) break;
+        const amount = bankLoan(st);
+        if (!canLend(st, amount)) {
+          this.emit('vaultEmpty', { id: m.id, errand: 'loan' });
+          this.vaultToast();
+          m.declined = this.moneyStage(m);
+          kind = 'refused';
+          break;
+        }
+        this.lend(amount, at);
+        m.wallet += amount;
+        m.debt += loanDebt(amount);
+        m.loans = (m.loans ?? 0) + 1;
+        this.afterBorrow(m);
+        st.debtTotals.loans += 1;
+        this.emit('loanTaken', { id: m.id, amount, debt: m.debt, at: { x: at.x, y: at.y } });
+        kind = 'loan';
+        break;
+      }
+      case 'repay': {
+        if (m.debt <= 0 || m.wallet < m.debt) break;
+        const amount = m.debt;
+        m.wallet -= amount;
+        m.debt = 0;
+        this.vaultIn(amount, amount - Math.round(amount / BANK.interest), at);
+        st.debtTotals.repaid += 1;
+        this.emit('loanRepaid', { id: m.id, amount, at: { x: at.x, y: at.y } });
+        kind = 'repay';
+        break;
+      }
+      default:
+        break;
+    }
+    if (kind === null) {
+      if (m.homeward === true) {
+        m.homeward = false;
+        this.leave(m);
+      } else this.decide(m);
+      return;
+    }
+    this.debtReact(m, kind, 'reacting');
+  }
+
+  /** 맡기거나 빌린 뒤: 아직 거의 다 잃은 채라도 한판은 해 보고, 정말 못 놀 때 다시 묻는다 (곧장 다른 장신구·은행으로 줄줄이 가지 않게). */
+  private afterBorrow(m: Monster): void {
+    if (this.shortOfMoney(m) && this.moneyStage(m) === 'low') m.declined = 'low';
+    else delete m.declined;
+  }
+
+  /** 볼일·파산·다 갚음 반응 (phase를 바꾸고 timer = 반응 시간). */
+  private debtReact(m: Monster, kind: DebtReactKind, phase: 'reacting' | 'relieved'): void {
+    const reaction = debtReaction(this.rng, kind, m);
+    this.setPhase(m, phase);
+    m.path = [];
+    m.pose = reaction.pose;
+    m.poseTime = phase === 'relieved' ? reaction.duration : 0;
+    m.timer = phase === 'relieved' ? Math.max(reaction.duration, LABOR.reliefSec + 1) : reaction.duration;
+    this.recordDex(m, reaction.label);
+    this.emit('monsterReact', { id: m.id, reaction });
+  }
+
+  /** 마을 금고에서 빌려준다 (수입이 아니다). */
+  private lend(amount: number, at: Pt): void {
+    this.state.coins -= amount;
+    this.emit('coinsChanged', { coins: this.state.coins, delta: -amount, at: { x: at.x, y: at.y } });
+  }
+
+  /** 금고로 돌아온 코인 (되찾기·갚기·파산 때 낸 지갑). earned = 그 가운데 마을 수입(이자)만. */
+  private vaultIn(amount: number, earned: number, at: Pt | null): void {
+    if (amount <= 0) return;
+    this.state.coins += amount;
+    this.state.totals.coinsEarned += Math.max(0, earned);
+    this.emit('coinsChanged', { coins: this.state.coins, delta: amount, at: at === null ? null : { x: at.x, y: at.y } });
+  }
+
+  private vaultToast(): void {
+    if (this.state.time - this.lastVaultToast < VAULT.emptyToastSec) return;
+    this.lastVaultToast = this.state.time;
+    this.toast('마을 금고가 비어서 전당포·은행이 손님에게 빌려주지 못했어요.', 'warn');
+  }
+
+  /** 못 찾고 떠난 장신구 하나를 전당포 컬렉션에 (그 종류가 처음이면 알린다). from = 맡겼던 손님. */
+  private collect(key: AccessoryId, from: MonsterId): void {
+    const st = this.state;
+    const count = (st.pawnCollection[key] ?? 0) + 1;
+    st.pawnCollection[key] = count;
+    st.debtTotals.forfeited += 1;
+    this.emit('pawnCollected', { key, count, first: count === 1, from });
+    if (count === 1) this.toast(`전당포 진열장에 처음 들어왔어요: ${ACCESSORIES[key].name}`, 'good');
+  }
+
+  /**
+   * 떠날 때 빚을 못 갚았다: 지갑을 다 내고 (금고로), 맡긴 장신구는 못 찾는다 (컬렉션으로). 남은 빚은 일터에서 갚는다.
+   * 어두운 모습·축 처진 슬픔 (bankrupt), 파산 반응이 끝나면 일터로 (afterReact → goWork).
+   */
+  private goBankrupt(m: Monster): void {
+    const st = this.state;
+    this.detach(m);
+    const paid = Math.min(Math.floor(m.wallet), m.debt);
+    if (paid > 0) {
+      m.wallet -= paid;
+      m.debt -= paid;
+      // 글자는 화면이 '빚 N' 위에 따로 띄운다 (bankrupt 이벤트의 paid): 여기서 자리를 주면 먹구름·게이지와 겹친다.
+      this.vaultIn(paid, 0, null);
+    }
+    // 안전망: 다 갚았거나 일터가 없으면 (은행은 일터가 있어야 빌려준다) 그냥 집으로.
+    if (m.debt <= 0 || !isBuilt(st, 'workyard')) {
+      m.debt = 0;
+      this.goHome(m);
+      return;
+    }
+    for (const t of m.pawned.splice(0)) this.collect(t.key, m.id);
+    m.bankrupt = true;
+    m.wasBankrupt = true;
+    m.broke = false;
+    delete m.declined;
+    m.mood = Math.min(m.mood, LABOR.mood);
+    m.labor = this.newLabor(m.debt);
+    st.debtTotals.bankrupt += 1;
+    this.emit('bankrupt', { id: m.id, debt: m.debt, paid });
+    this.toast(`${nameSubject(m)} 빚 ${m.debt}코인을 못 갚아 일터에서 일하게 됐어요…`, 'warn', 'debt');
+    this.debtReact(m, 'bankrupt', 'reacting');
+  }
+
+  private newLabor(debt: number): LaborState {
+    return { facility: 'farm', spot: -1, wait: -1, progress: 0, made: 0, total: Math.max(1, debt), boostSec: 0, boostMult: 1, match: null, since: this.state.time, matches: 0 };
+  }
+
+  /** 일터의 다른 채무자 (자리를 차지하고 있을 수 있는 손님). */
+  private workers(): Monster[] {
+    return this.state.monsters.filter((o) => o.bankrupt === true && o.labor !== null && o.labor !== undefined && o.labor.match === null);
+  }
+
+  /** 일터로: 빈 일하는 자리 (없으면 기다리는 자리)로 느리게 걸어간다. */
+  private goWork(m: Monster): void {
+    const st = this.state;
+    this.detach(m);
+    const lab = (m.labor ??= this.newLabor(m.debt));
+    lab.match = null;
+    const p = pickWorkSpot(this.rng, st, m, this.workers());
+    lab.facility = p.facility;
+    lab.spot = p.spot;
+    lab.wait = p.wait;
+    this.setPhase(m, 'toWork');
+    const to = p.spot >= 0 ? workPt(p.facility, p.spot) : waitPt(p.facility, p.wait);
+    m.path = route(m.pos, to, st.districts, WORK_YARD.front);
+    if ((m.poseTime ?? 0) <= 0) m.pose = 'sad';
+  }
+
+  /** 일터 자리에 닿았다: 일하기 또는 기다리기 (시설을 본다). */
+  private arriveWork(m: Monster): void {
+    const lab = m.labor;
+    if (m.bankrupt !== true || lab === null || lab === undefined) {
+      this.decide(m);
+      return;
+    }
+    this.setPhase(m, lab.spot >= 0 ? 'working' : 'waitWork');
+    faceToward(m, WORK_YARD.facilities[lab.facility].face.x);
+  }
+
+  /**
+   * 일: 빚이 laborRate만큼 줄고 (1코인마다 laborTick), LABOR.coinsPerMat코인마다 그 시설의 재료 하나 (laborOutput, 한숨·영차 반응).
+   * 다 갚으면 홀가분. 파산하고 LABOR.forgiveSec가 지났으면 반장이 남은 빚을 덜어 준다.
+   */
+  private tickLabor(m: Monster, dt: number): void {
+    const st = this.state;
+    const lab = m.labor;
+    if (m.bankrupt !== true || lab === null || lab === undefined) {
+      this.decide(m);
+      return;
+    }
+    if (this.forgiveLong(m, lab)) return;
+    const rate = laborRate(st, m);
+    lab.boostSec = Math.max(0, lab.boostSec - dt);
+    if (lab.boostSec <= 0) lab.boostMult = 1;
+    lab.progress += rate * dt;
+    while (lab.progress >= 1 && m.debt > 0) {
+      lab.progress -= 1;
+      m.debt -= 1;
+      lab.made += 1;
+      this.emit('laborTick', { id: m.id, facility: lab.facility, debt: m.debt, total: lab.total, at: { x: m.pos.x, y: m.pos.y } });
+      if (lab.made >= LABOR.coinsPerMat) {
+        lab.made -= LABOR.coinsPerMat;
+        const mat = LABOR.facilities[lab.facility].material;
+        const got = addMaterial(st, mat, 1);
+        st.debtTotals.laborMats += 1;
+        st.debtTotals.laborBy[lab.facility] += 1;
+        this.emit('laborOutput', { id: m.id, facility: lab.facility, material: mat, at: { x: m.pos.x, y: m.pos.y }, stored: got > 0 });
+        if (got > 0) this.emit('itemsChanged', {});
+        else this.capToast(mat);
+        // 한숨·영차 (다 갚는 순간은 홀가분 반응이 이어서 난다).
+        if (m.debt > 0 && (m.poseTime ?? 0) <= 0) this.sideReact(m, lab.facility === 'farm' ? 'laborFarm' : 'laborMine');
+      }
+    }
+    if (m.debt <= 0) {
+      m.debt = 0;
+      this.relieve(m, false);
+    }
+  }
+
+  /** 파산하고 LABOR.forgiveSec가 지났다 (일터에서 일하거나 기다리는 중): 반장이 남은 빚을 덜어 준다. 덜어 줬으면 true. */
+  private forgiveLong(m: Monster, lab: LaborState): boolean {
+    const st = this.state;
+    lab.since ??= st.time;
+    if (st.time - lab.since < LABOR.forgiveSec || m.debt <= 0) return false;
+    const left = m.debt;
+    m.debt = 0;
+    this.relieve(m, true, left);
+    return true;
+  }
+
+  /** 기다리는 채무자: 1초에 한 번 빈 일하는 자리를 본다 (오래 기다린 손님부터 그리로), 가끔 한숨. */
+  private tickWaitWork(m: Monster): void {
+    const lab = m.labor;
+    if (m.bankrupt !== true || lab === null || lab === undefined) {
+      this.decide(m);
+      return;
+    }
+    if (this.forgiveLong(m, lab)) return;
+    const t = m.phaseTime ?? 0;
+    if (Math.floor(t) === Math.floor(t - SIM.dt)) return;
+    const others = this.workers().filter((o) => o !== m);
+    const free = WORK_FACILITIES.some((f) => {
+      const used = others.filter((o) => o.labor?.facility === f && o.labor.spot >= 0).length;
+      return used < workSlots(this.state, f);
+    });
+    if (free && others.every((o) => o.phase !== 'waitWork' || (o.phaseTime ?? 0) <= t)) {
+      this.goWork(m);
+      return;
+    }
+    if ((m.poseTime ?? 0) <= 0 && this.rng.chance(LABOR.waitMutter)) this.sideReact(m, 'waitWork');
+  }
+
+  /** 응원·간식·반장: 일하는 채무자가 sec초 동안 mult배 빨리 갚는다 (더 센 쪽이 남는다). */
+  private boostLabor(m: Monster, mult: number, sec: number): void {
+    const lab = m.labor;
+    if (m.bankrupt !== true || lab === null || lab === undefined) return;
+    lab.boostMult = Math.max(lab.boostSec > 0 ? lab.boostMult : 1, mult);
+    lab.boostSec = Math.max(lab.boostSec, sec);
+  }
+
+  /** 일터 반장: LABOR.foreman.everySec마다 일하는 채무자 하나를 다독인다 (게이지가 덜 찬 손님이 더 자주, 잠깐 빨라짐). */
+  private tickForeman(dt: number): void {
+    const st = this.state;
+    if (!isBuilt(st, 'workyard')) return;
+    st.foremanTimer = (st.foremanTimer ?? LABOR.foreman.everySec) - dt;
+    if (st.foremanTimer > 0) return;
+    st.foremanTimer = LABOR.foreman.everySec;
+    const working = st.monsters.filter((m) => m.phase === 'working' && m.bankrupt === true && m.labor !== null && m.labor !== undefined);
+    if (working.length === 0) return;
+    const m = this.rng.weighted(working.map((w) => [w, 1.2 - laborGauge(w)] as const));
+    const lab = m.labor;
+    if (lab === null || lab === undefined) return;
+    this.boostLabor(m, LABOR.foreman.mult, LABOR.foreman.sec);
+    this.emit('foremanCheer', { id: m.id, facility: lab.facility });
+    if ((m.poseTime ?? 0) <= 0) this.sideReact(m, 'cheered');
+  }
+
+  /**
+   * 빚을 다 갚았다 (forgiven = 반장이 남은 빚 left를 덜어 줌): 어둠이 걷히고 기뻐한 뒤 (relieved) 떠나 단골이 된다 ('다시 일어선 단골').
+   */
+  private relieve(m: Monster, forgiven: boolean, left = 0): void {
+    const st = this.state;
+    this.detach(m);
+    m.bankrupt = false;
+    m.debt = 0;
+    m.labor = null;
+    m.broke = false;
+    m.patience = 0;
+    m.mood = clampMood(Math.max(m.mood, 70));
+    st.debtTotals.relieved += 1;
+    if (forgiven) st.debtTotals.forgiven += 1;
+    this.emit('debtCleared', { id: m.id, forgiven });
+    this.toast(forgiven ? `${josa(displayName(m), '은', '는')} 오래 일해서 반장이 남은 빚 ${left}코인을 덜어 줬어요. 홀가분하게 떠나요.` : `${nameSubject(m)} 빚을 다 갚았어요! 홀가분하게 떠나요.`, 'good', 'debt');
+    this.debtReact(m, forgiven ? 'forgiven' : 'relieved', 'relieved');
+  }
+
+  /** 빚 걸기 판의 선수 자리인가 (밀어내기 = 모래판 자리 0·1, 줄다리기 = 모든 자리). */
+  private debtSeat(b: BoothId, seat: number): boolean {
+    return (DEBT_MATCH.watchOnly as readonly BoothId[]).includes(b) || seat <= 1;
+  }
+
+  /** 빚 걸기 판이 예약된 부스의 선수 자리 (다른 손님이 앉거나 다시 한판 하지 않는다). */
+  private debtHeld(b: BoothId, seat: number): boolean {
+    return this.state.booths[b].group?.debtNext === true && this.debtSeat(b, seat);
+  }
+
+  /** 빚 걸기 판에 부를 수 있는 채무자 (debt.ts debtEligible). */
+  private debtPool(): Monster[] {
+    return this.state.monsters.filter(debtEligible);
+  }
+
+  /**
+   * 빚 걸기 판: DEBT_MATCH.checkSec마다, 부를 수 있는 채무자가 넉넉하면 가끔 (chance) 반장이 부스 하나를 고른다 (부스마다 cooldownSec에 한 번).
+   * 부스가 쉬는 중(판이 쉬고 선수 자리가 빔)이면 바로 연다. 아니면 예약 (GroupState.debtNext): 지금 판이 끝나면 선수 자리를 비워 두었다가 연다
+   * (예약하고 DEBT_MATCH.holdSec 안에 못 열면 그만둔다).
+   */
+  private tickDebtMatches(dt: number): void {
+    const st = this.state;
+    // 예약된 부스: 매 틱 열 수 있는지 본다.
+    for (const b of DEBT_MATCH.booths) {
+      const g = st.booths[b].group;
+      if (g === null || g.debtNext !== true) continue;
+      const pool = this.debtPool();
+      // 줄다리기는 예약 뒤에도 편마다 둘 (tugMin) 모여 있어야 연다.
+      const need = b === 'tug' ? DEBT_MATCH.tugMin : DEBT_MATCH.minDebtors;
+      if (!B.boothOpen(st, b) || pool.length < need || st.time - (st.debtMatchAt[b] ?? 0) > DEBT_MATCH.holdSec) {
+        delete g.debtNext;
+        continue;
+      }
+      if (this.debtReady(b)) this.callDebtMatch(b, pool);
+    }
+    st.debtCheck -= dt;
+    if (st.debtCheck > 0) return;
+    st.debtCheck = DEBT_MATCH.checkSec;
+    const pool = this.debtPool();
+    if (pool.length < DEBT_MATCH.minDebtors) return;
+    // 줄다리기는 편마다 둘이 설 만큼 (DEBT_MATCH.tugMin) 모였을 때만 (멀리 있어 한 짝만 부르기엔 걷는 길이 길다).
+    const free = DEBT_MATCH.booths.filter((b) => {
+      const g = st.booths[b].group;
+      if (b === 'tug' && pool.length < DEBT_MATCH.tugMin) return false;
+      return B.boothOpen(st, b) && g !== null && g.mode !== 'debt' && g.debtNext !== true && st.time - (st.debtMatchAt[b] ?? -Infinity) >= DEBT_MATCH.cooldownSec;
+    });
+    if (free.length === 0 || !this.rng.chance(DEBT_MATCH.chance)) return;
+    const b = this.rng.pick(free);
+    st.debtMatchAt[b] = st.time;
+    if (this.debtReady(b)) {
+      this.callDebtMatch(b, pool);
+      return;
+    }
+    const g = st.booths[b].group;
+    if (g !== null) g.debtNext = true;
+  }
+
+  /** 빚 걸기 판을 지금 열 수 있나: 판이 쉬고 선수 자리가 비었다. */
+  private debtReady(b: GroupBoothId): boolean {
+    const bs = this.state.booths[b];
+    if (bs.group === null || bs.group.phase !== 'idle') return false;
+    for (let i = 0; i < bs.seats.length; i++) if ((bs.seats[i] ?? null) !== null && this.debtSeat(b, i)) return false;
+    return true;
+  }
+
+  /**
+   * 반장이 빚 걸기 판을 연다: 빚이 비슷한 채무자끼리 짝지어 (debt.ts pairDebtors: 줄다리기는 짝마다 홍·청, 편마다 tugSide명까지)
+   * 자리 0부터 앉히러 부른다 ('빚을 걸고 한판!'). 판은 채무자가 다 오면 시작한다.
+   */
+  private callDebtMatch(b: GroupBoothId, pool: readonly Monster[]): void {
+    const st = this.state;
+    const bs = st.booths[b];
+    const g = (bs.group ??= idleGroup());
+    B.fitSeats(st, b);
+    const pairs = b === 'tug' ? Math.min(DEBT_MATCH.tugSide, Math.floor(B.boothSeats(st, b) / 2)) : 1;
+    const picked = pairDebtors(this.rng, pool, pairs);
+    delete g.debtNext;
+    if (picked.length < 2) return;
+    g.phase = 'gathering';
+    g.mode = 'debt';
+    g.debtors = picked.map((m) => m.id);
+    g.countdown = groupGatherSec(b, B.boothStat(st, b, 'pace'));
+    g.elapsed = 0;
+    g.duration = 0;
+    g.participants = [];
+    g.play = null;
+    picked.forEach((m, i) => {
+      this.detach(m);
+      const lab = m.labor;
+      if (lab !== null && lab !== undefined) {
+        lab.match = b;
+        lab.spot = -1;
+        lab.wait = -1;
+        lab.matches = (lab.matches ?? 0) + 1;
+      }
+      bs.seats[i] = m.id;
+      m.booth = b;
+      m.seat = i;
+      this.setPhase(m, 'toSeat');
+      m.path = route(m.pos, B.seatPt(b, i), st.districts, BOOTH_SPOTS[b].front);
+      this.sideReact(m, 'matchCalled');
+    });
+    st.debtMatchAt[b] = st.time;
+    st.debtTotals.matches += 1;
+    this.emit('debtMatchCalled', { booth: b, debtors: g.debtors.slice() });
+    this.toast(`일터 반장이 ${BOOTHS[b].name}에서 빚 걸기 판을 열었어요! 빚진 손님들이 자기 빚을 걸고 겨뤄요.`, 'info');
+  }
+
+  /**
+   * 빚 걸기 판 정산 (finishGroup, 참가자마다 roundFinished 전): 채무자 선수마다 이기면 빚 × DEBT_MATCH.winKeep (뒤집기·역전 대박이면 0),
+   * 지면 짝 상대의 (판을 시작할 때) 빚만큼 더 (maxDebt까지). 게이지 분모(labor.total)는 늘어난 빚으로. 알림은 debtSettledNotice.
+   */
+  private settleDebts(b: GroupBoothId, g: GroupState, play: GroupPlay): DebtChange[] {
+    const changes: DebtChange[] = [];
+    g.participants.forEach((e, i) => {
+      const o = play.outcomes[i];
+      const m = this.monster(e.monster);
+      if (e.debt === undefined || o === undefined || m === undefined) return;
+      const stake = e.debt;
+      const won = o.tier === 'win' || o.tier === 'jackpot';
+      const opp = this.debtOpponent(b, g, e);
+      const before = m.debt;
+      const result: DebtChange['result'] = won ? (o.tier === 'jackpot' ? 'cleared' : 'halved') : 'added';
+      const after = result === 'cleared' ? 0 : result === 'halved' ? Math.round(stake * DEBT_MATCH.winKeep) : Math.min(DEBT_MATCH.maxDebt, Math.max(stake, stake + (opp?.debt ?? 0)));
+      m.debt = Math.max(0, after);
+      const lab = m.labor;
+      if (lab !== null && lab !== undefined) {
+        lab.progress = 0;
+        if (m.debt > lab.total) lab.total = m.debt;
+      }
+      changes.push({ id: m.id, before, after: m.debt, tier: o.tier, opponent: opp?.monster ?? null, result });
+    });
+    return changes;
+  }
+
+  /**
+   * 빚 걸기 판 정산 알림: debtSettled 이벤트와 짧은 토스트 ('빚 걸기 판 끝! 말랑 빚 반으로 · 호떡 빚이 늘었어요', 줄다리기는 편마다).
+   * 숫자는 부스 패널·확대 화면 결과판에 있다 (그 부스 패널이 열려 있으면 UI가 토스트를 건너뛴다).
+   */
+  private debtSettledNotice(b: GroupBoothId, changes: DebtChange[]): void {
+    this.emit('debtSettled', { booth: b, changes });
+    const word = (cs: readonly DebtChange[]): string => (cs.every((c) => c.result === 'cleared') ? '빚이 사라졌어요' : cs.some((c) => c.result === 'added') ? '빚이 늘었어요' : '빚 반으로');
+    const parts: string[] = [];
+    if (b === 'tug') {
+      const g = this.state.booths[b].group;
+      for (const side of [0, 1]) {
+        const cs = changes.filter((c) => g?.participants.find((e) => e.monster === c.id)?.pick === side);
+        if (cs.length > 0) parts.push(`${SIDES[side]?.name ?? ''} 편 ${word(cs)}`);
+      }
+    } else {
+      for (const c of changes) {
+        const m = this.monster(c.id);
+        if (m !== undefined) parts.push(`${m.nickname} ${word([c])}`);
+      }
+    }
+    this.toast(`빚 걸기 판 끝! ${parts.join(' · ')}`, 'info', undefined, b);
+  }
+
+  /** 빚 걸기 판의 상대 채무자 (밀어내기 = 다른 선수, 줄다리기 = 짝지은 상대 편 선수: 자리 2k ↔ 2k+1). */
+  private debtOpponent(b: GroupBoothId, g: GroupState, e: GroupEntry): GroupEntry | undefined {
+    if (b === 'tug') return g.participants.find((x) => x !== e && x.debt !== undefined && x.seat === (e.seat ^ 1));
+    return g.participants.find((x) => x !== e && x.debt !== undefined && x.role === 'player');
+  }
+
+  /**
+   * 개발용 (주소 ?match=부스, ?debtors=N과 같이): 반장이 지금 그 부스에 빚 걸기 판을 연다 (쉬고 있으면 바로, 아니면 예약).
+   * 부스가 닫혔거나 부를 채무자가 모자라면 (줄다리기는 tugMin) false.
+   */
+  devDebtMatch(b: GroupBoothId): boolean {
+    const st = this.state;
+    const g = st.booths[b].group;
+    const pool = this.debtPool();
+    if (!B.boothOpen(st, b) || g === null || pool.length < (b === 'tug' ? DEBT_MATCH.tugMin : DEBT_MATCH.minDebtors)) return false;
+    st.debtMatchAt[b] = st.time;
+    if (this.debtReady(b)) this.callDebtMatch(b, pool);
+    else g.debtNext = true;
+    return true;
+  }
+
+  /**
+   * 개발용 (주소 ?debtors=N, sim-check): 손님 id를 빚 debt (DEBT_MATCH.maxDebt까지)로 바로 파산시켜 일터로 보낸다 (일터가 없으면 아무것도 안 한다).
+   * 파산 반응 없이 곧장 걸어간다.
+   */
+  devBankrupt(id: MonsterId, debt: number): boolean {
+    const m = this.monster(id);
+    if (m === undefined || !isBuilt(this.state, 'workyard')) return false;
+    this.detach(m);
+    m.debt = Math.max(1, Math.min(DEBT_MATCH.maxDebt, Math.round(debt)));
+    // 진짜 파산처럼 지갑은 비운다 (개발용이라 금고로 보내지는 않는다).
+    m.wallet = 0;
+    m.bankrupt = true;
+    m.wasBankrupt = true;
+    m.mood = Math.min(m.mood, LABOR.mood);
+    m.labor = this.newLabor(m.debt);
+    this.state.debtTotals.bankrupt += 1;
+    this.emit('bankrupt', { id: m.id, debt: m.debt, paid: 0 });
+    this.goWork(m);
+    return true;
+  }
+
   // ── 촌장의 행동 ─────────────────────────────────────────────────────
 
   cheer(id: MonsterId): Result {
@@ -1359,6 +2193,8 @@ export class Sim implements SimApi {
     if (m.cheerCooldown > 0) return fail('응원은 조금 있다가 다시 할 수 있어요.');
     m.mood = clampMood(m.mood + MOOD.cheerTap);
     m.cheerCooldown = MOOD.cheerCooldownSec;
+    // 일하는 채무자: 잠깐 빨라진다.
+    this.boostLabor(m, LABOR.cheerMult, LABOR.cheerSec);
     this.emit('monsterCheered', { id, by: 'tap' });
     return OK;
   }
@@ -1375,6 +2211,8 @@ export class Sim implements SimApi {
     m.mood = clampMood(m.mood + (g.mood ?? 0) * (foodie ? TUNE.foodieSnack : 1));
     m.patience += (g.patience ?? 0) + (foodie ? 1 : 0);
     m.snacked = true;
+    // 일하는 채무자: 한동안 빨라진다.
+    this.boostLabor(m, LABOR.snackMult, LABOR.snackSec);
     const reaction = snackReaction(this.rng, m);
     this.recordDex(m, reaction.label);
     this.emit('itemsChanged', {});
@@ -1409,12 +2247,16 @@ export class Sim implements SimApi {
     const st = this.state;
     const cost = nextBuildingCost(st, id);
     if (cost === null) return fail('이미 최고 레벨이에요.');
+    const lock = this.buildingLockReason(id);
+    if (lock !== null) return fail(lock);
     const why = missingReason(st, cost);
     if (why !== null) return fail(why);
     this.spend(cost, BUILDING_SPOTS[id]);
     st.buildings[id].level += 1;
     const level = st.buildings[id].level;
     this.emit('buildingUpgraded', { id, level });
+    // 처음에 없던 건물 (전당포·은행·일터)을 지었다.
+    if (level === 1 && BUILD_HALL[id] !== undefined) this.toast(`${josa(BUILDINGS[id].name, '을', '를')} 지었어요!`, 'good');
     if (id === 'hall') this.onHallLevel(level);
     if (id === 'office') {
       fillCandidates(this.rng, st, officeCandidates(st), false);

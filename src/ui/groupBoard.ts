@@ -2,13 +2,14 @@
 // 상태 줄(단계·남은 초·지금 판 모습, [지도] 버튼) → 고른 것 판(놀이마다: 선수 넷 순위, 홍청 대결과 힘 막대, 두 편과 밧줄, 연 넷, 판 자리 여섯)
 // → 지난 판 (모이는 중에) → 참가자 목록 (고른 것·하는 일·건 코인, 끝나면 결과와 받은 코인).
 // 구조는 BoothInfo.sig가 바뀔 때(단계·참가자) 다시 짓고, 그 사이 움직임(순위·막대·연·보물)은 live(4Hz)로 고친다.
-// 지난 판은 GroupResults가 sim 이벤트(groupFinished·roundFinished·groupCancelled)를 들어 부스마다 기억한다 (패널이 닫혀 있어도).
+// 지난 판은 GroupResults가 sim 이벤트(groupFinished·roundFinished·groupCancelled·debtSettled)를 들어 부스마다 기억한다 (패널이 닫혀 있어도).
+// 빚 걸기 판 (넷째 묶음, 줄다리기·밀어내기): 상태 줄 '빚 걸기', 채무자 선수마다 건 빚, 끝나면 빚이 어떻게 바뀌었나 (52→26).
 
 import { boothDef, isGroupBooth, SIDES, SPECIES, TUG, type GroupBoothId, type SpeciesId } from '../data/defs.ts';
 import type { SimApi } from '../sim/api.ts';
 import { livePlay } from '../sim/group/index.ts';
 import { josa } from '../sim/text.ts';
-import type { GroupEntry, GroupPlay, GroupRole, GroupState, Monster, MonsterId, Pose } from '../sim/types.ts';
+import type { DebtChange, GroupEntry, GroupPlay, GroupRole, GroupState, Monster, MonsterId, Pose } from '../sim/types.ts';
 import { btn, fmt, h, setText } from './dom.ts';
 import {
   chestPlace,
@@ -50,6 +51,15 @@ export interface ResultRow {
   readonly cls: string;
   /** 받은 코인 (roundFinished가 알려 준다, 모르면 null). */
   payout: number | null;
+  /** 빚 걸기 판의 채무자: 건 빚 (없으면 보통 참가자). */
+  readonly stake?: number;
+  /** 빚 걸기 판 정산 (debtSettled가 알려 준다). */
+  debt?: DebtChange;
+}
+
+/** 빚 변화 글: '빚 52→26' / '빚 0!' (대박) / '빚 40→92'. */
+export function debtChangeText(c: Pick<DebtChange, 'before' | 'after'>): string {
+  return c.after <= 0 ? `빚 ${fmt(c.before)}→0!` : `빚 ${fmt(c.before)}→${fmt(c.after)}`;
 }
 
 export interface PlayResult {
@@ -75,7 +85,8 @@ export class GroupResults {
         const o = play.outcomes[i];
         if (m === undefined || o === undefined) return;
         const tag = outcomeTag(play, p, o);
-        rows.push({ monster: p.monster, nickname: m.nickname, species: m.species, pick: p.pick, role: p.role, text: tag.text, cls: tag.cls, payout: null });
+        const row: ResultRow = { monster: p.monster, nickname: m.nickname, species: m.species, pick: p.pick, role: p.role, text: tag.text, cls: tag.cls, payout: null, ...(p.debt !== undefined ? { stake: p.debt } : {}) };
+        rows.push(row);
       });
       this.plays.set(e.booth, { at: sim.state.time, play, rows });
     });
@@ -85,6 +96,21 @@ export class GroupResults {
       if (row !== undefined) row.payout = e.payout;
     });
     bus.on('groupCancelled', (e) => this.cancels.set(e.booth, { at: sim.state.time, reason: e.reason }));
+    // 빚 걸기 판: groupFinished 바로 뒤에 온다 (그 판의 줄에 붙인다).
+    bus.on('debtSettled', (e) => {
+      const r = this.plays.get(e.booth);
+      if (r === undefined) return;
+      for (const c of e.changes) {
+        const row = r.rows.find((x) => x.monster === c.id);
+        if (row !== undefined) row.debt = c;
+      }
+    });
+  }
+
+  /** 이 판(play)에서 손님 id의 빚 변화 (빚 걸기 판이 아니거나 모르면 null). */
+  debtChange(b: GroupBoothId, play: GroupPlay, id: MonsterId): DebtChange | null {
+    const r = this.plays.get(b);
+    return r !== undefined && r.play === play ? (r.rows.find((x) => x.monster === id)?.debt ?? null) : null;
   }
 
   last(b: GroupBoothId): PlayResult | undefined {
@@ -136,6 +162,8 @@ function livePic(sim: SimApi, live: Live, id: MonsterId, cls = '', pose?: () => 
     const c = sim.monster(id);
     if (c === undefined) return;
     setMonsterPic(box, c.species, pose?.() ?? c.pose, name);
+    // 파산한 채무자 (빚 걸기 판): 판 중에도 어두운 모습 그대로.
+    box.classList.toggle('debt', c.bankrupt === true);
   });
   return box;
 }
@@ -198,6 +226,7 @@ export class GroupSection {
     const el = h('div', `mpv-race-st ${this.g?.phase ?? 'idle'}`, flag, h('div', 'mpv-grow', title, sub), watch);
     this.live.add(() => {
       const cur = this.sim.state.booths[b];
+      el.classList.toggle('debt', cur.group?.mode === 'debt');
       const missing = boothDef(b).roles.filter((r, i) => r.optional !== true && (cur.staff[i] ?? null) === null).map((r) => r.name);
       const t = phaseText(b, cur.group, this.sim.boothOpen(b), missing);
       setText(flag, t.flag);
@@ -256,27 +285,44 @@ export class GroupSection {
     return grid;
   }
 
-  /** 씨름: 홍 선수 vs 청 선수 (구경 응원 수), 진행 중·끝나면 미는 힘 막대. 끝나면 진 선수는 벌러덩. */
+  /**
+   * 씨름: 홍 선수 vs 청 선수 (구경 응원 수), 진행 중·끝나면 미는 힘 막대. 끝나면 진 선수는 벌러덩.
+   * 빚 걸기 판이면 선수는 불린 채무자 (자리로 오는 중이어도 보인다)와 건 빚, 끝나면 빚 변화.
+   */
   private duelBoard(): HTMLElement[] {
     const es = this.entries;
-    const play = livePlay(this.g);
+    const g = this.g;
+    const play = livePlay(g);
     const winner = play?.kind === 'ssireum' ? play.winner : -1;
-    const done = this.g?.phase === 'done';
+    const done = g?.phase === 'done';
+    const debt = g?.mode === 'debt';
     const sides = SIDES.map((s, side) => {
       const player = es.find((e) => e.role === 'player' && e.pick === side);
       const fans = es.filter((e) => e.role !== 'player' && e.pick === side).length;
       const res = done && winner >= 0 ? (winner === side ? 'win' : 'lose') : '';
       const color = pickInfo('ssireum', side).color;
       const pose = (): Pose | null => (res === 'win' ? 'joy' : res === 'lose' ? 'sad' : null);
-      const face = player === undefined ? null : livePic(this.sim, this.live, player.monster, 'mon', pose);
-      const m = player === undefined ? undefined : this.sim.monster(player.monster);
+      // 빚 걸기 판: 자리 0·1 = 홍·청 채무자 (debtors[자리]).
+      const who = player?.monster ?? (debt ? (g?.debtors?.[side] ?? null) : null);
+      const face = who === null ? null : livePic(this.sim, this.live, who, 'mon', pose);
+      const m = who === null ? undefined : this.sim.monster(who);
+      const small = h('small', null, `응원 ${fans}`);
+      if (debt) {
+        const fan = fans > 0 ? ` · 응원 ${fans}` : '';
+        this.live.add(() => {
+          const c = play !== null && who !== null ? this.results.debtChange(this.b, play, who) : null;
+          // 자리로 오는 중이면 (아직 참가 전) 지금 빚을 건 빚으로 (확대 화면 발밑 표와 같은 값).
+          const coming = who === null ? undefined : this.sim.monster(who);
+          setText(small, c !== null ? debtChangeText(c) : player?.debt !== undefined ? `빚 ${fmt(player.debt)} 걸기${fan}` : coming !== undefined ? `빚 ${fmt(coming.debt)} · 오는 중${fan}` : `오는 중${fan}`);
+        });
+      }
       const card = h(
         'div',
-        `mpv-side ${res}`.trim(),
+        `mpv-side ${res}${debt ? ' debt' : ''}`.trim(),
         h('span', 'tag', `${s.name} 선수`),
         face ?? h('span', 'mpv-pic mon empty', '?'),
         h('b', null, m?.nickname ?? '기다리는 중'),
-        h('small', null, `응원 ${fans}`),
+        small,
         res === 'win' ? h('span', 'ribbon', play?.kind === 'ssireum' && play.flip ? '뒤집기!' : '승리!') : null,
       );
       card.style.setProperty('--side', color);
@@ -308,31 +354,51 @@ export class GroupSection {
     return el;
   }
 
-  /** 줄다리기: 홍 편·청 편 손님 (모자란 자리는 빈칸), 진행 중·끝나면 밧줄 가운데 리본. */
+  /**
+   * 줄다리기: 홍 편·청 편 손님 (모자란 자리는 빈칸), 진행 중·끝나면 밧줄 가운데 리본.
+   * 빚 걸기 판이면 불린 채무자 (자리 짝수 홍·홀수 청, 오는 중이어도)와 얼굴 아래 건 빚, 끝나면 빚 변화.
+   */
   private tugBoard(): HTMLElement[] {
     const es = this.entries;
-    const play = livePlay(this.g);
-    const done = this.g?.phase === 'done';
+    const g = this.g;
+    const play = livePlay(g);
+    const done = g?.phase === 'done';
+    const debt = g?.mode === 'debt';
     const winner = play?.kind === 'tug' ? play.winner : -1;
+    const called = debt ? (g?.debtors ?? []).map((id, seat) => ({ id, side: seat % 2 })).filter((x) => !es.some((e) => e.monster === x.id)) : [];
     const counts = sideCounts(es);
-    const per = Math.max(TUG.minSide, counts[0], counts[1]);
+    const per = debt ? 0 : Math.max(TUG.minSide, counts[0], counts[1]);
     const teams = SIDES.map((s, side) => {
       const mine = es.filter((e) => (e.pick === 1 ? 1 : 0) === side);
+      const coming = called.filter((x) => x.side === side).map((x) => x.id);
       const res = done && winner >= 0 ? (winner === side ? 'win' : 'lose') : '';
       const pose = (): Pose | null => (res === 'win' ? 'joy' : res === 'lose' ? 'agony' : null);
       const faces = h('div', 'faces');
-      for (const e of mine) {
-        const f = livePic(this.sim, this.live, e.monster, 'mon', pose);
-        const m = this.sim.monster(e.monster);
-        if (f === null || m === undefined) continue;
-        const cell = h('button', 'face', f);
+      const addFace = (id: MonsterId, e: GroupEntry | null): void => {
+        const f = livePic(this.sim, this.live, id, 'mon', pose);
+        const m = this.sim.monster(id);
+        if (f === null || m === undefined) return;
+        const cell = h('button', debt ? `face debt${e === null ? ' coming' : ''}` : 'face', f);
+        if (debt) {
+          const stake = h('small', 'stake');
+          this.live.add(() => {
+            const c = play !== null ? this.results.debtChange(this.b, play, id) : null;
+            // 오는 중이면 지금 빚 (흐린 칸, 편 머리에 '오는 중').
+            setText(stake, c !== null ? (c.after <= 0 ? '빚 0!' : `${fmt(c.before)}→${fmt(c.after)}`) : `빚 ${fmt(e?.debt ?? this.sim.monster(id)?.debt ?? 0)}`);
+          });
+          cell.append(stake);
+        }
         cell.type = 'button';
         cell.setAttribute('aria-label', `${m.nickname} 손님 보기`);
         this.tapMonster(cell, m);
         faces.append(cell);
-      }
+      };
+      for (const e of mine) addFace(e.monster, e);
+      for (const id of coming) addFace(id, null);
       for (let i = mine.length; i < per; i++) faces.append(h('span', 'face empty', '+'));
-      const card = h('div', `mpv-team ${res}`.trim(), h('div', 'head', h('span', 'tag', `${s.name} 편`), h('small', null, `${mine.length}명`), res === 'win' ? h('span', 'ribbon', play?.kind === 'tug' && play.comeback ? '역전승!' : '승리!') : null), faces);
+      const stakes = debt ? mine.reduce((n, e) => n + (e.debt ?? 0), 0) : 0;
+      const headNote = debt ? `${mine.length + coming.length}명${coming.length > 0 ? ` · ${coming.length}명 오는 중` : stakes > 0 ? ` · 빚 ${fmt(stakes)}` : ''}` : `${mine.length}명`;
+      const card = h('div', `mpv-team ${res}`.trim(), h('div', 'head', h('span', 'tag', `${s.name} 편`), h('small', null, headNote), res === 'win' ? h('span', 'ribbon', play?.kind === 'tug' && play.comeback ? '역전승!' : '승리!') : null), faces);
       card.style.setProperty('--side', pickInfo('tug', side).color);
       return card;
     });
@@ -489,6 +555,7 @@ export class GroupSection {
         h('span', 'nm', row.nickname),
         h('span', 'res', row.text),
         row.payout !== null && row.payout > 0 ? h('span', 'pay', itemIcon('coin'), `+${fmt(row.payout)}`) : null,
+        row.debt !== undefined ? h('span', row.debt.after < row.debt.before ? 'mpv-chip debt ok' : 'mpv-chip debt', debtChangeText(row.debt)) : null,
       );
       chip.type = 'button';
       chip.setAttribute('aria-label', `${row.nickname} 손님 보기`);
@@ -499,7 +566,8 @@ export class GroupSection {
       });
       rows.append(chip);
     }
-    return h('div', 'mpv-last', h('div', 'head', h('span', 'mpv-tag', `지난 ${R}`), h('div', 'mpv-grow', h('b', null, head.title), when)), rows);
+    const debtPlay = r.rows.some((x) => x.stake !== undefined);
+    return h('div', debtPlay ? 'mpv-last debt' : 'mpv-last', h('div', 'head', h('span', 'mpv-tag', debtPlay ? '지난 빚 걸기 판' : `지난 ${R}`), h('div', 'mpv-grow', h('b', null, head.title), when)), rows);
   }
 
   // ── 참가자 목록 ──
@@ -555,6 +623,18 @@ export class GroupSection {
           const v = this.results.payout(b, play, e.monster);
           setText(pay, v !== null && v > 0 ? ` +${fmt(v)}` : '');
         });
+        // 빚 걸기 판의 채무자: 빚 변화 (52→26)를 결과 옆에.
+        if (e.debt !== undefined) {
+          const dv = h('span', 'mpv-chip debt');
+          this.live.add(() => {
+            const c = this.results.debtChange(b, play, e.monster);
+            setText(dv, c !== null ? debtChangeText(c) : `빚 ${fmt(e.debt ?? 0)}`);
+            dv.classList.toggle('ok', c !== null && c.after < c.before);
+          });
+          right = h('span', 'mpv-res-wrap', right, dv);
+        }
+      } else if (e.debt !== undefined) {
+        right = h('span', 'mpv-chip debt', `빚 ${fmt(e.debt)} 걸기`);
       } else {
         right = h('span', 'mpv-chip bet', itemIcon('coin'), fmt(e.bet));
       }
